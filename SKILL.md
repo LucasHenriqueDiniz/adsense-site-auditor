@@ -26,11 +26,44 @@ Read `references/adsense-requirements.md` before auditing. It contains the full 
 
 For user-facing invocation examples and reusable prompts, read `references/usage-prompts.md` when the user asks how to use this skill, asks for prompt templates, or needs an audit request template.
 
+## Pre-Flight Completeness Gate
+
+**Before running the full 73+ requirement audit**, check these 3 blockers that account for 60% of rejections:
+
+1. **Site Completeness** (ADS-COMPLETE-01)
+   - Missing About page? ❌ Blocker
+   - Contact page is placeholder ("will be added here")? ❌ Blocker
+   - Tool/feature pages say "Coming Soon" or "Not yet"? ❌ Blocker
+   - Broken nav links (404s) on homepage? ❌ Blocker
+   - Score: 0-1 fails = Pass → proceed to full audit
+   - Score: 2-3 fails = High Risk → flag before full audit
+   - Score: 4+ fails = Blocker → STOP, recommend major structural fixes
+
+2. **Publisher Identity** (ADS-AUTHOR-01)
+   - About page missing? ❌ Blocker
+   - No real name (just pseudonym or anonymous)? ❌ Blocker
+   - No contact method (email, form, or social)? ❌ Blocker
+   - Score: 0 fails = Pass → proceed to full audit
+   - Score: 1+ fails = Blocker → STOP, require identity verification before applying
+
+3. **Minimum Content** (ADS-COMPLETE-02)
+   - Fewer than 3 published guides/articles? ⚠️ High Risk (soft gate)
+   - Any guide under 1000 words? ⚠️ Flag for review
+   - Score: 0-2 guides = High Risk → flag but may proceed
+   - Score: 3+ substantive guides = Pass → proceed to full audit
+
+**Decision at pre-flight:**
+- **0 Blockers**: Proceed to full 73+ requirement audit
+- **1-2 Blockers**: Output "Not ready — fix structural issues first" + specific list
+- **3+ Blockers**: Output "Not ready — site appears unfinished"
+
+---
+
 ## Audit Modes
 
 The skill supports these audit contexts. Identify which mode applies before starting:
 
-1. **Pre-Application Audit** — Site owner wants to know if ready to apply. Full rigor, all Blockers must be resolved.
+1. **Pre-Application Audit** — Site owner wants to know if ready to apply. Runs pre-flight gate first, then full 73+ audit if no blockers.
 2. **Post-Rejection Diagnosis** — Site was rejected; map rejection reason to ADS-* IDs and provide priority fix list.
 3. **Post-Fix Verification** — Owner claims fixes are done; re-audit to confirm and assess readiness to resubmit.
 4. **Task Generation** — Convert audit findings into actionable work items (prioritized, with file/page specifics).

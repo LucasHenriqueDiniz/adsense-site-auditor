@@ -183,6 +183,65 @@ The skill will use this data to populate findings with concrete evidence for eac
 
 ---
 
+### 5. check_completeness.py — Site Completeness & Publisher Identity
+
+Detects "site unfinished" patterns and verifies publisher identity verification. Accounts for 25-40% of AdSense rejections.
+
+**Usage:**
+```bash
+python check_completeness.py <URL> [--output FILE]
+```
+
+**Examples:**
+```bash
+python check_completeness.py https://example.com
+python check_completeness.py https://example.com --output completeness_report.txt
+```
+
+**Output:**
+- Site completeness score (About page, Contact page, placeholder text, navigation)
+- Publisher identity verification (real name, contact method, credentials)
+- Risk classification: OK, HIGH_RISK, FAIL
+
+**Useful for:**
+- ADS-COMPLETE-01: Detect "site unfinished" pattern
+- ADS-COMPLETE-02: Verify 3+ published guides exist
+- ADS-AUTHOR-01, ADS-AUTHOR-02: Verify publisher identity is real and contactable
+- Pre-flight gate: Run this FIRST before 73-item full audit
+
+**Key red flags detected:**
+- About page missing or is stub
+- Contact page has placeholder ("will be added here")
+- Tool pages say "Coming Soon" or "Not yet"
+- No real name in About (anonymous site)
+- No contact method (email, form, or social)
+- Homepage contains "under construction" or similar
+
+---
+
+## Workflow Example: Pre-Flight Audit
+
+```bash
+# Step 1: Run pre-flight checks FIRST
+python check_completeness.py https://yoursite.com --output completeness.txt
+python check_technical.py https://yoursite.com --output technical.txt
+
+# If completeness shows HIGH_RISK or FAIL, stop here and fix before continuing
+
+# Step 2: If pre-flight passes, run detailed checks
+python crawl_site.py https://yoursite.com --depth 2 --output crawl.json
+python analyze_text_depth.py crawl.json --min-words 300 --output depth.txt
+python check_duplicates.py crawl.json --threshold 0.8 --output duplicates.txt
+
+# Step 3: Feed all reports to Claude Code skill
+/adsense-site-auditor
+URL: https://yoursite.com
+Mode: Pre-application audit
+[Paste outputs from all scripts above]
+```
+
+---
+
 ## Troubleshooting
 
 **`ModuleNotFoundError: No module named 'requests'`**

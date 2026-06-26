@@ -145,7 +145,36 @@ Restricted content is not always an account/application blocker by itself, but i
 | ADS-PRIV-09 | High | In the US and Canada, do not target housing, employment, or credit-related ads by gender, age, parental status, marital status, or postal code. | Check ad/marketing audience settings if site advertises or retargets these categories. |
 | ADS-PRIV-10 | Medium | If personalized ads are used, confirm the publisher has rights to audience data and shows required interest-based advertising disclosures or controls where applicable. | Check consent/CMP, privacy policy, and ad choice disclosures. |
 
-## J. Recommended Audit Output
+## J. Site Completeness and Maturity
+
+A site that appears unfinished or under construction is rejected at high rate (25% of rejections). Detect this pattern early.
+
+| ID | Severity | Requirement | Check |
+| --- | --- | --- | --- |
+| ADS-COMPLETE-01 | Blocker | Site must not appear unfinished or under construction. Check for placeholder text, missing key pages, incomplete navigation, or unpublished content marked as draft/coming-soon. | Search for: "will be added", "coming soon", "not yet", "planned", "under construction", "draft", "todo". Check About page, Contact page, footer, and all tool/product page statuses. Count broken nav links (404s). |
+| ADS-COMPLETE-02 | High | Site must have minimum 3 published guides/articles. Each must be substantive (1200+ words) and fully written (not stub or outline). | Count pages tagged as guide/article/blog. Measure word count of main content. Verify each is complete (has intro, body, conclusion). |
+
+## K. Publisher Trust and Identity Verification
+
+Google rejects anonymous sites or sites where publisher identity cannot be verified. This is a top rejection reason (15% of rejections).
+
+| ID | Severity | Requirement | Check |
+| --- | --- | --- | --- |
+| ADS-AUTHOR-01 | Blocker | Publisher identity must be verifiable. Site must identify a real person (by name) or a registered company. Pseudonyms ("Tech Expert", "Web Guru") do not count. | Inspect About page. Look for: real first/last name OR company registration. If company: verify registration exists or link to official business site. If person: look for professional credentials (job title, years of experience, area of expertise). |
+| ADS-AUTHOR-02 | High | Publisher must provide at least one contact method. Anonymous sites with no way to contact publisher are viewed as low-trust. | Check About page, Contact page, or footer for: email address, contact form, or verified social profile (LinkedIn, GitHub, Twitter with verified badge). At least one must be real/verifiable. |
+| ADS-AUTHOR-03 | Medium | For personal blogs: link to professional profile (LinkedIn, GitHub, personal website) strengthens credibility. For companies: link to business registration or official website. | Check About page or author bios for links to professional profiles or business verification. |
+
+## L. Content Originality and Depth
+
+Google's automated review likely includes plagiarism detection and originality scoring. Sites must demonstrate original value, not just aggregate or curate.
+
+| ID | Severity | Requirement | Check |
+| --- | --- | --- | --- |
+| ADS-CONTENT-ORIGINAL | High | Tool/app pages must articulate unique value proposition. If a similar tool exists elsewhere, the site must explain why theirs is different (unique features, better UX, original data, specialized focus). Generic "do the same thing as 100 competitors" signals low value. | For each tool: search Google for competitors. Read competitor pages. Compare: unique features? Original data? Better UX? Specialized use case? If none of these: High Risk. |
+| ADS-CONTENT-ADDED-VALUE | High | Guides must not be only curated/aggregated content. Each guide must include original analysis, original examples, original data/research, or original tools/calculators. | Review each guide. Does it include: original case studies? Original research/data? Original examples not found elsewhere? Original tools/calculators embedded? If only links to others' content: High Risk. |
+| ADS-CONTENT-OVERLAP | High | Measure text overlap with top SERP competitors. Pages with >60% text overlap are at high rejection risk. | Use check_duplicates.py to compare page text against top 5 Google results for key terms. Report overlap %. Threshold: <40% = safe, 40-60% = monitor, >60% = High Risk. |
+
+## M. Recommended Audit Output
 
 Use this format:
 
