@@ -16,7 +16,7 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Os scripts vivem em scripts/ e são importados pelos testes como módulos.
-pythonpath = ["scripts"]
+pythonpath = ["scripts", "."]
 
 [tool.ruff]
 line-length = 100
