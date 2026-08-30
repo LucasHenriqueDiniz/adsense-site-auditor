@@ -5,7 +5,8 @@ substring no arquivo inteiro e reprovava um robots.txt saudável.
 """
 
 import pytest
-from robots import (
+
+from adsense_checks.robots import (
     ADSBOT_CRAWLER,
     ADSENSE_CRAWLER,
     INDEX_CRAWLER,

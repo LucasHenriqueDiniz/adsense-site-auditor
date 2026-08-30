@@ -11,6 +11,7 @@ A check in here must be able to fail. If a condition cannot be observed, it
 returns ERROR or MISSING and says so — never OK.
 """
 
+from adsense_checks.robots import is_allowed, parse_robots
 from adsense_checks.status import Status, escalate, worst
 
-__all__ = ["Status", "escalate", "worst"]
+__all__ = ["Status", "escalate", "worst", "parse_robots", "is_allowed"]

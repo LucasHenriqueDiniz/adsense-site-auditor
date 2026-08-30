@@ -28,7 +28,10 @@ For user-facing invocation examples and reusable prompts, read `references/usage
 
 ## Pre-Flight Completeness Gate
 
-**Before running the full 73+ requirement audit**, check these 3 blockers that account for 60% of rejections:
+**Before running the full requirement audit**, check these three blockers. They
+are ordered first because they are cheap and commonly decisive, not because of
+any measured share of rejections — Google publishes none, and the figure that
+stood here had no source.
 
 1. **Site Completeness** (ADS-COMPLETE-01)
    - Missing About page? ❌ Blocker
@@ -53,7 +56,7 @@ For user-facing invocation examples and reusable prompts, read `references/usage
    - Score: 3+ substantive guides = Pass → proceed to full audit
 
 **Decision at pre-flight:**
-- **0 Blockers**: Proceed to full 73+ requirement audit
+- **0 Blockers**: Proceed to the full requirement audit
 - **1-2 Blockers**: Output "Not ready — fix structural issues first" + specific list
 - **3+ Blockers**: Output "Not ready — site appears unfinished"
 

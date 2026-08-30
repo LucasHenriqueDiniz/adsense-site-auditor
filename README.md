@@ -6,7 +6,10 @@ Originally based on [yantoumu/adsense-site-auditor-skill](https://github.com/yan
 
 ## What it does
 
-- Checks **73 official requirement IDs** sourced from AdSense Help, AdSense Program Policies, Google Publisher Policies, and Google Publisher Restrictions
+- Checks **81 requirement IDs**. Sections A-I map to AdSense Help, the AdSense
+  Program Policies, the Google Publisher Policies and the Publisher Restrictions,
+  with source URLs in the reference. Sections J-L are inference from those
+  policies rather than separate documented rules, and say so.
 - Forces every item to a `Pass` / `Fail` / `Unknown` / `N/A` verdict with evidence — no vague summaries
 - Classifies findings by severity: `Blocker`, `High`, `Medium`
 - Ships Python scripts to crawl a site, measure word count, detect near-duplicate pages, and check crawlability — so findings cite real numbers instead of impressions
@@ -94,7 +97,7 @@ what would be needed to measure it.
 ├── TESTING.md                        What is tested, what is not, how to measure it
 │
 ├── references/
-│   ├── adsense-requirements.md       73+ requirement IDs, severity, source URLs
+│   ├── adsense-requirements.md       81 requirement IDs, decidability, severity, sources
 │   │                                 (NEW: Completeness, Publisher Identity, Content Depth)
 │   ├── tool-site-rubric.md           Quality checks for utility/calculator sites
 │   ├── quiz-site-rubric.md           Quality checks for quiz/entertainment sites

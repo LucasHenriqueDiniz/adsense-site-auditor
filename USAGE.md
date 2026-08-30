@@ -293,16 +293,32 @@ The skill produces an exhaustive report:
 - ADS-UX-05: [issue]. Evidence: [page]. Fix: [action].
 
 **Exhaustive Checklist**
-| ID | Status | Evidence | Next Action |
-| --- | --- | --- | --- |
-| ADS-ELIG-01 | Pass | Owner confirmed eligible | Ready to apply |
-| ADS-CONTENT-02 | Fail | [URL] is 95% copied | Rewrite with original analysis |
-| ... | ... | ... | ... |
+| ID | Decidability | Status | Evidence | Next Action |
+| --- | --- | --- | --- | --- |
+| ADS-ELIG-01 | owner | Pass | Owner confirmed eligible | Ready to apply |
+| ADS-CONTENT-02 | judgement | Fail | [URL] is 95% copied | Rewrite with original analysis |
+| ADS-CRAWL-02 | auto | Pass | robots.txt allows Mediapartners-Google at / | none |
+| ... | ... | ... | ... | ... |
 
 **Completeness Check**
-- Total ADS-* IDs in reference: 73
-- IDs in report: 73
-- Missing: none ✓
+
+Count the IDs in `references/adsense-requirements.md` at the time you run the
+audit and paste the real numbers. Do not copy the figures below — this block
+used to hardcode "73 / 73 / Missing: none ✓" while the reference held 81, so the
+gate certified itself as complete with eight requirements missing.
+
+- Total ADS-* IDs in reference: `<count them>`
+- IDs in report: `<count them>`
+- Missing: `<list them, or "none">`
+
+**Verified vs asserted**
+
+Break the passes down by decidability, because "Ready" means something different
+for each and a single number hides it:
+
+- `auto` observed by a check that ran: `<n>` of 35
+- `judgement` reviewed with evidence: `<n>` of 34
+- `owner` attested by the account holder: `<n>` of 12
 ```
 
 ---
