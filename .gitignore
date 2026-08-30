@@ -1,6 +1,12 @@
 .DS_Store
 __pycache__/
 *.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Ambiente local. As dependências ficam declaradas no pyproject.toml; o venv em si
+# é reconstruível com `uv venv && uv pip install requests pytest ruff`.
+.venv/
 
 # Script output artifacts (crawl reports, analysis output)
 crawl*.json
@@ -9,4 +15,3 @@ crawl*.json
 depth*.txt
 technical*.txt
 dup*.txt
-
