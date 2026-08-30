@@ -56,8 +56,26 @@ def test_textos_identicos_sao_1_e_disjuntos_sao_0():
 
 
 def test_similaridade_e_simetrica():
-    a, b = janela(1, 100), janela(21, 100)
-    assert similarity(a, b) == similarity(b, a)
+    """Simetria só é testável com textos de TAMANHOS diferentes.
+
+    A versão anterior comparava janela(1,100) com janela(21,100): mesmo número
+    de shingles, denominadores iguais, e nesse caso até uma métrica assimétrica
+    como containment devolve o mesmo valor nos dois sentidos. Trocar Jaccard por
+    containment sobrevivia à suíte inteira.
+
+    Com tamanhos desiguais a diferença aparece: containment(curto, longo) tende a
+    1.0 enquanto containment(longo, curto) tende a 0.1, porque cada um divide por
+    um denominador diferente. Jaccard divide pela união e não tem lado.
+    """
+    curto, longo = janela(1, 40), janela(1, 400)
+    assert similarity(curto, longo) == similarity(longo, curto)
+
+    # E o valor não pode ser o de containment em nenhuma das direções: o curto
+    # está inteiramente contido no longo, então containment(curto, longo) == 1.0.
+    assert similarity(curto, longo) < 0.5, (
+        "similaridade alta demais para dois textos de tamanhos tão diferentes: "
+        "parece containment, não Jaccard"
+    )
 
 
 def test_regressao_similaridade_nao_e_deflacionada_por_palavra_frequente():
@@ -225,9 +243,18 @@ def test_regressao_mais_duplicacao_nunca_pontua_menos_que_menos_duplicacao():
 
     # O sinal antigo se inverte: o caso pior tem MENOS grupos que o caso melhor.
     assert len(pior.groups) < len(melhor.groups)
-    # O sinal novo não se inverte.
+    # O sinal novo não se inverte. Este é o assert que mata o indicador antigo —
+    # o de status abaixo NÃO mata, porque os dois casos caem em FAIL e `>=` é
+    # satisfeito por igualdade. Fica registrado para ninguém confiar nele.
     assert pior.duplicate_ratio > melhor.duplicate_ratio
-    assert pior.status >= melhor.status
+
+    # Discriminação de verdade: um caso sem duplicação alguma tem de sair com
+    # status estritamente menor que o caso ruim. Sem isto, `status` poderia ser
+    # constante e a suíte não notaria.
+    limpo = check_duplication({f"/x{i}": janela(3000 + i * 300, 120) for i in range(6)})
+    assert limpo.duplicate_ratio == 0.0
+    assert limpo.status < pior.status
+    assert limpo.status < melhor.status
 
 
 def test_regressao_resumo_nao_rotula_contagem_de_grupos_como_paginas():

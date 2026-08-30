@@ -13,7 +13,6 @@ from http.server import BaseHTTPRequestHandler
 from adsense_checks import crawl as crawl_mod
 from adsense_checks.crawl import (
     DEFAULT_DELAY,
-    DEFAULT_USER_AGENT,
     CheckResult,
     CrawlResult,
     Page,
@@ -26,7 +25,6 @@ from adsense_checks.crawl import (
     parse_html,
     same_site,
 )
-from adsense_checks.http import ADSENSE_UA
 from adsense_checks.status import Status
 
 HTML = {"Content-Type": "text/html; charset=utf-8"}
@@ -398,19 +396,43 @@ def test_delay_de_cortesia_e_o_padrao_e_e_respeitado(server):
     routes["/a"] = (200, HTML, pagina("A"))
     routes["/b"] = (200, HTML, pagina("B"))
 
+    # Sem passar `delay`: o que está sob teste é o PADRÃO. A versão anterior
+    # passava delay=0.05 explícito e só assertava DEFAULT_DELAY > 0, então
+    # trocar o padrão por 0.0 não quebrava nada.
     assert DEFAULT_DELAY > 0  # o crawler antigo disparava sem pausa nenhuma
     inicio = time.monotonic()
-    r = crawl(base + "/", delay=0.05)
+    r = crawl(base + "/")
+    decorrido = time.monotonic() - inicio
     assert len(r.pages) == 3
-    assert time.monotonic() - inicio >= 0.09  # duas pausas entre as três buscas
+    # Três buscas, duas pausas entre elas.
+    minimo = DEFAULT_DELAY * 2 * 0.9
+    assert decorrido >= minimo, (
+        f"crawl levou {decorrido:.3f}s; com DEFAULT_DELAY={DEFAULT_DELAY} "
+        f"esperava ao menos {minimo:.3f}s"
+    )
 
 
 def test_user_agent_padrao_identifica_o_crawler_do_adsense(server):
     """O script forjava um User-Agent de Chrome, o que impede o site de
     identificar e limitar o bot — e pergunta a coisa errada: a auditoria quer
-    saber o que o Mediapartners-Google recebe."""
-    assert DEFAULT_USER_AGENT is ADSENSE_UA
-    assert "Mediapartners-Google" in DEFAULT_USER_AGENT
+    saber o que o Mediapartners-Google recebe.
+
+    A versão anterior deste teste só comparava DEFAULT_USER_AGENT com ADSENSE_UA,
+    duas constantes do mesmo processo. Trocar o padrão de crawl() por um UA de
+    Chrome forjado deixava a suíte inteira verde. Agora a asserção é sobre o que
+    chegou no servidor.
+    """
+    base, routes = server
+    routes["/"] = (200, HTML, pagina("Home"))
+
+    crawl(base + "/")  # sem passar user_agent: é o padrão que está sob teste
+
+    assert routes.received, "o servidor nao recebeu requisicao nenhuma"
+    enviados = {h.get("User-Agent", "") for _m, _p, h in routes.received}
+    assert enviados, "nenhum User-Agent chegou"
+    for ua in enviados:
+        assert "Mediapartners-Google" in ua, f"UA enviado nao identifica o crawler: {ua!r}"
+        assert "Chrome" not in ua, f"UA forjado de navegador: {ua!r}"
 
 
 # --------------------------------------------------------------------------- #
