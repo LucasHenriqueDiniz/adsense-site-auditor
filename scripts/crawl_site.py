@@ -12,13 +12,15 @@ Example:
     python crawl_site.py https://example.com --depth 2 --output crawl_report.txt
 """
 
-import sys
-import requests
-from urllib.parse import urljoin, urlparse
-from collections import deque
 import json
+import sys
+from collections import deque
 from datetime import datetime
 from html.parser import HTMLParser
+from urllib.parse import urljoin, urlparse
+
+import requests
+
 
 class MetaExtractor(HTMLParser):
     """Extract title, meta description, H1 from HTML."""

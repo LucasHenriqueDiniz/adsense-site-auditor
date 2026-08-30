@@ -13,9 +13,11 @@ Example:
 """
 
 import sys
-import requests
-from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
+from urllib.parse import urlparse
+
+import requests
+
 
 class TechnicalChecker:
     def __init__(self, url, timeout=10):
@@ -289,7 +291,7 @@ def main():
     # Save to file
     if output:
         with open(output, 'w', encoding='utf-8') as f:
-            f.write(f"AdSense Technical Check Report\n")
+            f.write("AdSense Technical Check Report\n")
             f.write(f"URL: {url}\n\n")
 
             for check in results:

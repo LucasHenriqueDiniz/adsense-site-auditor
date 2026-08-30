@@ -16,11 +16,12 @@ Example:
     python analyze_text_depth.py https://example.com/article --min-words 500
 """
 
-import sys
 import json
-import requests
+import sys
 from html.parser import HTMLParser
-from urllib.parse import urlparse
+
+import requests
+
 
 class TextExtractor(HTMLParser):
     """Extract visible text from HTML, excluding script, style, and nav elements."""
@@ -116,7 +117,7 @@ def main():
     # Check if target is a file or URL
     if target.endswith('.json'):
         print(f"Loading crawl results from {target}...")
-        with open(target, 'r', encoding='utf-8') as f:
+        with open(target, encoding='utf-8') as f:
             crawl_data = json.load(f)
             urls = [r['url'] for r in crawl_data.get('results', []) if r.get('status') == 200]
     else:
@@ -135,7 +136,7 @@ def main():
     thin_count = sum(1 for r in results if r.get('risk') == 'THIN')
     borderline_count = sum(1 for r in results if r.get('risk') == 'BORDERLINE')
 
-    print(f"\n--- Summary ---")
+    print("\n--- Summary ---")
     print(f"Total: {len(results)} pages")
     print(f"THIN (<{min_words} words): {thin_count} pages")
     print(f"BORDERLINE ({min_words}-{int(min_words*1.5)} words): {borderline_count} pages")

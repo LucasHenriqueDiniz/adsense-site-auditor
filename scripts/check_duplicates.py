@@ -14,11 +14,13 @@ Example:
     python check_duplicates.py crawl_report.json --threshold 0.8 --output dup_report.txt
 """
 
-import sys
-import json
-import requests
-from html.parser import HTMLParser
 import difflib
+import json
+import sys
+from html.parser import HTMLParser
+
+import requests
+
 
 class TextExtractor(HTMLParser):
     """Extract main text from HTML."""
@@ -135,7 +137,7 @@ def main():
     # Load URLs from file or use single URL
     if target.endswith('.json'):
         print(f"Loading crawl results from {target}...")
-        with open(target, 'r', encoding='utf-8') as f:
+        with open(target, encoding='utf-8') as f:
             crawl_data = json.load(f)
             urls = [r['url'] for r in crawl_data.get('results', []) if r.get('status') == 200]
     else:
@@ -159,7 +161,7 @@ def main():
         print(f"⚠️  High duplication risk: {len(duplicates)} of {len(urls)} pages have >80% similar content")
         print("    This may trigger ADS-CONTENT-02 or ADS-CONTENT-08 flags\n")
     else:
-        print(f"✓ Duplication risk appears acceptable\n")
+        print("✓ Duplication risk appears acceptable\n")
 
     # Save to file
     if output:

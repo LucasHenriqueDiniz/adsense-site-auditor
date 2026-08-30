@@ -14,11 +14,12 @@ Example:
 """
 
 import sys
-import requests
-from urllib.parse import urljoin
-from html.parser import HTMLParser
-import json
 from datetime import datetime
+from html.parser import HTMLParser
+from urllib.parse import urljoin
+
+import requests
+
 
 class TextExtractor(HTMLParser):
     """Extract text from HTML, focus on body content."""
@@ -269,7 +270,7 @@ def main():
     # Save to file
     if output:
         with open(output, 'w', encoding='utf-8') as f:
-            f.write(f"AdSense Completeness Check Report\n")
+            f.write("AdSense Completeness Check Report\n")
             f.write(f"URL: {url}\n")
             f.write(f"Date: {datetime.now().isoformat()}\n\n")
 
