@@ -1,186 +1,91 @@
 #!/usr/bin/env python3
-"""
-AdSense Site Auditor: Web Crawler
+from __future__ import annotations
 
-Crawls a website to collect URLs, HTTP status, page titles, meta descriptions,
-and basic content for AdSense audit analysis.
-
-Usage:
-    python crawl_site.py <URL> [--depth N] [--output FILE]
-
-Example:
-    python crawl_site.py https://example.com --depth 2 --output crawl_report.txt
-"""
-
-import json
+import argparse
 import sys
-from collections import deque
-from datetime import datetime
-from html.parser import HTMLParser
-from urllib.parse import urljoin, urlparse
+from pathlib import Path
 
-import requests
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from adsense_checks.crawl import (  # noqa: E402
+    check_pages_reachable,
+    check_redirect_chain,
+    check_session_urls,
+    crawl,
+)
+from adsense_checks.report import Line, exit_code, render  # noqa: E402
+
+__doc__ = """Crawl a site and check reachability, redirects and URL stability.
+
+Serves ADS-CRAWL-01, ADS-CRAWL-04 and ADS-CRAWL-05.
+
+    python scripts/crawl_site.py https://example.com [--depth 2] [--max-pages 50] [-v]
+"""
 
 
-class MetaExtractor(HTMLParser):
-    """Extract title, meta description, H1 from HTML."""
-    def __init__(self):
-        super().__init__()
-        self.title = None
-        self.meta_desc = None
-        self.h1 = None
-        self.in_head = False
-        self.in_title = False
-        self.in_h1 = False
-        self.title_text = []
-        self.h1_text = []
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("url")
+    parser.add_argument("--depth", type=int, default=2)
+    parser.add_argument("--max-pages", type=int, default=50)
+    parser.add_argument("--delay", type=float, default=0.5)
+    parser.add_argument(
+        "--verify-stateless",
+        action="store_true",
+        help="re-request redirecting pages without cookies (one extra request each)",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args()
 
-    def handle_starttag(self, tag, attrs):
-        if tag == 'head':
-            self.in_head = True
-        elif tag == 'title':
-            self.in_title = True
-        elif tag == 'h1':
-            self.in_h1 = True
-        elif tag == 'meta' and self.in_head:
-            attrs_dict = dict(attrs)
-            if attrs_dict.get('name', '').lower() == 'description':
-                self.meta_desc = attrs_dict.get('content', '').strip()
+    result = crawl(args.url, max_depth=args.depth, max_pages=args.max_pages, delay=args.delay)
+    checks = [
+        check_pages_reachable(result),
+        check_redirect_chain(result, verify_stateless=args.verify_stateless),
+        check_session_urls(result),
+    ]
+    # Nomes legíveis; o ID vai na coluna do requisito e não se repete.
+    rotulos = {
+        "ADS-CRAWL-01": "pages reachable",
+        "ADS-CRAWL-04": "redirect chains",
+        "ADS-CRAWL-05": "stable URLs",
+    }
+    lines = []
+    for c in checks:
+        achados = list(c.findings)
+        if not achados:
+            # Um PASS sem evidência não deixa distinguir "observado e correto" de
+            # "nunca rodou", que é o que o relatório antigo escondia.
+            achados = [
+                ", ".join(f"{k}={v}" for k, v in sorted(c.details.items()))
+                or "checked, nothing to report"
+            ]
+        lines.append(
+            Line(
+                rotulos.get(c.requirement, c.requirement),
+                c.status,
+                achados,
+                dict(c.details),
+                c.requirement,
+            )
+        )
+    lines.insert(
+        0,
+        Line(
+            "crawl",
+            result.status,
+            [f"{len(result.pages)} pages fetched, {len(result.html_pages)} readable HTML"]
+            + ([result.stopped_reason] if result.stopped_reason else []),
+        ),
+    )
 
-    def handle_endtag(self, tag):
-        if tag == 'head':
-            self.in_head = False
-        elif tag == 'title':
-            self.in_title = False
-            self.title = ''.join(self.title_text).strip()
-        elif tag == 'h1':
-            self.in_h1 = False
-            self.h1 = ''.join(self.h1_text).strip()
+    text, overall = render(f"Crawl — {args.url}", lines, verbose=args.verbose)
+    print(text)
+    if args.verbose:
+        print()
+        for page in result.pages:
+            print(f"  {page.status_code} {page.final_url}")
+    return exit_code(overall)
 
-    def handle_data(self, data):
-        if self.in_title:
-            self.title_text.append(data)
-        elif self.in_h1:
-            self.h1_text.append(data)
 
-def crawl_site(start_url, max_depth=2, timeout=10):
-    """
-    Crawl a website starting from start_url up to max_depth.
-
-    Returns a list of crawl results: [{"url": url, "status": status, "title": title, ...}, ...]
-    """
-    parsed = urlparse(start_url)
-    base_domain = parsed.netloc
-
-    visited = set()
-    queue = deque([(start_url, 0)])
-    results = []
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    })
-
-    while queue:
-        url, depth = queue.popleft()
-
-        if url in visited or depth > max_depth:
-            continue
-
-        visited.add(url)
-        parsed_url = urlparse(url)
-
-        # Only crawl same domain
-        if parsed_url.netloc != base_domain:
-            continue
-
-        try:
-            resp = session.get(url, timeout=timeout, allow_redirects=True)
-            status = resp.status_code
-
-            # Extract metadata
-            meta_extractor = MetaExtractor()
-            try:
-                meta_extractor.feed(resp.text[:5000])  # Only parse first 5KB for speed
-            except Exception:
-                pass
-
-            result = {
-                "url": resp.url,
-                "status": status,
-                "title": meta_extractor.title or "[no title]",
-                "meta_description": meta_extractor.meta_desc or "[none]",
-                "h1": meta_extractor.h1 or "[no h1]",
-                "content_length": len(resp.text),
-                "depth": depth
-            }
-            results.append(result)
-
-            # Extract links for next crawl
-            if depth < max_depth:
-                meta_extractor = MetaExtractor()
-                try:
-                    meta_extractor.feed(resp.text)
-                except Exception:
-                    pass
-
-                # Simple link extraction
-                import re
-                for match in re.finditer(r'href=["\']([^"\']+)["\']', resp.text):
-                    link = match.group(1)
-                    if link.startswith('#'):
-                        continue
-                    next_url = urljoin(resp.url, link)
-                    if next_url not in visited:
-                        queue.append((next_url, depth + 1))
-
-        except Exception as e:
-            result = {
-                "url": url,
-                "status": "error",
-                "error": str(e),
-                "depth": depth
-            }
-            results.append(result)
-
-    return results
-
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python crawl_site.py <URL> [--depth N] [--output FILE]")
-        sys.exit(1)
-
-    url = sys.argv[1]
-    depth = 2
-    output = None
-
-    for i, arg in enumerate(sys.argv[2:]):
-        if arg == '--depth' and i + 1 < len(sys.argv) - 2:
-            depth = int(sys.argv[i + 3])
-        elif arg == '--output' and i + 1 < len(sys.argv) - 2:
-            output = sys.argv[i + 3]
-
-    print(f"Crawling {url} (depth={depth})...")
-    results = crawl_site(url, max_depth=depth)
-
-    # Print summary
-    print(f"\nCrawled {len(results)} URLs:")
-    for result in results:
-        status_str = f"{result.get('status', 'error')}"
-        title = result.get('title', '[no title]')[:60]
-        print(f"  {status_str:>3} | {result['url'][:70]:70} | {title}")
-
-    # Save to JSON if output specified
-    if output:
-        with open(output, 'w', encoding='utf-8') as f:
-            json.dump({
-                "crawl_date": datetime.now().isoformat(),
-                "start_url": url,
-                "total_urls": len(results),
-                "results": results
-            }, f, indent=2, ensure_ascii=False)
-        print(f"\nResults saved to {output}")
-
-    return results
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    raise SystemExit(main())
