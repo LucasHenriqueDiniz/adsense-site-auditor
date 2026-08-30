@@ -68,9 +68,11 @@ See [USAGE.md](USAGE.md) for all six audit modes and [EXAMPLES.md](EXAMPLES.md) 
 | Task generation | Convert findings into a prioritized task list (Todoist/GitHub format) |
 | Health check | Spot-check an already-approved site for new risk |
 
-## Pre-Flight Gate (New in v2.1)
+## Pre-Flight Gate
 
-Before running the full 73+ requirement audit, the skill now checks 3 critical blockers that account for **60% of real-world AdSense rejections**:
+Before running the full requirement audit, the skill checks three blockers that are
+common causes of rejection. The ordering is a judgement call, not a measurement:
+this repo has no data on how AdSense rejections are actually distributed.
 
 1. **Site Completeness** (ADS-COMPLETE-01) — Missing About, Contact placeholder, "Coming Soon" pages, anonymous footer
 2. **Publisher Identity** (ADS-AUTHOR-01) — No verifiable real name, no contact method
@@ -78,7 +80,8 @@ Before running the full 73+ requirement audit, the skill now checks 3 critical b
 
 **If any blocker fails, the skill stops and recommends structural fixes before proceeding.**
 
-Target: If skill says "Ready", user has **75-80% chance** of Google approval (vs. 60-70% before).
+The skill has no measured accuracy, and does not claim one. See `TESTING.md` for
+what would be needed to measure it.
 
 ## Repository structure
 
@@ -88,8 +91,7 @@ Target: If skill says "Ready", user has **75-80% chance** of Google approval (vs
 ├── SKILL.md                          Skill entry point read by Claude Code
 ├── USAGE.md                          All audit modes with example prompts
 ├── EXAMPLES.md                       Full worked audits
-├── TESTING.md                        Accuracy validation (75-80% target)
-├── IMPROVEMENTS_v3.md                Phase-by-phase improvement roadmap
+├── TESTING.md                        What is tested, what is not, how to measure it
 │
 ├── references/
 │   ├── adsense-requirements.md       73+ requirement IDs, severity, source URLs
