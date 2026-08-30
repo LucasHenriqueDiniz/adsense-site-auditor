@@ -48,15 +48,22 @@ AdSense outcome is known.
 
 ## Measuring the judgement layer
 
-The mechanism is `claude plugin eval`, which runs versioned cases against the
-skill and scores them, with a no-plugin baseline arm so the score delta shows
-what the skill itself contributes:
+`claude plugin eval` is the eventual mechanism: it runs versioned cases against
+the skill and scores them, with a no-plugin baseline arm so the score delta shows
+what the skill contributes rather than what the model already knew.
 
 ```bash
 claude plugin eval --eval-dir evals --ablation with-without
 ```
 
-What it needs, and what this repo does not yet have, is **ground truth**: sites
+It is gated behind early access and returns `plugin eval is currently in early
+access` on accounts without it, so do not plan around it being available. The
+fallback needs no special tooling and measures the same thing: run the audit
+against each site in a list, record the verdict, and compare it to the outcome
+Google actually gave. One row per site, `Ready` or `Not ready` against `approved`
+or `rejected`, is enough to fill the table below.
+
+Either way, what this repo does not yet have is **ground truth**: sites
 whose AdSense application actually succeeded or actually failed, with the
 rejection reason where one was given. Synthetic cases cannot supply this. A
 scenario written to describe an unfinished site will always be caught by a check
