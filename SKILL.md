@@ -50,12 +50,26 @@ stood here had no source.
    - Score: 1+ fails = Blocker → STOP, require identity verification before applying
 
 3. **Minimum Content** (ADS-COMPLETE-02)
-   - Fewer than 3 published guides/articles? ⚠️ High Risk (soft gate)
-   - Any guide under 1000 words? ⚠️ Flag for review
-   - Score: 0-2 guides = High Risk → flag but may proceed
-   - Score: 3+ substantive guides = Pass → proceed to full audit
+   - Counts and thresholds live in `references/adsense-requirements.md` under
+     that ID, and nowhere else. This file used to say 1000 words while the
+     reference said 1200, which is what happens when a number is written twice.
+   - Below the threshold is High Risk, a soft gate: flag it and continue.
 
-**Decision at pre-flight:**
+4. **Bulk page sample** (ADS-CONTENT-03) — **the gate's blind spot**
+   - Sample at least 10 pages from the largest section of the site, not the
+     trust pages and not the guides. Measure each with
+     `scripts/analyze_text_depth.py`.
+   - If the median falls below the ADS-CONTENT-03 threshold: ❌ Blocker.
+   - Why this step exists: smallwebapps.com passed items 1 through 3 — About and
+     Contact both real and substantial, twelve guides with eight above 1200
+     words, no placeholders, no broken navigation — and Google rejected the
+     application. Its 48 tool pages have a median of 220 words and 45 of them sit
+     below 300, which items 1-3 never look at. On a catalogue site the trust
+     pages and the guides are the best-written part; the catalogue is the site.
+     A gate that samples only the former passes a site whose latter half is the
+     problem. See `EXAMPLES.md` for the full run.
+
+**Decision at pre-flight:** (four items now, not three)
 - **0 Blockers**: Proceed to the full requirement audit
 - **1-2 Blockers**: Output "Not ready — fix structural issues first" + specific list
 - **3+ Blockers**: Output "Not ready — site appears unfinished"
@@ -125,6 +139,8 @@ For **quiz/entertainment sites**: Check that quizzes have distinct questions and
 ### Automation Support
 
 Use helper scripts when available:
+- `scripts/check_completeness.py URL` — the pre-flight gate above: placeholder
+  text, trust pages, broken navigation
 - `scripts/crawl_site.py URL [--depth N]` — crawl homepage, key pages, and sitemap
 - `scripts/analyze_text_depth.py URL [--min-words 300]` — detect thin pages
 - `scripts/check_duplicates.py URL [--threshold 0.8]` — find near-duplicate pages

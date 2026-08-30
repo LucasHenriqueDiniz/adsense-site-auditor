@@ -79,7 +79,7 @@ this repo has no data on how AdSense rejections are actually distributed.
 
 1. **Site Completeness** (ADS-COMPLETE-01) — Missing About, Contact placeholder, "Coming Soon" pages, anonymous footer
 2. **Publisher Identity** (ADS-AUTHOR-01) — No verifiable real name, no contact method
-3. **Minimum Content** (ADS-COMPLETE-02) — Fewer than 3 published guides/articles
+3. **Minimum Content** (ADS-COMPLETE-02) — thresholds defined with the requirement, not here
 
 **If any blocker fails, the skill stops and recommends structural fixes before proceeding.**
 

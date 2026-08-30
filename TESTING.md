@@ -70,7 +70,37 @@ scenario written to describe an unfinished site will always be caught by a check
 written to find unfinished sites; that measures nothing but the author's
 consistency.
 
-Until real outcomes exist here, this skill should describe itself as unmeasured.
+There is now exactly one labelled outcome, recorded below, and the skill got
+it wrong. One case is not a measurement, so this skill still describes itself
+as unmeasured — but it is no longer describing itself as untested.
+
+## The one real outcome on record
+
+**smallwebapps.com — application rejected by Google.** Audited 2026-08-30 with
+the checks in this repo. The pre-flight gate returned "every check observed its
+condition and passed", so the skill would have advised submitting the
+application that Google refused.
+
+That is one false negative out of one labelled site. It is far too small a
+sample to be an accuracy figure and is not offered as one — this section exists
+because the honest count of real outcomes was zero before it, and is one now.
+
+What the run showed, in full detail in `EXAMPLES.md`:
+
+| | |
+| --- | --- |
+| Passed the gate on | About (742 words), Contact (820 words), 12 guides with 8 over 1200 words, no placeholders, 25 navigation links with none broken |
+| Missed | 48 tool pages with a median of 220 words; 45 of them below 300 |
+| Ruled out by measurement | duplication — 276 pairs compared, median similarity 0.134, maximum 0.327, none above the rubric's 0.40 safe band |
+
+The gate reads the home page, the trust pages and the guide count. On a
+catalogue site those are the best-written part and the catalogue is the site, so
+the sample was pointed away from the problem. `SKILL.md` now carries a fourth
+pre-flight item that samples the largest section instead.
+
+The lesson generalises past this one site: a gate that inspects only the pages a
+publisher wrote by hand will pass a site whose generated bulk is the reason for
+rejection.
 
 ## Scenarios worth turning into cases
 

@@ -1,547 +1,216 @@
-# AdSense Site Auditor — Real-World Examples
+# Worked examples
 
-Complete, step-by-step examples for auditing smallwebapps.com and funsona.com.
+Every command and every output below was run against the live site on the date
+given. Nothing here is illustrative or reconstructed. The previous version of
+this file was written by hand and contradicted itself — it showed
+`check_duplicates.py --threshold 0.8` printing pairs at 73% and 68%, which that
+script cannot do because it only prints pairs at or above the threshold, and it
+concluded "Blockers: None" in one example while another converted the same audit
+of the same site into "BLOCKER-01".
 
----
-
-## Example 1: Tool Site Pre-Application Audit (smallwebapps.com)
-
-### Scenario
-
-You've built smallwebapps.com with 50 utility tools (converters, calculators, generators). You want to apply for AdSense but aren't sure if your pages meet quality standards.
-
-### Step 1: Run Helper Scripts
-
-```bash
-# From the adsense-site-auditor directory:
-
-# Crawl the site and list all tools
-python scripts/crawl_site.py https://smallwebapps.com --depth 2 --output crawl.json
-
-# Analyze word count on all pages (target: 300+ words)
-python scripts/analyze_text_depth.py crawl.json --min-words 300 --output depth_analysis.txt
-
-# Check for boilerplate and template reuse
-python scripts/check_duplicates.py crawl.json --threshold 0.8 --output duplicate_analysis.txt
-
-# Verify technical requirements (robots.txt, sitemap, HTTPS, etc.)
-python scripts/check_technical.py https://smallwebapps.com --output technical_check.txt
-```
-
-**Sample script output:**
-
-```
-# depth_analysis.txt
-URL: https://smallwebapps.com/tools/hex-converter
-  Words: 285 | Density: 45 words/KB
-  Risk: BORDERLINE
-
-URL: https://smallwebapps.com/tools/json-formatter
-  Words: 420 | Density: 62 words/KB
-  Risk: OK
-
-⚠️  Risk: 15 pages may trigger ADS-CONTENT-03 or ADS-CONTENT-04
-
-# duplicate_analysis.txt
-Source: https://smallwebapps.com/tools/hex-converter
-  ↔ 73% similar | https://smallwebapps.com/tools/decimal-converter
-  ↔ 68% similar | https://smallwebapps.com/tools/binary-converter
-
-⚠️  High duplication risk: 23 of 50 pages have >70% similar content
-```
-
-### Step 2: Invoke the Skill
-
-```text
-/adsense-site-auditor
-
-URL: https://smallwebapps.com
-Mode: Pre-application audit
-Site type: Tool site
-
-Analysis data:
-- Total tools: 50 across 8 categories
-- Crawl results: See crawl.json (sample: 48/50 pages accessible, status 200)
-- Word count analysis: 35 pages OK (300+), 15 pages BORDERLINE (200-300)
-- Duplicate analysis: 23 pages have 70%+ boilerplate text overlap with related tools
-- Technical: robots.txt OK, sitemap.xml found (50 URLs), HTTPS OK, response time <2s
-
-Key findings from manual review:
-- Hex-to-decimal converter page: Title="Hex Converter", 85 words, no original guidance
-- Unit converter: 420 words with good examples, links to related converters
-- Most tools lack "Why would you use this?" section
-
-Request: Full ADS-* checklist with priorities. Assume I'll need to add original guidance to 15-20 thin pages.
-```
-
-### Step 3: Skill Output (Excerpt)
-
-```markdown
-# AdSense Audit: smallwebapps.com
-
-**Decision**: Ready after fixes
-
-**Blockers**: None
-
-**High Risks**
-
-- **ADS-CONTENT-03**: 15 tool pages are under target depth (200-300 words vs. 300+ recommended)
-  
-  Evidence: 
-  - `/tools/hex-converter` (85 words) — "Convert hex values online"
-  - `/tools/time-zone-converter` (120 words) — only 4 sentences
-  - Full list in analysis: `depth_analysis.txt`
-  
-  Fix:
-  1. Review each page in `depth_analysis.txt` with status "BORDERLINE" or "THIN"
-  2. For each tool, add 200-300 words of original guidance covering:
-     - Why would someone use this tool?
-     - How to use it (step-by-step)
-     - Common use cases (e.g., "Programmers use this to debug color codes")
-     - Limitations or edge cases
-  3. Re-run `analyze_text_depth.py` to verify all pages are 300+ words
-  
-  Effort: 2-3 hours (15 pages × 10-15 min each)
-
-- **ADS-CONTENT-02**: 23 tool pages have 70%+ template boilerplate text
-  
-  Evidence:
-  - `/tools/hex-converter` (73% similar to `/tools/decimal-converter`)
-  - `/tools/binary-converter` (68% similar to `/tools/hex-converter`)
-  - Template reuse across converters
-  
-  Fix:
-  1. Review `templates/[category].html` to identify shared boilerplate
-  2. Make category-specific boilerplate: generic intro for "Number Converters", unique description for each tool
-  3. Example: Currently all converters have "This tool converts format A to format B." Make this specific: "Hex-to-Decimal converts hexadecimal notation used in programming to standard decimal numbers."
-  4. Run `check_duplicates.py --threshold 0.8` again to verify overlap <40%
-  
-  Effort: 1-2 hours (refactor template + customize 50 tool descriptions)
-
-**Medium Risks**
-
-- **ADS-UX-02**: Internal navigation between related tools is unclear
-  
-  Evidence: Homepage lists tools alphabetically; no "Related tools" links on detail pages
-  
-  Fix:
-  - Add "See also" section linking to 2-3 related tools
-  - Group tools by category on homepage
-  
-  Effort: 1 hour
-
-**Exhaustive Checklist** (73 items)
-
-| ID | Status | Evidence | Next Action |
-| --- | --- | --- | --- |
-| ADS-ELIG-01 | Pass | Owner confirmed eligible | Ready |
-| ADS-ELIG-02 | Unknown | Owner has existing AdSense? | Ask owner |
-| ADS-ELIG-03 | Fail | See Blockers/High/Medium above | Implement fixes |
-| ... | ... | ... | ... |
-
-**Summary**
-
-Your site is **Ready after fixes**. Estimated effort: 4-6 hours.
-
-**Priority fix order**:
-1. Expand thin tool pages to 300+ words (2-3h) → High impact
-2. Reduce template boilerplate (1-2h) → High impact
-3. Add internal tool linking (1h) → Medium impact
-
-After fixes, re-audit with:
-```
-/adsense-site-auditor https://smallwebapps.com
-Mode: Post-fix verification
-Fixed items:
-- Expanded 15 thin pages to 300+ words
-- Customized tool descriptions to reduce boilerplate
-- Added internal tool linking
-```
-```
-
-### Step 4: Fix & Re-Audit
-
-After implementing fixes:
-
-```bash
-# Verify fixes worked
-python scripts/analyze_text_depth.py crawl.json --min-words 300 --output depth_analysis_v2.txt
-python scripts/check_duplicates.py crawl.json --threshold 0.8 --output duplicate_analysis_v2.txt
-```
-
-Then:
-
-```text
-/adsense-site-auditor
-
-URL: https://smallwebapps.com
-Mode: Post-fix verification
-
-Fixed items:
-- Expanded all 15 thin pages to 300+ words with original use-case guidance
-- Customized tool descriptions; boilerplate overlap reduced to 22%
-- Added "Related Tools" sections on all detail pages
-
-Verification: All pages now show "OK" in depth_analysis_v2.txt; duplicate overlap 22% (down from 70%)
-```
+To regenerate: run the commands shown and paste what you get.
 
 ---
 
-## Example 2: Quiz Site Post-Rejection Diagnosis (funsona.com)
+## Example 1 — smallwebapps.com, rejected by Google
 
-### Scenario
+**Outcome: the AdSense application for this site was rejected.** This is the only
+example here with a known verdict from Google, which makes it the one worth
+reading carefully: it is the single data point available on whether this skill
+predicts the real decision.
 
-funsona.com had 200 quizzes approved for AdSense, but Google suspended the account citing "Low-value content" and "Mass-generated pages."
+Run on 2026-08-30.
 
-### Step 1: Gather Data & Rejection Context
-
-```bash
-python scripts/crawl_site.py https://funsona.com --depth 1 --output funsona_crawl.json
-python scripts/analyze_text_depth.py funsona_crawl.json --min-words 200 --output funsona_depth.txt
-python scripts/check_duplicates.py funsona_crawl.json --threshold 0.75 --output funsona_dupes.txt
-```
-
-### Step 2: Invoke for Post-Rejection Diagnosis
-
-```text
-/adsense-site-auditor
-
-URL: https://funsona.com
-Mode: Post-rejection diagnosis
-
-Rejection message:
-"Your site has been suspended due to low-value content and mass-generated pages. 
-Content must provide substantial value, not just serve as ad inventory. 
-Review our policies on thin content and auto-generated material."
-
-Site context:
-- 200 quizzes across 10 categories
-- Quizzes launched in last 6 months (rapid growth)
-- Many quizzes use template structure
-
-Analysis data:
-- Text depth: 85 result pages under 200 words; 40 with just "You got Result X" (5 words)
-- Duplicates: 82% text overlap across quizzes in same category
-- Sample: quiz_1 and quiz_2 both have identical intro ("Take this fun quiz to find out!") and result template
-
-Request:
-1. Map rejection message to specific ADS-* requirements
-2. Identify root causes
-3. Priority fix plan
-4. Verification checklist
-```
-
-### Step 3: Skill Output (Excerpt)
-
-```markdown
-# AdSense Post-Rejection Diagnosis: funsona.com
-
-**Root Cause Analysis**
-
-The suspension message "low-value content" and "mass-generated" maps to:
-
-1. **ADS-CONTENT-01 (Blocker)**: Site must have useful, original, visitor-relevant content
-   - Finding: 40 result pages are auto-generated with minimal text ("You got: [Result_Name]")
-   - Example: Quiz "Are You a Pizza?" result page = 5 words + ads
-   - This is a **hard blocker** — auto-generated results are explicitly prohibited
-
-2. **ADS-CONTENT-02 (Blocker)**: Do not rely on auto-generated or copied content without original value
-   - Finding: 82% text overlap across quizzes in same category indicates template reuse
-   - Example: All "Personality" quizzes share identical intro and result template structure
-   - This is a **hard blocker** — mass-generated content without original analysis
-
-3. **ADS-CONTENT-08 (High)**: Content should not use doorway pages or pages made mainly for search engines
-   - Finding: Quiz titles are auto-generated ("Are You a [Word]?" applied to 50+ topics)
-   - Evidence: No meaningful differentiation between quizzes; pure template variations
-
-**Why This Triggers Suspension**
-
-Google sees: Rapid launch (200 quizzes in 6 months) + template reuse (82% overlap) + thin results (5 words) = **Clearly an ad farm, not genuine content**.
-
-To fix:
-
-1. **Rewrite result pages** (Critical)
-   - Current: "You got: Pizza Lover" (5 words)
-   - Required: 200+ words of original analysis, e.g.:
-     ```
-     "Pizza Lover: You appreciate quality food and social gatherings. 
-     Pizza lovers are often outgoing and enjoy sharing meals with friends. 
-     Your perfect weekend? Trying a new pizzeria with a group of friends. 
-     [Additional personality insights, tips, related quizzes...]"
-     ```
-
-2. **Reduce template boilerplate** (Critical)
-   - Current overlap: 82% across category
-   - Target: <40% (only structural template shared, not content)
-   - Action: Customize intro, questions, and results per quiz
-
-3. **Slow down content production** (For future)
-   - Current: 200 quizzes in 6 months = 1/day
-   - After approval: max 2-3 quizzes/week, with editorial review
-
-**Detailed Fixes**
-
-| Requirement | Issue | Fix | Effort | Verification |
-| --- | --- | --- | --- | --- |
-| ADS-CONTENT-01 | 40 auto-generated result pages | Rewrite 200+ words per result with original analysis | 12-16h | All results 200+words; no "You got X" filler |
-| ADS-CONTENT-02 | 82% template overlap across quizzes | Customize intro/questions/results; target <40% overlap | 8-10h | check_duplicates.py shows <40% |
-| ADS-CONTENT-08 | Doorway-like auto-generated titles | Review quiz titles; ensure each is unique and meaningful | 2h | Each quiz title describes actual content, not template |
-| ADS-UX-02 | No editorial/category pages | Add category pages with 300+ words describing quiz types | 3h | Each category has unique description and featured quiz |
-
-**Timeline to Resubmit**
-
-1. Week 1: Rewrite result pages (40-50 high-priority)
-2. Week 2: Customize quiz intro/questions
-3. Week 3: Add category pages and editorial content
-4. Week 4: Re-audit and resubmit
-
-**Resubmission Checklist**
-
-Before asking Google to review:
-
-- [ ] All result pages are 200+words with original analysis (not "You got X")
-- [ ] Text overlap across quizzes in same category is <40%
-- [ ] Homepage and category pages have 300+word editorial content
-- [ ] Each quiz title and questions are unique (not auto-generated)
-- [ ] No new quizzes during the fix period (pause launches)
-
-**Re-Audit Command** (after fixes)
+### The pre-flight gate
 
 ```
-/adsense-site-auditor https://funsona.com
-Mode: Post-fix verification
+$ python scripts/check_completeness.py https://smallwebapps.com
 
-Fixed items:
-- Rewrote 200 result pages (200+ words each) with original personality insights
-- Customized quiz descriptions; boilerplate overlap <40%
-- Added 10 category pages with editorial content
-- Reviewed all quiz titles for uniqueness
+[PASS] ADS-COMPLETE-01 home page is finished
+         - no unfinished markers found
+[PASS] ADS-UX-05 about page
+         - https://smallwebapps.com/about/ (742 words)
+         - contact: https://github.com/LucasHenriqueDiniz/smallwebapps
+[PASS] ADS-UX-05 contact page
+         - https://smallwebapps.com/contact/ (820 words)
+         - contact: lucas.hdo@hotmail.com, https://github.com/LucasHenriqueDiniz/smallwebapps/issues
+[note] ADS-UX-01 navigation
+         - 25 links followed, none broken
 
-Results: verify with check_duplicates.py and depth analysis
+4 checks: PASS=3, note=1
+Verdict: every check observed its condition and passed.
 ```
+
+**The gate passes a site Google rejected.** That is a false negative, and it is
+the failure mode this skill exists to prevent: it would have told the owner to
+apply.
+
+### Technical
+
+```
+$ python scripts/check_technical.py https://smallwebapps.com
+
+[PASS] ADS-CRAWL-01 reachable          - HTTP 200 in 88ms
+[PASS] ADS-CRAWL-06 https              - served over HTTPS
+[PASS] ADS-CRAWL-02 robots.txt         - Mediapartners-Google, Googlebot and AdsBot are all allowed at /
+[PASS] ADS-CRAWL-07 sitemap
+
+4 checks: PASS=4
+Verdict: every check observed its condition and passed.
+```
+
+Nothing wrong here, and nothing here was the reason.
+
+### Content depth — where the answer actually is
+
+The crawl finds 48 tool pages under `/apps/`. Measuring all of them:
+
+```
+distribuição: {'WARNING': 45, 'INFO': 2, 'OK': 1}
+mediana de palavras: 220
+mínimo: 92   máximo: 3281
+
+as 8 mais rasas:
+     92 palavras  /apps/compress-pdf-to-1mb/
+    114 palavras  /apps/pdf-rotate/
+    119 palavras  /apps/pdf-split/
+    120 palavras  /apps/youtube-description-cleaner/
+    134 palavras  /apps/pdf-to-image/
+    136 palavras  /apps/image-to-pdf/
+    136 palavras  /apps/pdf-metadata/
+    137 palavras  /apps/pdf-watermark/
+```
+
+**45 of 48 tool pages are below 300 words, with a median of 220.** This is the
+shape of the site: a large catalogue of interactive tools, each wrapped in a
+short description. It matches `ADS-CONTENT-03` ("main content should be
+substantial enough for users and crawlers") and the tool-site rubric's demand
+that a tool page carry original guidance, not just the widget.
+
+### What is *not* wrong, and should not be guessed at
+
+The obvious second hypothesis for a tool site is template duplication. It does
+not hold here. Comparing 24 tool pages pairwise:
+
+```
+276 pares comparados
+  mediana: 0.134
+  máximo:  0.327
+  >= 0.40: 0 pares
+  >= 0.60: 0 pares
+
+pares mais parecidos:
+  0.327  /apps/dockerignore-generator  vs  /apps/gitignore-generator
+  0.283  /apps/image-crop              vs  /apps/image-resize
+```
+
+Every pair sits below the rubric's 0.40 "safe" band. The pages are short, but
+they are genuinely different from one another.
+
+The guides are also real, and substantial:
+
+```
+  1349 palavras  /guides/youtube-watch-history-json-format
+  1326 palavras  /guides/resize-compress-images-locally
+  1317 palavras  /guides/privacy-first-file-tools-local-processing
+  ... 12 guides total, 8 of them at or above 1200 words
+```
+
+`ADS-COMPLETE-02` asks for three substantive guides. There are eight.
+
+### What this example teaches about the skill
+
+The signal was present — 45 thin pages, plainly measurable — and the gate that
+produces the go/no-go answer never looked at it. The pre-flight gate reads the
+home page, the About page, the Contact page and the guide count. It does not
+read the pages that make up the bulk of the site.
+
+For a catalogue site, that is the wrong sample. The three trust pages and the
+guides are the best-written part; the 48 tool pages are the site. A gate that
+inspects only the former will pass a site whose latter half is the problem.
+
+There is also a counting trap worth knowing. A naive "count pages over 1200
+words" run against the crawl returns seven — but six of them are the same page,
+`/apps/` reached through six different query strings, each declaring
+`rel="canonical"` back to `/apps`. The crawl reports this itself:
+
+```
+[MISS] ADS-CRAWL-05 stable URLs
+         - https://smallwebapps.com/apps/?cat=PDF+Tools: canonical points to https://smallwebapps.com/apps
+         - https://smallwebapps.com/apps/?cat=Developer+Tools: canonical points to https://smallwebapps.com/apps
+```
+
+Counting those as six substantive pages would have turned a real gap into a
+comfortable pass.
+
+---
+
+## Example 2 — calculebrasil.com, outcome not known
+
+Run on 2026-08-30. No AdSense verdict is recorded for this site, so nothing here
+is validation — it is an illustration of the output shape on a site that is in
+better condition.
+
+```
+$ python scripts/check_technical.py https://calculebrasil.com -v
+
+[PASS] ADS-CRAWL-01 reachable
+         - HTTP 200 in 55ms
+           final_url: https://calculebrasil.com/
+[PASS] ADS-CRAWL-06 https              - served over HTTPS
+[PASS] ADS-CRAWL-02 robots.txt         - Mediapartners-Google, Googlebot and AdsBot are all allowed at /
+[PASS] ADS-CRAWL-07 sitemap
+           discovered_via: robots.txt
+           kind: urlset
+           url_count: 49
+
+4 checks: PASS=4
+Verdict: every check observed its condition and passed.
+```
+
+Note `discovered_via: robots.txt`. The sitemap is at the conventional path here,
+but the check reads the `Sitemap:` directive first, which is what makes it work
+on the many sites that serve 404 at `/sitemap.xml` and declare the real location
+in robots.txt.
+
+```
+$ python scripts/analyze_text_depth.py https://calculebrasil.com https://calculebrasil.com/sobre
+
+[note] ADS-CONTENT-03 https://calculebrasil.com/
+         - 315 words: borderline (300-449 words)
+[WARN] ADS-CONTENT-03 https://calculebrasil.com/sobre/
+         - 251 words: below the configured threshold (300 words)
+
+2 checks: note=1, WARN=1
+Verdict: worst status is WARNING. Not ready.
 ```
 
 ---
 
-## Example 3: Repo + Live URL Audit (Vite + Cloudflare Pages)
+## Reading an unmeasured half
 
-### Scenario
-
-You have a React/Vite tool site deployed on Cloudflare Pages. Want to audit both the source code and live rendering.
-
-### Step 1: Run Scripts
-
-```bash
-# Crawl live site
-python scripts/crawl_site.py https://tools.example.com --depth 2 --output crawl_live.json
-
-# Check technical setup
-python scripts/check_technical.py https://tools.example.com --output tech_live.txt
-
-# Analyze live pages for thin content
-python scripts/analyze_text_depth.py crawl_live.json --min-words 300 --output depth_live.txt
-```
-
-### Step 2: Inspect Local Repo
-
-```bash
-# Get repo info (assuming you have the repo checked out locally)
-find /path/to/repo -name "*.tsx" -o -name "*.jsx" | head -20
-grep -r "generatedPages\|Template\|boilerplate" /path/to/repo --include="*.tsx"
-```
-
-### Step 3: Invoke Skill
-
-```text
-/adsense-site-auditor
-
-Site URL: https://tools.example.com
-Repo path: /Users/me/code/tools-site
-
-Mode: Repo + live URL audit
-Site type: Tool site
-
-Source code findings:
-- Main tool pages generated from route pattern: src/pages/tools/[toolSlug].tsx
-- Template reuse: 95% of tool pages use identical React component structure
-- Content source: Tool metadata from JSON config; description is 2-3 sentences, not expandable
-
-Live rendering findings:
-- 48/50 tools crawlable
-- 25 tools under 200 words
-- Technical: HTTPS OK, sitemap.xml OK, robots.txt OK
-
-Request:
-1. Identify where boilerplate is coming from (source code level)
-2. What's the SEO risk of generated routes?
-3. How to add original content per tool without duplicating code?
-4. Feasibility of canonical URLs for generated pages?
-```
-
-### Step 4: Skill Output (Excerpt)
-
-```markdown
-# Repo + Live URL Audit: tools.example.com
-
-**Structure Analysis**
-
-Source:
-```
-src/pages/tools/[toolSlug].tsx — renders all 50 tools
-
-// Current:
-export default function ToolPage({ slug }) {
-  const tool = toolConfig[slug];
-  return <div>
-    <h1>{tool.name}</h1>
-    <p>{tool.shortDesc}</p>  {/* 2-3 sentences from JSON */}
-    <ToolComponent slug={slug} />
-    </div>
-}
-
-// toolConfig.json: { "hex-converter": { "name": "Hex Converter", "shortDesc": "Convert hex to decimal" } }
-```
-
-Live rendering:
-- URL: `/tools/hex-converter`
-- Title: "Hex Converter"
-- Content: 85 words (2-3 from JSON + tool UI)
-- Boilerplate: ~75 words (header, footer, nav — same on all pages)
-
-**Findings**
-
-- **ADS-CONTENT-03 (High)**: Main content on generated pages is minimal
-  - Root cause: Tool description in JSON is intentionally short
-  - Fix: Expand toolConfig to include `fullDescription` (500+ words)
-
-- **ADS-CONTENT-02 (High)**: 50 generated routes create duplication risk
-  - Issue: toolConfig pattern means any changes apply to all pages
-  - Risk: If one page violates policy, all 50 similar pages may be flagged
-  - Recommendation: Customize each tool's page with unique guidance
-
-- **ADS-CRAWL-05 (Medium)**: Dynamic routes need stable canonicals
-  - Check: Do generated pages set canonical?
-  - Recommendation: Add `<link rel="canonical" href={`/tools/${slug}`} />`
-
-**Actionable Changes**
-
-1. **Update toolConfig schema**:
-```json
-{
-  "hex-converter": {
-    "name": "Hex Converter",
-    "shortDesc": "Convert hex to decimal",
-    "fullDescription": "Converting hexadecimal to decimal is essential for programmers working with color codes, memory addresses, and low-level data representations. This tool simplifies the process... [300+ original words]",
-    "useCases": ["Debugging", "Color codes", "Unicode"],
-    "examples": [...]
-  }
-}
-```
-
-2. **Update component**:
-```tsx
-export default function ToolPage({ slug }) {
-  const tool = toolConfig[slug];
-  return <article>
-    <h1>{tool.name}</h1>
-    <p>{tool.shortDesc}</p>
-    <section className="description">
-      {tool.fullDescription}  {/* 300+ words */}
-    </section>
-    <section className="use-cases">
-      <h2>When to use this</h2>
-      {tool.useCases.map(uc => <p>{uc}</p>)}
-    </section>
-    <ToolComponent slug={slug} />
-    </article>
-}
-```
-
-3. **Add canonical (if not already present)**:
-```tsx
-<link rel="canonical" href={`https://tools.example.com/tools/${slug}`} />
-```
-
-4. **Verify re-renders**:
-- Expected: All 50 pages now 400-500 words each
-- No content duplication between routes (each fullDescription is unique)
-- Canonical tags consistent
-
-**Re-Audit After Changes**
+Both sites produce this, and it is the reports' most important habit:
 
 ```
-/adsense-site-auditor https://tools.example.com
-Mode: Post-fix verification
+$ python scripts/crawl_site.py https://smallwebapps.com --max-pages 25
 
-Changes:
-- Added fullDescription (300+ words) to all 50 tools in toolConfig
-- Each description is original and tool-specific
-- Added canonical links to all generated pages
+[PASS] ADS-CRAWL-01 pages reachable
+         - blocked_by_robots=0, ok=25, pages=25
+[MISS] ADS-CRAWL-04 redirect chains
+         - 24 page(s) redirect and the cookie-less re-request was not made
+           (verify_stateless=False): dependence on session state is unverified
+[MISS] ADS-CRAWL-05 stable URLs
+         - 25 page(s) declare a canonical and the two-session comparison was not
+           made (verify_two_sessions=False): canonical stability is unverified
 
-Verification: Re-run depth analysis to confirm all pages 300+words
-```
-```
-
----
-
-## Example 4: Task Generation (Convert Audit to Todoist)
-
-After any audit, convert findings to tasks:
-
-```text
-/adsense-site-auditor
-
-URL: https://smallwebapps.com
-Mode: Task generation
-Output format: Todoist
-
-[Provide previous audit findings]
+4 checks: PASS=2, MISS=2
+Verdict: nothing failed, but something could not be observed. Not a pass.
 ```
 
-**Output:**
+`MISS` is not a failure and not a pass: the check has a second half that costs
+extra requests and is off by default. Pass `--verify-stateless` to measure it.
 
-```markdown
-# AdSense Audit Tasks: smallwebapps.com
-
-## Blocker Tasks (p1 — must complete before applying)
-
-### BLOCKER-01: ADS-CONTENT-03 — Expand thin tool pages
-**Project**: @smallwebapps  
-**Priority**: p1  
-**Effort**: 3h  
-**Tags**: @adsense @blocker
-
-- [ ] Review depth_analysis.txt; identify 15 pages under 300 words
-- [ ] For each tool, add original guidance section (why use it, how, examples)
-- [ ] Target: 300+ words per page
-- [ ] Verification: Re-run `analyze_text_depth.py`; all pages show "OK"
-
----
-
-### BLOCKER-02: ADS-CONTENT-02 — Reduce boilerplate in tool descriptions
-**Priority**: p1  
-**Effort**: 2h  
-**Tags**: @adsense @blocker
-
-- [ ] Identify template file: `templates/tool-page.html`
-- [ ] Move shared boilerplate to single template
-- [ ] Customize each tool description (currently "Convert X to Y")
-- [ ] Verification: `check_duplicates.py` shows <40% overlap
-
----
-
-## High Tasks (p2)
-
-### HIGH-01: ADS-UX-02 — Add internal tool navigation
-... [etc.]
-```
-
----
-
-## Key Takeaways
-
-1. **Run scripts first** — Gather concrete data before auditing
-2. **Use site-specific rubrics** — Tool and quiz sites have different requirements
-3. **Be specific** — Always cite URLs, word counts, and evidence
-4. **Fix in priority order** — Blockers → High → Medium
-5. **Re-audit after fixes** — Verify improvements and watch for regressions
+The distinction exists because the previous implementation had no way to express
+it, and resolved every unmeasured condition to "passed". Exit codes follow the
+same rule: `MISS` and worse exit non-zero, so a site the tooling could not read
+cannot be reported as a site that passed.
