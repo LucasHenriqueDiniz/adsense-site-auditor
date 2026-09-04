@@ -28,16 +28,18 @@ For user-facing invocation examples and reusable prompts, read `references/usage
 
 ## Pre-Flight Completeness Gate
 
-**Before running the full requirement audit**, check these three blockers. They
-are ordered first because they are cheap and commonly decisive, not because of
-any measured share of rejections — Google publishes none, and the figure that
-stood here had no source.
+**Before running the full requirement audit**, work these four items. This
+section is the gate; `README.md` summarises it and defers here. They are ordered
+first because they are cheap and commonly decisive, not because of any measured
+share of rejections — Google publishes none, and the figure that stood here had
+no source.
 
-1. **Site Completeness** (ADS-COMPLETE-01)
-   - Missing About page? ❌ Blocker
-   - Contact page is placeholder ("will be added here")? ❌ Blocker
-   - Tool/feature pages say "Coming Soon" or "Not yet"? ❌ Blocker
-   - Broken nav links (404s) on homepage? ❌ Blocker
+1. **Site Completeness** (ADS-COMPLETE-01) — four conditions, scored together.
+   Count how many fail; no single one is a blocker on its own.
+   - Missing About page?
+   - Contact page is placeholder ("will be added here")?
+   - Tool/feature pages say "Coming Soon" or "Not yet"?
+   - Broken nav links (404s) on homepage?
    - Score: 0-1 fails = Pass → proceed to full audit
    - Score: 2-3 fails = High Risk → flag before full audit
    - Score: 4+ fails = Blocker → STOP, recommend major structural fixes
@@ -67,9 +69,10 @@ stood here had no source.
      below 300, which items 1-3 never look at. On a catalogue site the trust
      pages and the guides are the best-written part; the catalogue is the site.
      A gate that samples only the former passes a site whose latter half is the
-     problem. See `EXAMPLES.md` for the full run.
+     problem. The measurements are in Part 2 of `EXAMPLES.md`; they were taken on
+     2026-08-30 and no command reproduces them.
 
-**Decision at pre-flight:** (four items now, not three)
+**Decision at pre-flight:**
 - **0 Blockers**: Proceed to the full requirement audit
 - **1-2 Blockers**: Output "Not ready — fix structural issues first" + specific list
 - **3+ Blockers**: Output "Not ready — site appears unfinished"
@@ -80,7 +83,7 @@ stood here had no source.
 
 The skill supports these audit contexts. Identify which mode applies before starting:
 
-1. **Pre-Application Audit** — Site owner wants to know if ready to apply. Runs pre-flight gate first, then full 73+ audit if no blockers.
+1. **Pre-Application Audit** — Site owner wants to know if ready to apply. Runs the pre-flight gate first, then every requirement ID in `references/adsense-requirements.md` if no blockers.
 2. **Post-Rejection Diagnosis** — Site was rejected; map rejection reason to ADS-* IDs and provide priority fix list.
 3. **Post-Fix Verification** — Owner claims fixes are done; re-audit to confirm and assess readiness to resubmit.
 4. **Task Generation** — Convert audit findings into actionable work items (prioritized, with file/page specifics).
@@ -100,7 +103,7 @@ The skill supports these audit contexts. Identify which mode applies before star
    - Inspect privacy policy, about/contact/ownership, navigation flow, content depth, ad/affiliate density, copied content signals, and prohibited content risks.
    - If repo access exists, inspect templates, routes, content sources, and generated pages rather than only rendered output.
    - **For tool/quiz sites**: Run site-type-specific rubrics (see `references/tool-site-rubric.md` and `references/quiz-site-rubric.md`).
-   - **For thin content risk**: Use `scripts/analyze_text_depth.py` to detect pages under target word count with low originality.
+   - **For thin content risk**: Use `scripts/analyze_text_depth.py` to detect pages under the target word count. It measures length and the main-content share, not originality — that is `check_duplicates.py`, and only against URLs you name.
    - **For duplication risk**: Use `scripts/check_duplicates.py` to find template boilerplate reuse and near-duplicate pages.
 
 3. Classify findings:
@@ -139,12 +142,26 @@ For **quiz/entertainment sites**: Check that quizzes have distinct questions and
 ### Automation Support
 
 Use helper scripts when available:
-- `scripts/check_completeness.py URL` — the pre-flight gate above: placeholder
-  text, trust pages, broken navigation
-- `scripts/crawl_site.py URL [--depth N]` — crawl homepage, key pages, and sitemap
-- `scripts/analyze_text_depth.py URL [--min-words 300]` — detect thin pages
-- `scripts/check_duplicates.py URL [--threshold 0.8]` — find near-duplicate pages
-- `scripts/check_technical.py URL` — robots.txt, sitemap, redirects, security headers
+- `scripts/check_completeness.py URL` — items 1 and 2 of the gate above, in part:
+  placeholder text (ADS-COMPLETE-01), the About and Contact pages (ADS-UX-05),
+  a contact channel in the HTML (ADS-AUTHOR-02) and navigation links that 4xx/5xx
+  (ADS-COMPLETE-01). It does not decide ADS-AUTHOR-01 — whether a real name or
+  registered company stands behind the site is `judgement`, and no script here
+  touches it. Item 4 of the gate is `analyze_text_depth.py`, run over a sample
+  you choose
+- `scripts/crawl_site.py URL [--depth N]` — crawl homepage and internal pages;
+  reachability, redirect chains, URL stability. It does not fetch the sitemap —
+  that is `check_technical.py`'s ADS-CRAWL-07 line
+- `scripts/analyze_text_depth.py URL [URL ...] [--min-words 300]` — detect thin pages
+- `scripts/check_duplicates.py URL [URL ...] [--threshold 0.6]` — find near-duplicate
+  pages. The threshold defaults to 0.6 because `ADS-CONTENT-OVERLAP` puts high risk
+  above 60%; the 0.8 documented here before sat above that entire band, so every
+  pair the rubric wants flagged went unreported.
+- `scripts/check_technical.py URL` — robots.txt, sitemap, reachability, and
+  three of `ADS-CRAWL-06`'s four parts: DNS, TLS and response time. Uptime it
+  reports as an explicit gap — one request cannot establish reliability over
+  time, so that quarter of the requirement needs monitoring, not an audit run.
+  Security headers are checked by nothing in this repo.
 
 ### Readiness Decision
 
@@ -155,4 +172,25 @@ Do not advise applying until:
 
 ## Completeness Gate
 
-Before finishing, count the requirement IDs in `references/adsense-requirements.md` and compare them with the IDs in the final checklist. If any ID is missing, the audit is incomplete. Add the missing rows before giving a final readiness decision.
+Before finishing, list the requirement IDs in `references/adsense-requirements.md`
+and compare them with the IDs in the final checklist. If any ID is missing, the
+audit is incomplete. Add the missing rows before giving a final readiness decision.
+
+Take the IDs from the requirement table rows in sections A through L:
+
+```bash
+awk '/^## M\./{exit} /^\| ADS-/{print $2}' references/adsense-requirements.md | sort -u
+```
+
+That prints 81 IDs today. Two ways of counting give the wrong answer, and both
+have been used here before:
+
+- Section M is an **output-format example**, not requirements. Its sample table
+  repeats `ADS-ELIG-01` and `ADS-ELIG-02` as rows, so counting `| ADS-` rows over
+  the whole file returns 83. The `exit` above stops before section M.
+- Three IDs have three parts — `ADS-CONTENT-ORIGINAL`, `ADS-CONTENT-ADDED-VALUE`,
+  `ADS-CONTENT-OVERLAP`. A regex like `ADS-[A-Z]+-[0-9]+` does not match them and
+  returns 78.
+
+Recount rather than trusting 81: the number lives in the reference, and every
+other file that names it is quoting.

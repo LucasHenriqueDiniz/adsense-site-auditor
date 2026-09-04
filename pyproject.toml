@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "adsense-site-auditor"
 version = "0.1.0"
@@ -12,6 +16,14 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.6",
 ]
+
+# Só `adsense_checks` é pacote. `templates/` e `references/` são dados em Markdown
+# e `scripts/` são CLIs executados por caminho, nunca importados por outro pacote.
+# Sem esta lista, a descoberta flat-layout do setuptools enxerga três diretórios
+# importáveis e recusa o build inteiro — `uv pip install -e .`, documentado em
+# scripts/README.md, falhava com "Multiple top-level packages discovered".
+[tool.setuptools]
+packages = ["adsense_checks"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

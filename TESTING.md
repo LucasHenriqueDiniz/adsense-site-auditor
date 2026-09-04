@@ -25,13 +25,14 @@ them is what made the old claim possible.
 ### Deterministic checks — unit tests, running now
 
 Anything decidable from the page or the HTTP response: robots.txt directives,
-status codes, presence of ads.txt, word counts, template overlap, "coming soon"
+status codes, word counts, template overlap, "coming soon"
 strings, broken navigation links. A script either finds these or does not, and
 the answer does not depend on judgement.
 
 ```bash
-uv venv && uv pip install requests pytest ruff
-.venv/bin/python -m pytest tests/ -q
+uv venv && uv pip install -e '.[dev]'
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ruff check .
 ```
 
 These tests are the ground truth for the deterministic layer. Every fixed

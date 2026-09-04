@@ -14,7 +14,10 @@ Mode: Pre-application audit
 Site type: Tool site (or: Quiz site, Blog, Directory, Hybrid)
 ```
 
-The skill will check all 70+ AdSense requirements and output a readiness decision: **Not ready**, **Ready after fixes**, or **Ready**.
+The skill will check every requirement ID in `references/adsense-requirements.md` —
+81 of them today — and output a readiness decision: **Not ready**, **Ready after
+fixes**, or **Ready**. The reference is the authoritative list; `SKILL.md` gives
+the command that recounts it.
 
 ---
 
@@ -41,7 +44,7 @@ Requirements:
 - Blocker findings (must fix)
 - High-risk findings (should fix)
 - Medium findings (nice to fix)
-- Complete checklist table with 70+ requirement IDs
+- Complete checklist table, one row per requirement ID in the reference
 
 ---
 
@@ -195,10 +198,12 @@ Requirements:
 ```
 
 **Focus areas:**
-- ADS-CONTENT-01: Each tool page has original explanation + 300+ words
-- ADS-CONTENT-02: Content is not copied from other converters/generators
-- ADS-CONTENT-03: Substantial content, not just tool UI
-- ADS-UX-02: Tools are organized into clear categories with internal links
+- ADS-CONTENT-01 (`judgement`): each tool page carries an original explanation, not just the widget
+- ADS-CONTENT-02 (`judgement`): content is not copied from other converters/generators
+- ADS-CONTENT-03 (`auto`): main content is substantial. `analyze_text_depth.py`
+  measures it against `--min-words`, 300 by default — a review threshold this
+  repo chose, not a Google policy line. AdSense publishes no word count
+- ADS-UX-02 (`judgement`): tools are organized into clear categories with internal links
 
 ---
 
@@ -224,7 +229,9 @@ Template text overlap acceptable threshold: 30%
 **Focus areas:**
 - ADS-CONTENT-01: Quizzes are original, not templated; results have value
 - ADS-CONTENT-02: Result pages are unique, not auto-generated
-- ADS-CONTENT-08: Template reuse is <40%; no doorway patterns
+- ADS-CONTENT-08: No keyword repetition or doorway patterns. This one is
+  `judgement` and carries no number; the <40% template-overlap figure belongs to
+  `references/quiz-site-rubric.md`, which is where to read it from
 - ADS-UX-02: Homepage and categories have editorial content
 
 ---
@@ -234,18 +241,26 @@ Template text overlap acceptable threshold: 30%
 Before invoking the skill, run these to gather data:
 
 ```bash
-# Crawl the site
-python scripts/crawl_site.py https://example.com --depth 2 --output crawl.json
+# Pre-flight gate: unfinished markers, trust pages, contact channel, broken navigation
+python scripts/check_completeness.py https://example.com
 
-# Check technical requirements
-python scripts/check_technical.py https://example.com --output technical.txt
+# robots.txt, sitemap, reachability, and DNS/TLS/response time (uptime is reported
+# as a gap: one request cannot establish reliability over time)
+python scripts/check_technical.py https://example.com
 
-# Analyze text depth
-python scripts/analyze_text_depth.py crawl.json --min-words 300 --output depth.txt
+# Crawl: reachability, redirect chains, URL stability
+python scripts/crawl_site.py https://example.com --depth 2
 
-# Check for duplicates
-python scripts/check_duplicates.py crawl.json --threshold 0.8 --output duplicates.txt
+# Content depth, one or more URLs
+python scripts/analyze_text_depth.py https://example.com/a https://example.com/b
+
+# Near-duplicate detection between the URLs you name
+python scripts/check_duplicates.py https://example.com/a https://example.com/b
 ```
+
+Every script takes URLs and writes to stdout — redirect if you want a file. The
+`--output` flag and the `crawl.json` hand-off this block used to show do not
+exist, so the old commands failed on the first argument.
 
 Then include the outputs in your skill invocation:
 
@@ -314,7 +329,9 @@ gate certified itself as complete with eight requirements missing.
 **Verified vs asserted**
 
 Break the passes down by decidability, because "Ready" means something different
-for each and a single number hides it:
+for each and a single number hides it. The denominators come from the
+decidability table in `references/adsense-requirements.md`, which is where they
+are maintained — re-read them there rather than trusting the copies below:
 
 - `auto` observed by a check that ran: `<n>` of 35
 - `judgement` reviewed with evidence: `<n>` of 34
@@ -335,7 +352,9 @@ for each and a single number hides it:
 
 ## Need Help?
 
-- **How to use this skill?** → Ask: `/adsense-site-auditor --help` (or read this file)
+- **How to use this skill?** → This file. There is no `--help`: the skill is
+  invoked as `/adsense-site-auditor` with the URL and mode in the prompt body.
+  The `--help` flags belong to the scripts (`python scripts/check_technical.py --help`)
 - **What does a requirement mean?** → Check `references/adsense-requirements.md` for official Google source
 - **Is my site a tool/quiz site?** → Review `references/tool-site-rubric.md` or `references/quiz-site-rubric.md`
 - **How do I fix [finding]?** → Use Task Generation mode to convert audit results into actionable tasks

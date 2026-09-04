@@ -190,6 +190,10 @@ Restricted content is not always an account/application blocker by itself, but i
 
 ## J. Site Completeness and Maturity
 
+This section is inference, not a separate documented rule: it restates
+`ADS-CONTENT-04` ("must not be under construction, empty, or built only to
+display ads") as items a check can decide. Treat it as a reading of section C.
+
 A site that appears unfinished or under construction is a common rejection
 reason. The rate is not published by Google, and the figure that stood here
 (25%) had no source, so it is removed rather than repeated.
@@ -200,6 +204,10 @@ reason. The rate is not published by Google, and the figure that stood here
 | ADS-COMPLETE-02 | High | Site must have minimum 3 published guides/articles. Each must be substantive (1200+ words) and fully written (not stub or outline). | `auto` Count pages tagged as guide/article/blog. Measure word count of main content. Verify each is complete (has intro, body, conclusion). |
 
 ## K. Publisher Trust and Identity Verification
+
+This section is inference, not a separate documented rule: it restates
+`ADS-PUB-05` (no hiding or misstating publisher identity) and `ADS-UX-05` (trust
+pages) as items a check can decide. Treat it as a reading of sections D and G.
 
 Google rejects sites where publisher identity cannot be verified. The share of
 rejections this accounts for is not published; the figure that stood here (15%)
@@ -221,7 +229,7 @@ as a reasonable reading of section C, not as a separate documented rule.
 | --- | --- | --- | --- |
 | ADS-CONTENT-ORIGINAL | High | Tool/app pages must articulate unique value proposition. If a similar tool exists elsewhere, the site must explain why theirs is different (unique features, better UX, original data, specialized focus). Generic "do the same thing as 100 competitors" signals low value. | `judgement` For each tool: search Google for competitors. Read competitor pages. Compare: unique features? Original data? Better UX? Specialized use case? If none of these: High Risk. |
 | ADS-CONTENT-ADDED-VALUE | High | Guides must not be only curated/aggregated content. Each guide must include original analysis, original examples, original data/research, or original tools/calculators. | `judgement` Review each guide. Does it include: original case studies? Original research/data? Original examples not found elsewhere? Original tools/calculators embedded? If only links to others' content: High Risk. |
-| ADS-CONTENT-OVERLAP | High | Measure text overlap with top SERP competitors. Pages with >60% text overlap are at high rejection risk. | `auto` Use check_duplicates.py to compare page text against top 5 Google results for key terms. Report overlap %. Threshold: <40% = safe, 40-60% = monitor, >60% = High Risk. |
+| ADS-CONTENT-OVERLAP | High | Measure text overlap with top SERP competitors. Pages with >60% text overlap are at high rejection risk. | `auto` Decidable in principle, implemented by nothing here — see "What `auto` does not mean" above. No script in this repo searches, so `check_duplicates.py` prints a permanently `MISSING` ADS-CONTENT-OVERLAP line saying the comparison was not made; it compares only the URLs you name against each other. To decide this row, retrieve the top 5 results yourself and pass their text to `adsense_checks.duplicates.compare_against`. Threshold: <40% = safe, 40-60% = monitor, >60% = High Risk. |
 
 ## M. Recommended Audit Output
 

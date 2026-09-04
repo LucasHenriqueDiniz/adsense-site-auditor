@@ -1,267 +1,147 @@
 # AdSense Site Auditor — Helper Scripts
 
-These Python scripts automate data collection for AdSense website audits. They work as standalone CLI tools or can be invoked from the Claude Code skill.
+Five CLIs over `adsense_checks/`, where every decision lives and is unit-tested.
+Each script is a thin wrapper: it parses arguments, calls the module, and renders.
+Nothing here decides anything on its own.
 
-## Quick Start
+This file used to document a different set of scripts — flags, JSON hand-off
+files and checks that no longer exist — so treat the table below, and
+`--help`, as the only description of the current surface.
 
-All scripts require Python 3.7+ and `requests`:
+## The one rule
+
+**A check that could not observe its condition never reports a pass.** Every
+script exits non-zero unless every check it ran observed its condition and that
+condition held. A site the script could not read is `ERROR`, not "0 problems";
+a sample that never grew past the homepage is `MISSING`, not "all pages fine".
+
+| Status | Meaning | Exit |
+| --- | --- | --- |
+| `PASS` | Observed, and the condition held | 0 |
+| `note` | An observation the report does not decide on | 0 |
+| `MISS` | The thing checked for is absent, or could not be observed | 1 |
+| `WARN` | Observed, and below the configured bar | 1 |
+| `FAIL` | Observed, and broken | 1 |
+| `ERR ` | The check itself could not run | 1 |
+
+## Quick start
 
 ```bash
-pip install requests
+uv pip install -e .          # only dependency is requests
+python scripts/check_completeness.py https://example.com
 ```
+
+Every script takes URLs and writes to stdout. There is **no `--output` flag** and
+**no JSON hand-off file**: redirect if you want a file.
 
 ## Scripts
 
-### 1. crawl_site.py — Website Crawler
+| Script | Arguments | Requirements | What it decides |
+| --- | --- | --- | --- |
+| `check_completeness.py` | `URL` `[--nav-limit N] [--timeout S]` | ADS-COMPLETE-01, ADS-UX-05, ADS-AUTHOR-02 (part) | Unfinished markers on the home page, About/Contact present and not stubs, a contact channel in the HTML, navigation links that 4xx/5xx |
+| `check_technical.py` | `URL` `[--timeout S]` | ADS-CRAWL-01, -02, -06, -07 | Reachability, robots.txt for the three Google crawlers, sitemap discovery and parsing, DNS/TLS/response time |
+| `crawl_site.py` | `URL` `[--depth N] [--max-pages N] [--delay S] [--timeout S] [--verify-stateless]` | ADS-CRAWL-01, -04, -05 | Breadth-first crawl; pages answer 2xx publicly, redirect chains are short and stateless, URLs carry no session ids |
+| `analyze_text_depth.py` | `URL [URL ...]` `[--min-words N]` | ADS-CONTENT-03 | Main-content word count per page, chrome excluded where detectable. It does **not** decide ADS-COMPLETE-02: that requirement counts three articles over 1200 words, and this measures one page at a time |
+| `check_duplicates.py` | `URL [URL ...]` `[--threshold F]` | ADS-CONTENT-02 (part), ADS-CONTENT-OVERLAP | Near-duplicate groups among the URLs you name, by word shingles and Jaccard. ADS-CONTENT-OVERLAP is reported `MISSING` on every run: no search is performed |
 
-Crawls a website and collects URLs, titles, meta descriptions, and H1s.
+All five take `-v/--verbose`, which prints the per-check details dictionary.
+`crawl_site.py -v` additionally dumps per-page evidence: title, H1 count, meta
+description, visible word count, and the links it chose not to follow.
 
-**Usage:**
-```bash
-python crawl_site.py <URL> [--depth N] [--output FILE.json]
-```
+### Defaults worth knowing
 
-**Examples:**
-```bash
-python crawl_site.py https://example.com --depth 2
-python crawl_site.py https://example.com --depth 1 --output crawl_report.json
-```
+| Flag | Default | Why |
+| --- | --- | --- |
+| `--depth` | 2 | |
+| `--max-pages` | 50 | |
+| `--delay` | 0.5s | Politeness. A crawler with no ceiling and no pause is a load generator. |
+| `--min-words` | 300 | A **review threshold**, not a Google policy line — AdSense publishes no word count. ADS-COMPLETE-02's 1200 is in the requirement itself. |
+| `--threshold` | 0.6 | ADS-CONTENT-OVERLAP puts high risk above 60%. The 0.8 this file used to document sat above that entire band, so every pair the rubric wants flagged went unreported. |
+| `--nav-limit` | 25 | When the limit bites, the broken-link count is a lower bound and the report says so. |
 
-**Output:**
-- List of URLs with HTTP status, title, meta description, content length
-- JSON file (if `--output`) containing crawl results for use by other scripts
+The crawler identifies itself as `Mediapartners-Google`, because the question
+this audit asks is what the AdSense crawler is served — sites do serve it
+differently.
 
-**Useful for:**
-- ADS-CRAWL-01: Verify site is live and accessible
-- ADS-CRAWL-02: Check which pages are crawlable
-- ADS-SITE-01: Get list of pages to audit
+## What these scripts do NOT do
 
----
+Stated because each one used to be claimed somewhere:
 
-### 2. analyze_text_depth.py — Text Depth & Thin Content Detector
+- **No SERP search.** ADS-CONTENT-OVERLAP asks for similarity against the top 5
+  search results. `check_duplicates.py` compares the URLs you give it against
+  each other and nothing else. `adsense_checks.duplicates.compare_against` takes
+  competitor texts a caller supplies; obtaining them is external work.
+- **No security headers, and no uptime.** CSP, X-Frame-Options and HSTS are
+  checked by nothing in this repo. `check_technical.py` reports three of
+  ADS-CRAWL-06's four parts — DNS, TLS, response time — and names uptime as an
+  explicit gap: one request cannot establish reliability over time.
+- **No JavaScript.** A client-rendered shell is reported as `ERROR`, not as a
+  thin page: it is a page this audit cannot read, which is a different finding.
+- **Nowhere near every requirement.** These scripts stamp **12 requirement IDs**.
+  Eleven of them are among the 35 marked `auto` in
+  `references/adsense-requirements.md`; the twelfth, `ADS-CONTENT-02`, is marked
+  `judgement`, so the scripts contribute evidence toward it and do not settle
+  it. That leaves 24 `auto` requirements with no implementation at all — everything under `ADS-PRIV`, `ADS-TXT`, `ADS-PROG` and
+  all three `auto` rows under `ADS-PUB`. Those four prefixes are 14 of the 24;
+  the other ten are `ADS-ELIG-04`, `ADS-OWN-03`, `ADS-CONTENT-04/-05/-06`,
+  `ADS-UX-04`, `ADS-CRAWL-03`, `ADS-REST-08`, `ADS-COMPLETE-02` and
+  `ADS-AUTHOR-03`. Treat a requirement these scripts never stamp as unaudited,
+  not as passing.
 
-Analyzes pages for word count, text density, and thin-content risk.
+  Re-derive the 12 rather than trusting it. Match the quoted literal, not any
+  mention: several IDs appear in comments precisely to say they are *not*
+  decided here, and a looser grep counts those too.
 
-**Usage:**
-```bash
-python analyze_text_depth.py <URL_or_FILE> [--min-words N] [--output FILE]
-```
+  ```bash
+  grep -rhoE '"ADS-[A-Z0-9-]+( \(part\))?"' scripts/ adsense_checks/ --include='*.py' | sort -u
+  ```
 
-**Examples:**
-```bash
-# Analyze single URL
-python analyze_text_depth.py https://example.com/article --min-words 300
+  Counting broken navigation links is `ADS-COMPLETE-01`'s "the site looks
+  abandoned", not `ADS-UX-01` — that one is `judgement`, about readability,
+  alignment and dropdowns, and nothing here decides it.
 
-# Analyze all URLs from crawl report
-python analyze_text_depth.py crawl_report.json --min-words 500 --output depth_report.txt
-```
-
-**Output:**
-- Risk classification: OK, BORDERLINE, THIN, ERROR
-- Word count and text density for each page
-- Summary of high-risk pages
-
-**Useful for:**
-- ADS-CONTENT-01: Verify pages have useful, original content
-- ADS-CONTENT-03: Check if pages have substantial content (not just UI)
-- ADS-CONTENT-04: Detect under-construction or empty pages
-
----
-
-### 3. check_duplicates.py — Duplicate & Boilerplate Detector
-
-Detects near-duplicate pages and high boilerplate reuse using text similarity.
-
-**Usage:**
-```bash
-python check_duplicates.py <URL_or_FILE> [--threshold N] [--output FILE]
-```
-
-**Examples:**
-```bash
-# Check single URL for duplicates (loads similar pages automatically)
-python check_duplicates.py https://example.com/quiz1 --threshold 0.8
-
-# Analyze all URLs from crawl report
-python check_duplicates.py crawl_report.json --threshold 0.75 --output dup_report.txt
-```
-
-**Output:**
-- Groups of similar pages with similarity percentage
-- Average similarity per page group
-- Risk assessment (high duplication = flag)
-
-**Useful for:**
-- ADS-CONTENT-02: Detect copied or near-duplicate content
-- ADS-CONTENT-08: Find template boilerplate reuse
-- Quiz/entertainment sites: Identify auto-generated or templated quiz pages
-
----
-
-### 4. check_technical.py — Technical Checks
-
-Verifies robots.txt, sitemap.xml, redirects, security headers, HTTPS, DNS, and uptime.
-
-**Usage:**
-```bash
-python check_technical.py <URL> [--output FILE]
-```
-
-**Examples:**
-```bash
-python check_technical.py https://example.com
-python check_technical.py https://example.com --output technical_report.txt
-```
-
-**Output:**
-- robots.txt: Is it blocking Googlebot or Mediapartners-Google?
-- sitemap.xml: Does it exist and contain URLs?
-- Redirects: Excessive redirect chains?
-- Security headers: CSP, X-Frame-Options, HSTS
-- HTTPS: Site uses secure connection?
-- DNS/uptime: Can site be resolved and reached?
-
-**Useful for:**
-- ADS-CRAWL-01: Verify site is live
-- ADS-CRAWL-02: Check robots.txt doesn't block crawlers
-- ADS-CRAWL-06: DNS and hosting reliability
-- ADS-CRAWL-07: Sitemap for crawlability
-
----
-
-## Workflow Example
-
-### Pre-Application Audit for smallwebapps.com
+## Workflow
 
 ```bash
-# Step 1: Crawl the site
-python crawl_site.py https://smallwebapps.com --depth 2 --output crawl.json
+# 1. Pre-flight. If this fails, fix the structure before going further.
+python scripts/check_completeness.py https://example.com
 
-# Step 2: Check technical requirements
-python check_technical.py https://smallwebapps.com --output technical.txt
+# 2. Crawlability and technical availability.
+python scripts/check_technical.py https://example.com
+python scripts/crawl_site.py https://example.com --depth 2 -v
 
-# Step 3: Analyze text depth on all pages
-python analyze_text_depth.py crawl.json --min-words 300 --output depth.txt
-
-# Step 4: Check for duplicate content
-python check_duplicates.py crawl.json --threshold 0.8 --output duplicates.txt
-
-# Now feed these reports to Claude Code skill:
-# /adsense-site-auditor https://smallwebapps.com
-# [Provide crawl.json, technical.txt, depth.txt, duplicates.txt as context]
+# 3. Content. Sample the largest SECTION of the site, not the trust pages:
+#    a catalogue site's best-written pages are exactly the ones a gate looks at.
+python scripts/analyze_text_depth.py https://example.com/tool-a https://example.com/tool-b
+python scripts/check_duplicates.py https://example.com/tool-a https://example.com/tool-b
 ```
 
----
+Then paste the output into the skill invocation, which walks every requirement ID
+and returns `Not ready`, `Ready after fixes` or `Ready` with a checklist.
 
-## Integration with Claude Code Skill
-
-When invoking the skill, you can reference script outputs:
-
-```text
-/adsense-site-auditor
-
-URL: https://smallwebapps.com
-Crawl report: [results from crawl_site.py]
-Text depth analysis: [results from analyze_text_depth.py]
-Duplicate analysis: [results from check_duplicates.py]
-Technical checks: [results from check_technical.py]
-
-Mode: Pre-application audit
-Site type: Tool site
-```
-
-The skill will use this data to populate findings with concrete evidence for each ADS-* requirement.
-
----
-
-## Notes
-
-- **Timeout**: Default 10 seconds per request. Adjust with `--timeout` if needed (not currently exposed but can edit scripts).
-- **Rate limiting**: Scripts use standard delays. For large crawls, consider adding `--delay` between requests.
-- **Content extraction**: Text extraction ignores `<script>`, `<style>`, `<nav>`, `<footer>` to focus on main content.
-- **Similarity threshold**: Default 0.8 (80%). Lower for strict duplication, higher for boilerplate tolerance.
-
----
-
-### 5. check_completeness.py — Site Completeness & Publisher Identity
-
-Detects "site unfinished" patterns and verifies publisher identity verification. Accounts for 25-40% of AdSense rejections.
-
-**Usage:**
-```bash
-python check_completeness.py <URL> [--output FILE]
-```
-
-**Examples:**
-```bash
-python check_completeness.py https://example.com
-python check_completeness.py https://example.com --output completeness_report.txt
-```
-
-**Output:**
-- Site completeness score (About page, Contact page, placeholder text, navigation)
-- Publisher identity verification (real name, contact method, credentials)
-- Risk classification: OK, HIGH_RISK, FAIL
-
-**Useful for:**
-- ADS-COMPLETE-01: Detect "site unfinished" pattern
-- ADS-COMPLETE-02: Verify 3+ published guides exist
-- ADS-AUTHOR-01, ADS-AUTHOR-02: Verify publisher identity is real and contactable
-- Pre-flight gate: Run this FIRST before 73-item full audit
-
-**Key red flags detected:**
-- About page missing or is stub
-- Contact page has placeholder ("will be added here")
-- Tool pages say "Coming Soon" or "Not yet"
-- No real name in About (anonymous site)
-- No contact method (email, form, or social)
-- Homepage contains "under construction" or similar
-
----
-
-## Workflow Example: Pre-Flight Audit
+## Tests
 
 ```bash
-# Step 1: Run pre-flight checks FIRST
-python check_completeness.py https://yoursite.com --output completeness.txt
-python check_technical.py https://yoursite.com --output technical.txt
-
-# If completeness shows HIGH_RISK or FAIL, stop here and fix before continuing
-
-# Step 2: If pre-flight passes, run detailed checks
-python crawl_site.py https://yoursite.com --depth 2 --output crawl.json
-python analyze_text_depth.py crawl.json --min-words 300 --output depth.txt
-python check_duplicates.py crawl.json --threshold 0.8 --output duplicates.txt
-
-# Step 3: Feed all reports to Claude Code skill
-/adsense-site-auditor
-URL: https://yoursite.com
-Mode: Pre-application audit
-[Paste outputs from all scripts above]
+uv pip install -e '.[dev]'
+python -m pytest -q
+python -m ruff check .
 ```
 
----
+The suite runs against a real local HTTP server rather than a mocked `requests`:
+most of the defects these modules were written for were protocol behaviour — a
+redirect followed silently, a 403 confused with a 404, `HEAD` refused by a WAF —
+and a mock reproduces the wrong assumption instead of the protocol.
 
 ## Troubleshooting
 
-**`ModuleNotFoundError: No module named 'requests'`**
-```bash
-pip install requests
-```
-
-**Scripts hang or timeout**
-- Check network connectivity
-- Site may be slow or blocking bots
-- Reduce `--depth` for crawl_site.py
-- Increase timeout (edit script)
-
-**Empty or error results**
-- Verify URL is correct and accessible
-- Check if site requires authentication
-- Site may block automated requests; add delays or adjust User-Agent
-
----
+| Symptom | Cause |
+| --- | --- |
+| `MissingSchema: Invalid URL 'crawl.json'` | You used an old command. These scripts take URLs, not files. |
+| `unrecognized arguments: --output` | Same: the flag no longer exists. Redirect stdout. |
+| Everything `ERR` with a connection error | The site refused `Mediapartners-Google`, which is itself the finding for ADS-CRAWL-02. |
+| `MISS` on a check that looks fine | Read the line. `MISSING` means the condition was not observed, which is deliberately not a pass. |
+| Exit 1 with no `FAIL` | Something was `MISS` or `WARN`. Only `PASS`/`note` exit 0. |
 
 ## License
 
-Part of AdSense Site Auditor Skill. Use for AdSense audit purposes.
+See `LICENSE` at the repository root.
