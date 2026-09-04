@@ -688,7 +688,7 @@ def measure_url(
     *,
     min_words: int = DEFAULT_MIN_WORDS,
     session: requests.Session | None = None,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> TextDepth:
     """Fetch a page and measure its main-content depth.
 

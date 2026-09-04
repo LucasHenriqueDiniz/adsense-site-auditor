@@ -16,6 +16,7 @@ from adsense_checks.crawl import (
     CheckResult,
     CrawlResult,
     Page,
+    _resolve_links,
     check_pages_reachable,
     check_redirect_chain,
     check_session_urls,
@@ -24,6 +25,7 @@ from adsense_checks.crawl import (
     normalize_url,
     parse_html,
     same_site,
+    site_host,
 )
 from adsense_checks.status import Status
 
@@ -255,7 +257,9 @@ def test_crawl_continua_apos_redirect_que_troca_o_host(server):
 
     r = crawl(entrada, delay=0)
 
-    assert r.base_host == "127.0.0.1"  # veio da resposta final, não de 'localhost'
+    # Veio da resposta final, não de 'localhost'. A porta faz parte da identidade
+    # do site — dois servidores em portas distintas são dois sites.
+    assert r.base_host == f"127.0.0.1:{porta}"
     caminhos = sorted(url.rsplit("/", 1)[-1] for url in (p.final_url for p in r.pages))
     assert caminhos == ["home", "precos", "sobre"]
     assert len(r.pages) == 3
@@ -985,3 +989,198 @@ def test_nenhuma_pagina_legivel_nao_aprova_requisito_nenhum(server):
     # E o requisito que DEVE falhar continua falhando, para o teste não passar
     # só porque tudo virou MISSING.
     assert check_pages_reachable(resultado).status is Status.FAIL
+
+
+def test_reconferencia_sem_cookies_usa_o_user_agent_do_crawl(server):
+    """A verificação re-pedia com o UA padrão, não com o que o crawl usou.
+
+    Num site que varia o redirect por agente, a URL final da reconferência
+    diferia da do crawl e o relatório dizia "redirect depends on session state"
+    quando a única coisa que mudou foi o agente.
+    """
+    base, routes = server
+    routes["/"] = (200, HTML, "<html><body><a href='/a'>a</a></body></html>")
+    routes["/a"] = (301, {**HTML, "Location": base + "/b"}, "")
+    routes["/b"] = (200, HTML, "<html><body>b</body></html>")
+
+    resultado = crawl(base + "/", max_depth=1, delay=0, user_agent="Agente-De-Teste/1.0")
+    assert resultado.user_agent == "Agente-De-Teste/1.0"
+
+    routes.received.clear()
+    check_redirect_chain(resultado, verify_stateless=True)
+
+    agentes = {cabecalhos.get("User-Agent") for _m, _c, cabecalhos in routes.received}
+    assert agentes == {"Agente-De-Teste/1.0"}
+
+
+def test_porta_faz_parte_da_identidade_do_site(server, outro_servidor):
+    """Um crawl não pode sair do servidor que está auditando.
+
+    `site_host` usava `urlparse().hostname`, que descarta a porta, então dois
+    servidores distintos em 127.0.0.1 eram o mesmo site: o crawl seguia o link,
+    baixava as páginas do estranho e as reportava como suas — sob um robots.txt
+    que nunca foi lido, porque robots veio da primeira origem.
+    """
+    base, routes = server
+    vizinho, rotas_vizinho = outro_servidor
+    routes["/"] = (200, HTML, pagina("Home", f'<a href="{vizinho}/secreto">v</a>'))
+    rotas_vizinho["/secreto"] = (200, HTML, pagina("Secreto"))
+
+    r = crawl(base + "/", max_depth=2, delay=0, respect_robots=False)
+
+    assert [p.title for p in r.pages] == ["Home"]
+    assert rotas_vizinho.received == []
+    assert any("/secreto" in url for url in r.off_site)
+
+
+def test_porta_default_explicita_nao_divide_o_site():
+    """`https://ex.com` e `https://ex.com:443` são um endereço escrito duas vezes."""
+    assert same_site("https://ex.com:443/a", "https://ex.com/") is True
+    assert same_site("http://ex.com:80/a", "http://ex.com/") is True
+    assert same_site("https://ex.com:8080/a", "https://ex.com/") is False
+
+
+def test_porta_malformada_nao_quebra_a_identidade():
+    """urlparse().port levanta ValueError; um href lixo é off-site, não um crash."""
+    assert same_site("http://ex.com:lixo/a", "http://ex.com/") is False
+
+
+def test_href_malformado_na_pagina_nao_derruba_o_crawl(server):
+    """A URL do operador estava perfeita; bastava UM href malformado no HTML.
+    `urlsplit` levanta ValueError num host entre colchetes inválido, e isso
+    escapava de `_resolve_links` como crash em vez de virar link ignorado."""
+    base, routes = server
+    routes["/"] = (200, HTML, pagina("Home", '<a href="http://[::1:99999]/x">ruim</a>'
+                                             '<a href="/ok">bom</a>'))
+    routes["/ok"] = (200, HTML, pagina("Ok"))
+
+    r = crawl(base + "/", max_depth=2, delay=0, respect_robots=False)
+
+    assert [p.title for p in r.pages] == ["Home", "Ok"]
+
+
+def test_identidade_de_site_e_de_url_nao_discordam_sobre_www():
+    """`same_site` fundia `www.` e `normalize_url` não, então um link na forma
+    `www.` passava no filtro de mesmo-site, ganhava identidade DIFERENTE e era
+    buscado de novo — e o corpus ficava com um documento sob dois nomes."""
+    assert same_site("http://ex.com/a", "http://www.ex.com/") is True
+    assert normalize_url("http://ex.com/a") == normalize_url("http://www.ex.com/a")
+
+
+def test_porta_default_nao_depende_do_esquema():
+    """`http://ex.com:443/` é o que um proxy que termina TLS emite quando reporta
+    SERVER_PORT=443 sem flag de HTTPS. Comparar a porta com o default do esquema
+    da própria URL partia um mesmo endereço em duas identidades, e a página
+    declarada nessa forma deixava de ser requisitada."""
+    escritas = ("http://ex.com:443/", "https://ex.com/", "https://ex.com:443/",
+                "http://ex.com:80/", "http://ex.com/")
+    assert len({site_host(u) for u in escritas}) == 1
+
+
+def test_seed_de_fora_do_site_e_recusada(server, outro_servidor):
+    """As seeds entravam na fila sem checagem de mesmo-site e eram casadas contra
+    o robots.txt do site auditado — o único ponto em que esta ferramenta buscaria
+    a URL de um terceiro sob um arquivo que nunca foi lido para ele."""
+    base, routes = server
+    vizinho, rotas_vizinho = outro_servidor
+    routes["/"] = (200, HTML, pagina("Home"))
+    rotas_vizinho["/secreto"] = (200, HTML, pagina("Secreto"))
+
+    r = crawl(base + "/", delay=0, respect_robots=False,
+              extra_seeds=[vizinho + "/secreto"])
+
+    assert rotas_vizinho.received == []
+    assert [p.title for p in r.pages] == ["Home"]
+    assert any("/secreto" in url for url in r.off_site)
+
+
+def test_crawl_truncado_nao_aprova_ADS_CRAWL_01(server):
+    """`[PASS] pages reachable` sobre um crawl cortado no teto: três 500 logo
+    depois do limite ficavam invisíveis, e subir --max-pages virava FAIL no mesmo
+    site."""
+    base, routes = server
+    links = "".join(f'<a href="/p{i}">p{i}</a>' for i in range(6))
+    routes["/"] = (200, HTML, pagina("Home", links))
+    for i in range(6):
+        routes[f"/p{i}"] = (200, HTML, pagina(f"P{i}"))
+
+    r = crawl(base + "/", max_depth=2, max_pages=3, delay=0, respect_robots=False)
+    check = check_pages_reachable(r)
+
+    # MISSING: as paginas depois do teto nao foram observadas.
+    assert check.status is Status.MISSING
+    assert any("max_pages" in f for f in check.findings)
+    assert check.status.is_bad
+
+
+def test_url_com_fragmento_e_host_quebrado_nao_levanta():
+    """`urldefrag` parseia por dentro, então levantava o mesmo ValueError de host
+    entre colchetes que `split_url`/`join_url` foram criados para fechar — e
+    sobreviveu à primeira varredura em dois lugares: no `normalize_url`, que é a
+    única função de identidade, e no `_resolve_links`, que chega nele com href
+    cru sempre que um `<base href>` não pôde ser resolvido."""
+    assert normalize_url("http://[abc/#y")  # não levanta
+    nao_http = []
+    assert _resolve_links("", ["http://[abc/#y", "/sobre"], nao_http) == []
+    # E o href relativo que não pôde ser resolvido é registrado em vez de sumir.
+    assert "/sobre" in nao_http
+
+
+def test_ipv6_mantem_os_colchetes_na_identidade():
+    """`hostname` devolve o IPv6 sem colchetes, então `[::1]:9411` e
+    `[::1:9411]` viravam os dois `::1:9411`: o endereço de um terceiro era
+    varrido como página do site auditado, sob um robots.txt nunca lido para ele."""
+    assert site_host("http://[::1]:9411/") != site_host("http://[::1:9411]/")
+    assert normalize_url("http://[::1]:8000/a") == "http://[::1]:8000/a"
+    # E a identidade continua sendo uma URL, então é idempotente.
+    uma_vez = normalize_url("http://[::1]:8000/a")
+    assert normalize_url(uma_vez) == uma_vez
+
+
+def test_ponto_final_no_host_e_o_mesmo_site():
+    """`localhost.` é o mesmo FQDN escrito de forma absoluta e o servidor
+    responde os dois. Tratar como outro site mandava todo link escrito assim
+    para `off_site` — o defeito "varreu 1 URL e não avisou nada"."""
+    assert same_site("http://localhost.:19405/x", "http://localhost:19405/") is True
+
+
+def test_idn_e_punycode_sao_um_site():
+    """requests codifica em IDNA na hora do fetch, então as duas grafias chegam
+    no mesmo servidor e não podem ser dois sites."""
+    assert same_site("http://пример.рф/a", "http://xn--e1afmkfd.xn--p1ai/") is True
+
+
+def test_urls_impossiveis_distintas_nao_colapsam_numa_identidade():
+    """Renderizar a identidade vazia em `http:///<path>` dava a toda URL
+    impossível a mesma identidade, então dois links externos distintos
+    colapsavam em um e o segundo nunca era escaneado nem reportado."""
+    a, b = "http://parceiro-a.example:zz/promo", "http://parceiro-b.example:zz/promo"
+    assert normalize_url(a) != normalize_url(b)
+
+
+def test_credencial_raspada_da_pagina_nao_viaja(server):
+    """O crawler mandava o `user:pass@` que a própria página publicava, o 401
+    nunca acontecia, e "legível publicamente, sem autenticação" passava sobre
+    uma página que nenhum visitante anônimo abre."""
+    base, routes = server
+    porta = base.rsplit(":", 1)[1]
+    com_credencial = f"http://u:p@127.0.0.1:{porta}/privado"
+    routes["/"] = (200, HTML, pagina("Home", f'<a href="{com_credencial}">p</a>'))
+    routes["/privado"] = (401, {**HTML, "WWW-Authenticate": 'Basic realm="x"'}, "")
+
+    r = crawl(base + "/", max_depth=2, delay=0, respect_robots=False)
+
+    assert all("@" not in p.requested_url for p in r.pages)
+    check = check_pages_reachable(r)
+    assert check.status is Status.FAIL
+    assert any("not publicly readable" in f for f in check.findings)
+
+
+def test_head_sem_fechamento_nao_zera_a_contagem_de_palavras():
+    """O HTML5 permite omitir `</head>` e o HTMLParser não sintetiza, então o
+    contador nunca voltava a zero e uma página de 300 palavras era reportada
+    com 0 palavras visíveis. Os outros dois parsers do pacote acertam."""
+    html = "<!doctype html><html><head><title>T</title><body><p>" + "palavra " * 300 + "</p>"
+    p = parse_html(html)
+    assert p.word_count >= 300
+    assert "T" not in p.text  # e o título continua fora da contagem

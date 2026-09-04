@@ -534,7 +534,7 @@ def fetch_page_texts(
     urls: Iterable[str],
     *,
     extract: Callable[[str], str] | None = None,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: float = DEFAULT_TIMEOUT,
     session: requests.Session | None = None,
 ) -> Corpus:
     """Fetch each URL and extract its text, recording why any page is missing.
@@ -634,7 +634,7 @@ def check_urls(
     threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     page_ratio_threshold: float = DEFAULT_DUPLICATE_PAGE_RATIO,
     extract: Callable[[str], str] | None = None,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: float = DEFAULT_TIMEOUT,
     session: requests.Session | None = None,
     shingle_size: int = SHINGLE_SIZE,
 ) -> DuplicationResult:

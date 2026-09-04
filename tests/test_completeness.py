@@ -13,17 +13,23 @@ reproduziria a suposição errada em vez do protocolo.
 import pytest
 
 from adsense_checks.completeness import (
+    _ABOUT_HINT,
+    ABOUT_PATHS,
     BROKEN_NAV_FAIL_THRESHOLD,
     MIN_TRUST_PAGE_WORDS,
     NavLinkReport,
     Status,
+    _candidates,
     check_completeness,
     check_trust_pages,
     count_broken_nav_links,
     find_contact_channels,
     find_placeholders,
+    parse_document,
     visible_text,
 )
+from adsense_checks.completeness import as_base as as_base_publico
+from adsense_checks.http import Fetch
 
 # 66 palavras de prosa real, acima do mínimo de uma página de confiança.
 PROSA = "Escrevo sobre marcenaria desde 2015 e mantenho este site sozinho. " * 6
@@ -488,7 +494,10 @@ def test_limite_de_links_seguidos_e_reportado_como_contagem_parcial(server):
 
     assert (relatorio.found, relatorio.checked) == (5, 2)
     assert relatorio.truncated is True
-    assert relatorio.status is Status.INFO
+    # MISSING, nao INFO: os links depois do limite nao foram olhados, e a regra
+    # do pacote e que condicao nao observada nunca e aprovacao. Como INFO, um
+    # menu de 32 links com tres 404 depois do limite saia com exit 0.
+    assert relatorio.status is Status.MISSING
     assert "lower bound" in frases(relatorio)
     assert relatorio.passed is False
 
@@ -643,3 +652,95 @@ def test_MISSING_e_ERROR_nunca_contam_como_aprovacao():
     outro = NavLinkReport(base_url="http://exemplo/")
     outro.add(Status.ERROR, "nao consegui olhar")
     assert outro.passed is False
+
+
+def test_link_absoluto_com_www_nao_e_tratado_como_outro_site():
+    """`www.` não faz parte da identidade de um site.
+
+    A home alcançada no apex, com o link do rodapé escrito na forma `www.`
+    absoluta, tinha a página About que o próprio site declara descartada como
+    externa — e o resultado era MISSING sobre uma URL que ninguém pediu. É o
+    mesmo defeito de identidade que parou o crawler antigo, refeito aqui.
+    """
+    html = (
+        "<html><body><p>Bancada.</p>"
+        "<footer><a href='https://www.exemplo.com/pages/quem-eu-sou'>Sobre</a></footer>"
+        "</body></html>"
+    )
+    home = Fetch(
+        url="https://exemplo.com/",
+        final_url="https://exemplo.com/",
+        status_code=200,
+        text=html,
+        headers={"content-type": "text/html"},
+    )
+    candidatos = _candidates(
+        home, parse_document(html), "https://exemplo.com/", ABOUT_PATHS, _ABOUT_HINT, 6
+    )
+    declarados = [c.url for c in candidatos if c.declared]
+    assert declarados == ["https://www.exemplo.com/pages/quem-eu-sou"]
+
+
+def test_alvo_que_nomeia_um_documento_nao_ganha_barra(server):
+    """`as_base` punha `/` incondicional, então auditar `…/index.html` virava
+    `…/index.html/` e a auditoria inteira saía com "Home page could not be read:
+    HTTP 404" sobre um site perfeitamente no ar."""
+    base, routes = server
+    routes["/index.html"] = (200, {}, pagina("Casa", extra=MAILTO))
+
+    r = check_completeness(f"{base}/index.html")
+
+    assert "could not be read" not in " ".join(r.issues)
+
+
+def test_as_base_preserva_subdiretorio_e_descarta_query():
+    from adsense_checks.completeness import _join, as_base
+
+    assert as_base("https://ex.com/blog") == "https://ex.com/blog/"
+    assert _join(as_base("https://ex.com/blog"), "/about") == "https://ex.com/blog/about"
+    # Um documento resolve contra o diretório que o contém, que é o que urljoin faz.
+    assert as_base("https://ex.com/index.html") == "https://ex.com/index.html"
+    # Query e fragmento não fazem parte de uma base para joins relativos.
+    assert as_base("https://ex.com/blog?x=1") == "https://ex.com/blog/"
+    # Protocol-relative virava "https:////ex.com".
+    assert as_base("//ex.com/blog") == "https://ex.com/blog/"
+
+
+def test_link_de_nav_na_forma_www_nao_conta_como_dois_quebrados(server):
+    """`_canonical` comparava netloc literal enquanto `_same_site` fundia `www.`,
+    então uma URL quebrada linkada nas duas formas contava duas vezes — e três
+    links quebrados é a fronteira entre WARNING e FAIL."""
+    from adsense_checks.completeness import _canonical
+
+    assert _canonical("http://ex.com/x") == _canonical("http://www.ex.com/x")
+
+
+def test_home_que_nao_da_para_ler_nao_vira_aprovacao(server):
+    """Uma resposta não é um documento. Um 200 de corpo vazio, uma resposta JSON
+    e uma casca client-rendered passavam batido: a varredura de marcadores não
+    achava marcador em texto nenhum e a de navegação não achava link quebrado
+    entre link nenhum, então AS DUAS imprimiam PASS e o run saía 0 sobre uma
+    página que esta auditoria nunca leu. O detector de casca já estava importado
+    e já era aplicado às páginas de confiança; a home era o único documento sobre
+    o qual ninguém o consultava."""
+    base, routes = server
+    casca = ('<!doctype html><html><head><script src="/b.js"></script></head>'
+             '<body><div id="root"></div></body></html>')
+    for rota, corpo, cabecalhos, motivo in (
+        ("/casca", casca, {}, "client-rendered shell"),
+        ("/vazia", "", {}, "empty body"),
+        ("/json", '{"ok":1}', {"Content-Type": "application/json"}, "not HTML"),
+        ("/so-markup", "<html><body><div></div></body></html>", {}, "no visible text"),
+    ):
+        routes["/"] = (200, cabecalhos or {"Content-Type": "text/html"}, corpo)
+        r = check_completeness(base + "/")
+        assert r.status is Status.ERROR, rota
+        assert motivo in " ".join(r.issues), rota
+        # E nenhuma linha pode ter sido julgada.
+        assert r.trust is None and r.nav is None, rota
+
+
+def test_alvo_impossivel_nomeia_o_argumento_e_nao_culpa_o_site():
+    """`as_base` devolvia "/" e o relatório dizia "Home page could not be read:
+    Invalid URL '/'" — culpando o site pelo que o operador digitou."""
+    assert as_base_publico("http://[abc/") == "http://[abc/"

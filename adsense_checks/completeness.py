@@ -43,11 +43,12 @@ import unicodedata
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Literal
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import urlunsplit
 
 import requests
 
-from adsense_checks.http import DEFAULT_TIMEOUT, Fetch, fetch
+from adsense_checks.crawl import looks_like_document, normalize_url, same_site
+from adsense_checks.http import DEFAULT_TIMEOUT, Fetch, fetch, join_url, split_url
 from adsense_checks.status import Status, escalate, worst
 from adsense_checks.text import looks_javascript_rendered
 
@@ -633,7 +634,7 @@ def channels_in(doc: Document) -> ContactChannels:
             if _EMAIL_RE.fullmatch(address):
                 mailto.append(address)
             continue
-        if _is_social_host(fold(urlsplit(href).netloc)):
+        if _is_social_host(fold(split_url(href).netloc)):
             socials.append(href)
     text = doc.text
     emails = [m.group() for m in _EMAIL_RE.finditer(text)]
@@ -796,24 +797,57 @@ def as_base(url: str) -> str:
     common case, and the old checker reported their existing pages as 404.
     """
     url = url.strip()
-    if "://" not in url:
+    if url.startswith("//"):
+        # Protocol-relative. Prefixing the whole scheme gave "https:////ex.com".
+        url = "https:" + url
+    elif "://" not in url:
         url = "https://" + url
-    return url if url.endswith("/") else url + "/"
+    parts = split_url(url)
+    if not parts.netloc:
+        # Unparseable, or no host at all. Returning a bare "/" made the report
+        # blame the site — "Home page could not be read: Invalid URL '/'" — for
+        # what the operator typed. Handing the input back keeps the error naming
+        # the actual argument.
+        return url
+    path = parts.path or "/"
+    # The slash goes on a DIRECTORY only. Appending it unconditionally turned a
+    # target naming a document — `https://ex.com/index.html` — into
+    # `…/index.html/`, which 404s, and the whole audit came back "Home page could
+    # not be read: HTTP 404". For a document the right base is its containing
+    # directory, which is what urljoin already resolves to. The dot is a
+    # heuristic and it is wrong for a directory called `v1.0`; being wrong there
+    # costs a subdirectory prefix, being wrong the other way costs the audit.
+    if not looks_like_document(path):
+        path = path.rstrip("/") + "/"
+    # A query or fragment in a base is not part of any path it is joined with.
+    return urlunsplit((parts.scheme.lower(), parts.netloc, path, "", ""))
 
 
 def _join(base: str, path: str) -> str:
     # lstrip is the whole point: a leading slash would escape the subdirectory.
-    return urljoin(base, path.lstrip("/"))
+    return join_url(base, path.lstrip("/"))
 
 
 def _canonical(url: str) -> str:
-    parts = urlsplit(url)
-    path = parts.path.rstrip("/") or "/"
-    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, parts.query, ""))
+    """The identity of a URL, shared with the crawler so the two cannot disagree.
+
+    This used to compare `netloc` verbatim while `_same_site` folded `www.`, so a
+    nav link written in the `www.` form survived deduplication as a second target:
+    one broken URL was counted twice, and three counted broken links is the line
+    between WARNING and FAIL.
+    """
+    return normalize_url(url)
 
 
 def _same_site(url: str, home_url: str) -> bool:
-    return urlsplit(url).netloc.lower() == urlsplit(home_url).netloc.lower()
+    """Whether both URLs belong to the same site, `www.` not being part of one.
+
+    Comparing netloc exactly is the identity mistake `crawl.site_host` exists to
+    remove: on a home page reached at the apex, an absolute footer link to the
+    `www.` form read as another site, so the About page the site declares was
+    never requested and came back MISSING, and nav links there went unfollowed.
+    """
+    return same_site(url, home_url)
 
 
 # --------------------------------------------------------------------------
@@ -840,7 +874,7 @@ def check_trust_pages(
     base_url: str,
     *,
     session: requests.Session | None = None,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: float = DEFAULT_TIMEOUT,
     home_page: Fetch | None = None,
     max_linked_candidates: int = MAX_LINKED_CANDIDATES,
 ) -> TrustPagesReport:
@@ -932,12 +966,12 @@ def _candidates(
             continue
         if fold(href).startswith(("mailto:", "tel:", "javascript:")):
             continue
-        target = urljoin(home_url, href)
+        target = join_url(home_url, href)
         if not _same_site(target, home_url):
             continue
         # Either the visible label or the path may carry the word; a footer link
         # reading "Sobre" pointing at /pages/quem-eu-sou is found by the label.
-        if hint.search(fold(link.text)) or hint.search(fold(urlsplit(target).path)):
+        if hint.search(fold(link.text)) or hint.search(fold(split_url(target).path)):
             by_region[link.region].append(target)
     linked = by_region["footer"] + by_region["nav"] + by_region["body"]
     seen = {_canonical(home_url)}
@@ -965,7 +999,7 @@ def _resolve_trust_page(
     home: Fetch,
     home_text: str,
     session: requests.Session,
-    timeout: int,
+    timeout: float,
 ) -> PageOutcome:
     attempts: list[tuple[str, str]] = []
     # Tracks the worst thing that stopped us from reading a candidate. It only
@@ -1128,7 +1162,7 @@ def count_broken_nav_links(
     *,
     limit: int = DEFAULT_NAV_LINK_LIMIT,
     session: requests.Session | None = None,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: float = DEFAULT_TIMEOUT,
     home_page: Fetch | None = None,
 ) -> NavLinkReport:
     """Follow the home page's navigation links and count the ones that 4xx/5xx.
@@ -1191,7 +1225,10 @@ def count_broken_nav_links(
         )
     if report.truncated:
         report.add(
-            Status.INFO,
+            # MISSING for the same reason the crawl's page ceiling is: the links
+            # past the limit were not looked at. As INFO a 32-link menu with
+            # three 404s past `--nav-limit 25` exited 0.
+            Status.MISSING,
             f"Followed {report.checked} of {report.found} navigation links (limit {limit}); "
             "the broken-link count is a lower bound",
         )
@@ -1213,8 +1250,8 @@ def _nav_targets(
             continue
         if fold(href).startswith(("mailto:", "tel:", "javascript:", "data:")):
             continue
-        target = urljoin(home_url, href)
-        if urlsplit(target).scheme not in ("http", "https"):
+        target = join_url(home_url, href)
+        if split_url(target).scheme not in ("http", "https"):
             continue
         if not _same_site(target, home_url):
             continue  # external links are somebody else's uptime
@@ -1231,11 +1268,34 @@ def _nav_targets(
 # --------------------------------------------------------------------------
 
 
+def _why_unreadable(home: Fetch) -> str | None:
+    """Why the home page cannot be judged, or None when it can be.
+
+    Every branch here is a case where the checks below would have run over an
+    empty document and reported that they found nothing wrong with it.
+    """
+    if not home.ok:
+        return home.error or f"HTTP {home.status_code}"
+    media = home.headers.get("content-type", "").split(";")[0].strip().lower()
+    if media and media not in ("text/html", "application/xhtml+xml"):
+        return f"Content-Type {media!r} is not HTML"
+    if not home.text.strip():
+        return f"HTTP {home.status_code} with an empty body"
+    if looks_javascript_rendered(home.text):
+        return (
+            "client-rendered shell: the served HTML carries no content and this "
+            "audit does not execute JavaScript"
+        )
+    if not parse_document(home.text).text.strip():
+        return f"HTTP {home.status_code} carrying markup but no visible text"
+    return None
+
+
 def check_completeness(
     base_url: str,
     *,
     session: requests.Session | None = None,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: float = DEFAULT_TIMEOUT,
     nav_link_limit: int = DEFAULT_NAV_LINK_LIMIT,
 ) -> CompletenessReport:
     """Home page markers + trust pages + broken navigation, as one verdict.
@@ -1250,9 +1310,16 @@ def check_completeness(
     report = CompletenessReport(base_url=base)
 
     home = fetch(base, session=sess, timeout=timeout)
-    if not home.ok:
-        reason = home.error or f"HTTP {home.status_code}"
-        report.add(Status.ERROR, f"Home page could not be read: {reason}")
+    unreadable = _why_unreadable(home)
+    if unreadable is not None:
+        # An answer is not a document. A 200 carrying an empty body, a JSON API
+        # response, or a client-rendered shell all used to sail through: the home
+        # placeholder scan found no markers in no text and the navigation scan
+        # found no broken links among no links, so BOTH printed PASS and the run
+        # exited 0 over a page this audit never read. `looks_javascript_rendered`
+        # was already imported and already applied to the trust pages; the home
+        # was the one document it was not asked about.
+        report.add(Status.ERROR, f"Home page could not be read: {unreadable}")
         return report
 
     doc = parse_document(home.text)

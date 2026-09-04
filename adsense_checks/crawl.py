@@ -33,17 +33,26 @@ Requirements decided here:
 
 from __future__ import annotations
 
+import contextlib
 import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urldefrag, urljoin, urlparse, urlunparse
+from urllib.parse import urlunsplit
 
 import requests
 
-from adsense_checks.http import ADSENSE_UA, DEFAULT_TIMEOUT, Fetch, fetch
+from adsense_checks.http import (
+    ADSENSE_UA,
+    DEFAULT_TIMEOUT,
+    Fetch,
+    defrag_url,
+    fetch,
+    join_url,
+    split_url,
+)
 from adsense_checks.robots import ADSENSE_CRAWLER, Robots, is_allowed, parse_robots
 from adsense_checks.status import Status, escalate, worst
 
@@ -77,7 +86,12 @@ _ASSET_SUFFIXES = (
 # is the document title.
 _NON_TEXT_TAGS = frozenset({"script", "style", "noscript", "template", "svg", "head", "title"})
 
-_DEFAULT_PORTS = {"http": "80", "https": "443"}
+# Both, for either scheme, on purpose. Site identity here ignores the scheme, so
+# a port set that depended on it split one endpoint in two: `http://ex.com:443/`
+# kept its port and `https://ex.com:443/` dropped it, and the same address written
+# the two ways stopped being the same site. A TLS-terminating proxy reporting
+# SERVER_PORT=443 without an HTTPS flag emits exactly the first spelling.
+_DEFAULT_PORTS = frozenset({"80", "443"})
 
 # ADS-CRAWL-05: identifiers that make a URL specific to one visitor. The leading
 # delimiter class is what keeps `?asid=` and `/inside=` from matching `sid=`.
@@ -105,25 +119,104 @@ def normalize_url(url: str) -> str:
     downstream analysis, iterating a list rather than a set, counted that page
     four times when computing the share of thin pages.
     """
-    parsed = urlparse(urldefrag(url)[0])
-    scheme = parsed.scheme.lower()
-    netloc = parsed.netloc.lower()
-    default_port = _DEFAULT_PORTS.get(scheme)
-    if default_port and netloc.endswith(":" + default_port):
-        netloc = netloc.rsplit(":", 1)[0]
+    identity = _netloc_identity(url)
+    if not identity:
+        # No host this client can parse. Rendering it into `http:///<path>` gave
+        # every unparseable URL the same identity as every other one with that
+        # path, so two distinct off-site links collapsed into one and the second
+        # was never scanned or reported. The raw string is its own identity here:
+        # not a URL, but unique, which is all an identity has to be.
+        return url
+    parsed = split_url(defrag_url(url))
     path = parsed.path or "/"
     if len(path) > 1 and path.endswith("/"):
         path = path.rstrip("/") or "/"
-    return urlunparse((scheme, netloc, path, parsed.params, parsed.query, ""))
+    return urlunsplit((parsed.scheme.lower(), identity, path, parsed.query, ""))
+
+
+def _netloc_identity(url: str) -> str:
+    """Host and non-default port, `www.` folded in — the host half of an identity.
+
+    Shared with `site_host` so the two cannot drift. They used to: `same_site`
+    folded `www.` while `normalize_url` did not, so a link written in the `www.`
+    form passed the same-site filter, got a DIFFERENT dedup identity, and was
+    fetched a second time. The corpus then held one document under two names and
+    a healthy site failed ADS-CONTENT-02 with "2 of 4 analyzed pages (50%)".
+
+    The scheme stays out of this, and `normalize_url` keeps it: http and https
+    spellings of one page are two URLs on the wire, and a site that serves both
+    without redirecting has the duplicate-content problem the audit should report
+    rather than hide.
+    """
+    parsed = split_url(url)
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "").lower()
+    # A trailing dot is the same FQDN written absolutely, and the server answers
+    # both. Keeping it made `localhost.` a different site from `localhost` and
+    # sent every link written that way to `off_site`, which is the "crawled 1 URL
+    # and reported no problem" failure this identity exists to prevent.
+    host = host.rstrip(".").removeprefix("www.")
+    if not host:
+        return ""
+    # One spelling for an internationalised host: requests IDNA-encodes at fetch
+    # time, so `пример.рф` and `xn--e1afmkfd.xn--p1ai` reach the same server and
+    # must not be two sites.
+    with contextlib.suppress(UnicodeError):
+        host = host.encode("idna").decode("ascii")
+    if ":" in host:
+        # An IPv6 literal, which `hostname` hands back unbracketed. Without the
+        # brackets `[::1]:9411` and `[::1:9411]` both read as `::1:9411`, so a
+        # stranger's address was crawled as the audited site's own page — and the
+        # identity was not a URL any more either.
+        host = f"[{host}]"
+    if port is None or str(port) in _DEFAULT_PORTS:
+        return host
+    return f"{host}:{port}"
+
+
+# Extensions that make a last path segment a document rather than a directory.
+# A list, not "has a dot": the dot heuristic read `/v1.0` and `/blog.old` as files,
+# so the audited base collapsed to the origin and a subdirectory install went back
+# to being judged against the whole domain's sitemap — the exact defect the scope
+# check exists to stop. Guessing wrong the other way only costs a path prefix.
+_DOCUMENT_SUFFIXES = frozenset(
+    {
+        "html", "htm", "xhtml", "shtml", "php", "php3", "php4", "php5", "phtml",
+        "asp", "aspx", "jsp", "jspx", "cgi", "pl", "py", "rb", "do", "action",
+        "cfm", "xml", "json", "txt", "md", "rss", "atom", "pdf",
+    }
+)
+
+
+def looks_like_document(path: str) -> bool:
+    """Whether a URL path names a document, so its parent is the directory base."""
+    last = path.rsplit("/", 1)[-1]
+    if "." not in last:
+        return False
+    return last.rsplit(".", 1)[-1].lower() in _DOCUMENT_SUFFIXES
 
 
 def site_host(url: str) -> str:
-    """Host without `www.`, lowercased — the identity of a *site*, not of a name.
+    """The identity of a *site*: host without `www.`, plus a non-default port.
 
     `ex.com` and `www.ex.com` are one site for every purpose this audit has, and
     treating them as two is precisely what stopped the old crawl dead.
+
+    The port is part of the identity, because a different port is a different
+    server. Leaving it out let a crawl of `127.0.0.1:8921` follow a link to
+    `127.0.0.1:8922` and report that stranger's pages as its own — fetched under
+    a robots.txt that was never read, since robots was loaded from the first
+    origin. A DEFAULT port is not part of it: `https://ex.com` and
+    `https://ex.com:443` are one address written two ways.
+
+    The scheme deliberately is not part of it. A site served over both http and
+    https is one site, and dropping the http spelling would silently lose pages
+    rather than report the downgrade, which is `ADS-CRAWL-06`'s job.
     """
-    return (urlparse(url).hostname or "").lower().removeprefix("www.")
+    return _netloc_identity(url)
 
 
 def same_site(a: str, b: str) -> bool:
@@ -132,20 +225,36 @@ def same_site(a: str, b: str) -> bool:
     return bool(host_a) and host_a == site_host(b)
 
 
+def _strip_userinfo(url: str) -> str:
+    """Drop `user:pass@` from a URL before it is requested.
+
+    ADS-CRAWL-01 asks whether a page is readable PUBLICLY, without credentials.
+    A page publishing `http://user:pass@host/private` had those credentials
+    scraped and sent, the 401 never happened, and the requirement passed on a
+    page no anonymous visitor can open. The identity dropped the userinfo too, so
+    which spelling survived deduplication depended on link order in the HTML.
+    """
+    parsed = split_url(url)
+    if "@" not in parsed.netloc:
+        return url
+    host = parsed.netloc.rpartition("@")[2]
+    return urlunsplit((parsed.scheme, host, parsed.path, parsed.query, ""))
+
+
 def _origin(url: str) -> str:
-    parsed = urlparse(url)
+    parsed = split_url(url)
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def _path_with_query(url: str) -> str:
     """What robots.txt rules are matched against: path plus query string."""
-    parsed = urlparse(url)
+    parsed = split_url(url)
     path = parsed.path or "/"
     return f"{path}?{parsed.query}" if parsed.query else path
 
 
 def _looks_like_asset(url: str) -> bool:
-    return urlparse(url).path.lower().endswith(_ASSET_SUFFIXES)
+    return split_url(url).path.lower().endswith(_ASSET_SUFFIXES)
 
 
 def has_session_id(url: str) -> bool:
@@ -217,6 +326,14 @@ class PageParser(HTMLParser):
 
         if tag == "svg":
             self._svg_depth += 1
+        if tag == "body":
+            # HTML5 lets a document omit `</head>`, and HTMLParser does not
+            # synthesise it, so the counter never came back down and every word
+            # of a 300-word page counted as non-text — reported as 0 visible
+            # words. The other two parsers in this package get that document
+            # right; this one is a flat tokenizer, so `<body>` is where anything
+            # still open above it is abandoned.
+            self._non_text_depth = 0
         if tag in _NON_TEXT_TAGS:
             self._non_text_depth += 1
 
@@ -348,8 +465,8 @@ class Page:
     def downgraded_to_http(self) -> bool:
         """Chain started on https and ended on http."""
         return (
-            urlparse(self.requested_url).scheme == "https"
-            and urlparse(self.final_url).scheme == "http"
+            split_url(self.requested_url).scheme == "https"
+            and split_url(self.final_url).scheme == "http"
         )
 
 
@@ -362,6 +479,11 @@ class CrawlResult:
     base_host: str = ""
     max_depth: int = DEFAULT_MAX_DEPTH
     max_pages: int = DEFAULT_MAX_PAGES
+    # The User-Agent every page here was fetched with. Recorded so the checks
+    # below can re-request with it: a site that varies its redirects by agent
+    # reported "redirect depends on session state" when the only thing that had
+    # changed was that the verification used a different agent than the crawl.
+    user_agent: str = DEFAULT_USER_AGENT
     pages: list[Page] = field(default_factory=list)
     robots: Robots = field(default_factory=lambda: Robots(missing=True))
     robots_note: str = ""
@@ -400,7 +522,7 @@ def _load_robots(
     base_url: str,
     *,
     session: requests.Session,
-    timeout: int,
+    timeout: float,
     user_agent: str,
 ) -> tuple[Robots, str]:
     """Fetch robots.txt from the origin actually served. Unreachable means allow-all."""
@@ -454,8 +576,17 @@ def _record(result: CrawlResult, response: Fetch, depth: int) -> Page:
             page.h1 = parsed.h1
             page.h1_count = len(parsed.h1s)
             page.word_count = parsed.word_count
-            base = urljoin(page.final_url, parsed.base_href) if parsed.base_href else page.final_url
-            page.canonical = urljoin(base, parsed.canonical) if parsed.canonical else None
+            base = page.final_url
+            if parsed.base_href:
+                # A `<base href>` that will not join leaves "" here, and "" as a
+                # base makes urljoin return every relative href unchanged, which
+                # then fails the scheme guard and vanishes: a page publishing two
+                # working links reported "links found: 0".
+                base = join_url(page.final_url, parsed.base_href) or page.final_url
+            # `or None`: an unparseable canonical used to be stored as "", which
+            # reads downstream as a page that declares one, so ADS-CRAWL-05
+            # reported "no page declares <link rel=canonical>" for pages that do.
+            page.canonical = join_url(base, parsed.canonical) or None if parsed.canonical else None
             page.links = _resolve_links(base, parsed.links, page.non_http_links)
             page.nofollow_links = _resolve_links(base, parsed.nofollow_links, page.non_http_links)
 
@@ -481,7 +612,7 @@ def _resolve_links(base: str, hrefs: Sequence[str], non_http: list[str]) -> list
     for href in hrefs:
         if href.startswith("#"):
             continue
-        scheme = urlparse(href).scheme.lower()
+        scheme = split_url(href).scheme.lower()
         if scheme and scheme not in ("http", "https"):
             # mailto:, tel:, javascript:, data: — kept, because ADS-AUTHOR-02 needs
             # the mailto: links and re-parsing every page to find them would be waste.
@@ -490,9 +621,14 @@ def _resolve_links(base: str, hrefs: Sequence[str], non_http: list[str]) -> list
             continue
         # The fragment is dropped from the URL itself: it never travels, and
         # keeping it would send the same document to the queue once per anchor.
-        absolute = urldefrag(urljoin(base, href))[0]
-        if urlparse(absolute).scheme.lower() not in ("http", "https"):
+        absolute = defrag_url(join_url(base, href))
+        if split_url(absolute).scheme.lower() not in ("http", "https"):
+            # `urljoin` hands `ref` back unparsed when the base is empty, so this
+            # also catches the href that could not be joined at all.
+            if href not in non_http:
+                non_http.append(href)
             continue
+        absolute = _strip_userinfo(absolute)
         identity = normalize_url(absolute)
         if identity not in seen:
             seen.add(identity)
@@ -542,7 +678,7 @@ def crawl(
     max_depth: int = DEFAULT_MAX_DEPTH,
     max_pages: int = DEFAULT_MAX_PAGES,
     delay: float = DEFAULT_DELAY,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: float = DEFAULT_TIMEOUT,
     session: requests.Session | None = None,
     user_agent: str = DEFAULT_USER_AGENT,
     respect_robots: bool = True,
@@ -555,7 +691,9 @@ def crawl(
     site that was entirely offline into a successful run with one "page".
     """
     sess = session or requests.Session()
-    result = CrawlResult(start_url=start_url, max_depth=max_depth, max_pages=max_pages)
+    result = CrawlResult(
+        start_url=start_url, max_depth=max_depth, max_pages=max_pages, user_agent=user_agent
+    )
 
     # One request before robots.txt is unavoidable: the origin that robots.txt
     # must be read from is only known after the redirects of the first request.
@@ -592,6 +730,14 @@ def crawl(
     queue: list[tuple[str, int]] = []
     _enqueue(result, root_page, queue, seen)
     for seed in extra_seeds:
+        # Off-site seeds are refused. Queued ones were matched against the
+        # robots.txt of the site being audited, which says nothing about another
+        # origin — the one place this tool would have fetched a third party's URL
+        # under a file that was never read for it.
+        if not same_site(seed, result.base_url):
+            if seed not in result.off_site:
+                result.off_site.append(seed)
+            continue
         # The seed is requested exactly as given, for the same reason a link is:
         # the normalized form is an identity, not an address.
         identity = normalize_url(seed)
@@ -685,6 +831,20 @@ def check_pages_reachable(
             f"only {len(result.pages)} page(s) reached: there is no internal sample to judge"
             f" (links found: {sum(len(p.links) for p in result.pages)})"
         )
+    elif result.stopped_reason and "max_pages" in result.stopped_reason:
+        # The crawl hit its ceiling, so "every page answers 2xx" is a statement
+        # about the pages we saw and nothing else. It read as PASS while three
+        # 500s sat just past the limit; raising --max-pages turned the same site
+        # FAIL. MISSING, not INFO: the pages past the ceiling were not observed
+        # at all, and this package's rule is that an unobserved condition is
+        # never a pass — the same answer `check_redirect_chain` and
+        # `check_session_urls` already give for a verification that did not run.
+        # As INFO the run exited 0 with those 500s sitting just out of sight.
+        status = escalate(status, Status.MISSING)
+        check.findings.append(
+            f"{result.stopped_reason}: the pages beyond that ceiling were not"
+            " fetched, so this verdict covers the sample and not the site"
+        )
 
     check.status = status
     check.details = {
@@ -701,7 +861,7 @@ def check_redirect_chain(
     *,
     max_hops: int = 2,
     verify_stateless: bool = False,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: float = DEFAULT_TIMEOUT,
     requirement: str = "ADS-CRAWL-04",
 ) -> CheckResult:
     """ADS-CRAWL-04 — redirect chains stay short and do not depend on session state.
@@ -759,7 +919,7 @@ def check_redirect_chain(
     if verify_stateless:
         for page in redirected:
             # session=None makes `fetch` build a fresh Session: no cookies at all.
-            again = fetch(page.requested_url, timeout=timeout, user_agent=DEFAULT_USER_AGENT)
+            again = fetch(page.requested_url, timeout=timeout, user_agent=result.user_agent)
             if again.error is not None:
                 status = escalate(status, Status.ERROR)
                 check.findings.append(
@@ -792,7 +952,7 @@ def check_session_urls(
     *,
     verify_two_sessions: bool = False,
     sample: int = 3,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: float = DEFAULT_TIMEOUT,
     requirement: str = "ADS-CRAWL-05",
 ) -> CheckResult:
     """ADS-CRAWL-05 — no session identifiers in URLs, canonical stable per session.
@@ -861,7 +1021,7 @@ def check_session_urls(
             seen_canonicals = set()
             for _ in range(2):
                 # A fresh Session per pass: two genuinely independent visitors.
-                again = fetch(page.final_url, timeout=timeout, user_agent=DEFAULT_USER_AGENT)
+                again = fetch(page.final_url, timeout=timeout, user_agent=result.user_agent)
                 if again.error is not None or not again.text:
                     status = escalate(status, Status.ERROR)
                     check.findings.append(
@@ -871,7 +1031,7 @@ def check_session_urls(
                     break
                 parsed = parse_html(again.text)
                 seen_canonicals.add(
-                    normalize_url(urljoin(again.final_url, parsed.canonical))
+                    normalize_url(join_url(again.final_url, parsed.canonical))
                     if parsed.canonical
                     else ""
                 )
