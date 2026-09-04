@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from adsense_checks.duplicates import check_urls  # noqa: E402
 from adsense_checks.report import Line, exit_code, render  # noqa: E402
+from adsense_checks.status import Status  # noqa: E402
 
 __doc__ = """Find near-duplicate pages within one site.
 
@@ -46,9 +47,23 @@ def main() -> int:
                 "unanalyzable": len(result.unanalyzable),
                 "groups": len(result.groups),
             },
-            "ADS-CONTENT-02",
+            # "in part", and the line says so: ADS-CONTENT-02 is `judgement` in
+            # the reference and this measures one half of it — overlap between
+            # the URLs you named. A clean run here is evidence, not a verdict.
+            "ADS-CONTENT-02 (part)",
         )
     ]
+    lines.append(
+        Line(
+            "compared against the web",
+            Status.MISSING,
+            [
+                "not measured: ADS-CONTENT-OVERLAP asks for similarity against the top 5"
+                " search results and this script performs no search"
+            ],
+            requirement="ADS-CONTENT-OVERLAP",
+        )
+    )
     text, overall = render("Duplicate content", lines, verbose=args.verbose)
     print(text)
     return exit_code(overall)

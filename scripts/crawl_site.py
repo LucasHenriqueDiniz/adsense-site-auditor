@@ -13,6 +13,7 @@ from adsense_checks.crawl import (  # noqa: E402
     check_session_urls,
     crawl,
 )
+from adsense_checks.http import DEFAULT_TIMEOUT  # noqa: E402
 from adsense_checks.report import Line, exit_code, render  # noqa: E402
 
 __doc__ = """Crawl a site and check reachability, redirects and URL stability.
@@ -23,67 +24,166 @@ Serves ADS-CRAWL-01, ADS-CRAWL-04 and ADS-CRAWL-05.
 """
 
 
+def _dump_pages(result) -> None:
+    """Per-page evidence, under -v.
+
+    The crawler collects a title, a meta description, an H1 count, a visible
+    word count and the links it chose not to follow, and until this function
+    existed nothing read any of it: the three checks above look only at status
+    codes, links and canonicals, and the `--output crawl.json` that used to
+    carry the rest was removed. Every page was parsed for a report nobody could
+    see. This is the audit's evidence — a thin page, a missing title, a duplicate
+    H1 are all things the requirement list asks a human to judge — so it is
+    printed rather than the parsing being deleted.
+    """
+    print()
+    # Written by `crawl()` and read by nothing until now. Without the robots note
+    # a crawl that ran under an unreadable robots.txt prints `blocked_by_robots:
+    # 0` and reads exactly like a crawl of a site that permits everything.
+    origin = result.base_url or "no response"
+    print(f"Site identity: {result.base_host or '(unknown)'} (from {origin})")
+    if not result.base_url:
+        # Nothing was fetched at all, so robots.txt was never even located. The
+        # `or` fallback used to fire here and print "read, 0 group(s)", which is
+        # indistinguishable from a real 200 carrying no rules.
+        note = "never requested: the first fetch did not complete"
+    else:
+        note = result.robots_note or f"read, {len(result.robots.groups)} group(s)"
+    print(f"robots.txt: {note}")
+    if result.sitemaps:
+        declared = ", ".join(result.sitemaps)
+        print(f"Sitemaps declared in robots.txt ({len(result.sitemaps)}): {declared}")
+    print(f"Pages ({len(result.pages)}):")
+    for page in result.pages:
+        print(f"  [{page.status_code}] d{page.depth} {page.final_url}")
+        if page.error or page.parse_error:
+            print(f"        ! {page.error or page.parse_error}")
+            continue
+        if page.elapsed_ms is not None or page.redirect_chain:
+            hops = f", {len(page.redirect_chain)} redirect hop(s)" if page.redirect_chain else ""
+            print(f"        {page.content_type or '(no content-type)'}"
+                  f" in {page.elapsed_ms or 0:.0f}ms{hops}")
+        if page.auth_challenged:
+            print("        ! authentication challenged: not publicly readable")
+        if not page.is_html:
+            # The title/h1/description block below describes a document that was
+            # never parsed; printing it made a JSON body read like an HTML page
+            # missing all its tags.
+            print("        not HTML: no page metadata was extracted")
+            continue
+        print(f"        title: {page.title or '(none)'}")
+        extra = f" (+{page.h1_count - 1} more)" if page.h1_count > 1 else ""
+        print(f"        h1: {page.h1 or '(none)'}{extra}")
+        print(f"        description: {page.meta_description or '(none)'}")
+        print(
+            f"        {page.word_count} visible words in {page.html_chars} chars of markup"
+            f"; {len(page.links)} links, {len(page.nofollow_links)} nofollow"
+        )
+        if page.canonical:
+            print(f"        canonical: {page.canonical}")
+
+    for label, urls in (
+        ("Off-site links", result.off_site),
+        ("Assets skipped", result.skipped_assets),
+        ("Blocked by robots.txt", result.blocked_by_robots),
+    ):
+        if urls:
+            tail = " ..." if len(urls) > 5 else ""
+            print(f"{label} ({len(urls)}): " + ", ".join(urls[:5]) + tail)
+    non_http = sorted({link for page in result.pages for link in page.non_http_links})
+    if non_http:
+        # mailto:/tel: are what ADS-AUTHOR-02 asks about, which is why the
+        # crawler keeps them instead of discarding non-http hrefs.
+        tail = " ..." if len(non_http) > 5 else ""
+        print(f"Non-http links ({len(non_http)}): " + ", ".join(non_http[:5]) + tail)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("url")
     parser.add_argument("--depth", type=int, default=2)
     parser.add_argument("--max-pages", type=int, default=50)
     parser.add_argument("--delay", type=float, default=0.5)
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     parser.add_argument(
         "--verify-stateless",
         action="store_true",
         help="re-request redirecting pages without cookies (one extra request each)",
     )
+    parser.add_argument(
+        "--verify-canonical",
+        action="store_true",
+        help="re-request pages twice from fresh sessions to compare their canonical."
+        " ADS-CRAWL-05 stays MISSING until this runs, so it is the only way to reach"
+        " exit 0 on a site that declares canonicals",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
-    result = crawl(args.url, max_depth=args.depth, max_pages=args.max_pages, delay=args.delay)
+    result = crawl(
+        args.url,
+        max_depth=args.depth,
+        max_pages=args.max_pages,
+        delay=args.delay,
+        timeout=args.timeout,
+    )
     checks = [
         check_pages_reachable(result),
-        check_redirect_chain(result, verify_stateless=args.verify_stateless),
-        check_session_urls(result),
+        check_redirect_chain(
+            result, verify_stateless=args.verify_stateless, timeout=args.timeout
+        ),
+        check_session_urls(
+            result, verify_two_sessions=args.verify_canonical, timeout=args.timeout
+        ),
     ]
-    # Nomes legíveis; o ID vai na coluna do requisito e não se repete.
-    rotulos = {
+    # Readable names; the ID goes in the requirement column and is not repeated.
+    labels = {
         "ADS-CRAWL-01": "pages reachable",
         "ADS-CRAWL-04": "redirect chains",
         "ADS-CRAWL-05": "stable URLs",
     }
     lines = []
-    for c in checks:
-        achados = list(c.findings)
-        if not achados:
-            # Um PASS sem evidência não deixa distinguir "observado e correto" de
-            # "nunca rodou", que é o que o relatório antigo escondia.
-            achados = [
-                ", ".join(f"{k}={v}" for k, v in sorted(c.details.items()))
+    for check in checks:
+        findings = list(check.findings)
+        if not findings and not args.verbose:
+            # A PASS with no evidence leaves the reader unable to tell "observed
+            # and correct" from "never ran", which is what the old report hid.
+            # Under -v the renderer prints the same details itself, so
+            # synthesizing them here only said everything twice.
+            findings = [
+                ", ".join(f"{k}={v}" for k, v in sorted(check.details.items()))
                 or "checked, nothing to report"
             ]
         lines.append(
             Line(
-                rotulos.get(c.requirement, c.requirement),
-                c.status,
-                achados,
-                dict(c.details),
-                c.requirement,
+                labels.get(check.requirement, check.requirement),
+                check.status,
+                findings,
+                dict(check.details),
+                check.requirement,
             )
         )
-    lines.insert(
-        0,
-        Line(
-            "crawl",
-            result.status,
-            [f"{len(result.pages)} pages fetched, {len(result.html_pages)} readable HTML"]
-            + ([result.stopped_reason] if result.stopped_reason else []),
-        ),
-    )
+    crawl_evidence = [
+        f"{len(result.pages)} pages fetched, {len(result.html_pages)} readable HTML"
+    ]
+    if result.blocked_by_robots:
+        # Lived only in a details dict that renders when a check has NO findings,
+        # so one unrelated 404 silenced it: half a site's internal links could be
+        # skipped and the default report said "robots" zero times.
+        blocked = ", ".join(result.blocked_by_robots[:3])
+        tail = " ..." if len(result.blocked_by_robots) > 3 else ""
+        crawl_evidence.append(
+            f"{len(result.blocked_by_robots)} URL(s) not fetched, disallowed by "
+            f"robots.txt: {blocked}{tail}"
+        )
+    if result.stopped_reason:
+        crawl_evidence.append(result.stopped_reason)
+    lines.insert(0, Line("crawl", result.status, crawl_evidence))
 
     text, overall = render(f"Crawl — {args.url}", lines, verbose=args.verbose)
     print(text)
     if args.verbose:
-        print()
-        for page in result.pages:
-            print(f"  {page.status_code} {page.final_url}")
+        _dump_pages(result)
     return exit_code(overall)
 
 
