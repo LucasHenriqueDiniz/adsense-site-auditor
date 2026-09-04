@@ -8,17 +8,12 @@ módulo estão em check_technical.py:
   * a descoberta era fixa em /sitemap.xml e ignorava a diretiva Sitemap: do
     robots.txt que o próprio script já tinha baixado.
 
-Os testes de rede usam a fixture `server` (servidor HTTP real). Mockar requests
-reproduziria a suposição errada em vez do protocolo.
+Os testes de rede usam as fixtures `server` e `outro_servidor` (servidores HTTP
+reais, do conftest). Mockar requests reproduziria a suposição errada em vez do
+protocolo.
 """
 
-import threading
-from contextlib import contextmanager
-from http.server import HTTPServer
-
-# O handler do conftest é reaproveitado para o segundo servidor (ramo cross-host)
-# em vez de haver duas versões do mesmo servidor de teste no repositório.
-from conftest import _Handler
+import time
 
 # parse_robots é reexportado por sitemap de propósito: o módulo já resolveu onde
 # o parser de robots mora, e o teste não deve duplicar essa decisão.
@@ -27,6 +22,7 @@ from adsense_checks.sitemap import (
     SitemapResult,
     check_sitemap,
     discover_sitemap_urls,
+    in_scope,
     parse_robots,
     parse_sitemap,
     verify_sample_urls,
@@ -53,25 +49,22 @@ XML = {"Content-Type": "application/xml"}
 TXT = {"Content-Type": "text/plain"}
 HTML = {"Content-Type": "text/html; charset=UTF-8"}
 
+# Um timeout menor que o sono da rota lenta, e ambos curtos: o que os testes de
+# timeout provam é que o valor chega no requests, e provar isso com segundos de
+# relógio custaria à suíte inteira mais do que ela leva hoje. Fracionário pelo
+# mesmo motivo — com timeout inteiro o menor sono possível passaria de 1s.
+TIMEOUT_CURTO = 0.1
+SONO_DA_ROTA_LENTA = 0.3
 
-@contextmanager
-def outro_servidor():
-    """Sobe um segundo servidor e devolve (base_url, rotas), como a fixture.
 
-    A fixture `server` dá um servidor só, e o ramo cross-host precisa de dois
-    netlocs distintos. Portas diferentes bastam: netloc inclui a porta, então
-    não é preciso DNS nem depender de 'localhost' resolver para 127.0.0.1.
-    """
-    rotas: dict = {}
-    handler = type("H", (_Handler,), {"routes": rotas})
-    httpd = HTTPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{httpd.server_address[1]}", rotas
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
+def rota_lenta(resposta, segundos: float = SONO_DA_ROTA_LENTA):
+    """Rota que dorme antes de responder, para o cliente ter de desistir."""
+
+    def rota(_metodo):
+        time.sleep(segundos)
+        return resposta
+
+    return rota
 
 
 # --------------------------------------------------------------------------
@@ -239,6 +232,45 @@ def test_descoberta_sem_robots_ainda_tenta_os_convencionais():
     assert len(candidatos) == len(set(candidatos))
 
 
+def test_descoberta_em_subdiretorio_tenta_o_subdiretorio_antes_da_origem():
+    """Os caminhos convencionais eram juntados com a barra inicial, então todos
+    resolviam contra a ORIGEM: um project page ou uma instalação em /blog/ nunca
+    tinha o sitemap dela procurado uma vez sequer, e o que existisse na raiz do
+    host — de outro projeto — era adotado como dela.
+    """
+    candidatos = discover_sitemap_urls("https://user.github.io/meusite/", None)
+    assert candidatos[0] == "https://user.github.io/meusite/sitemap.xml"
+    # A origem continua sendo tentada: é onde um sitemap normalmente mora.
+    assert "https://user.github.io/sitemap.xml" in candidatos
+    assert candidatos.index("https://user.github.io/meusite/sitemap.xml") < candidatos.index(
+        "https://user.github.io/sitemap.xml"
+    )
+    assert len(candidatos) == len(set(candidatos))
+
+
+def test_escopo_de_subdiretorio_exclui_outro_projeto_do_mesmo_host():
+    assert in_scope("https://user.github.io/meusite/a", "https://user.github.io/meusite/") is True
+    assert in_scope("https://user.github.io/outro/a", "https://user.github.io/meusite/") is False
+    # Fronteira: a própria pasta auditada, sem a barra, é a home dela e está
+    # dentro. Um `startswith` sozinho a deixaria de fora.
+    assert in_scope("https://user.github.io/meusite", "https://user.github.io/meusite/") is True
+    # Sem caminho na base, o site é a origem inteira — nada muda para o caso comum.
+    assert in_scope("https://exemplo.com/qualquer", "https://exemplo.com") is True
+
+
+def test_base_que_termina_em_arquivo_nao_confina_o_escopo_a_ele():
+    """A armadilha na direção oposta, e o CLI cai nela: a base é a URL FINAL da
+    home, então um site cujo `/` termina em `/index.php` viraria o diretório
+    `/index.php/` — caminho que URL nenhuma tem embaixo. Todo <loc> do site
+    ficaria fora de escopo e um site saudável seria reportado anunciando zero
+    URLs próprias, além de gastar cinco requisições em `/index.php/sitemap.xml`.
+    """
+    assert in_scope("https://exemplo.com/a", "https://exemplo.com/index.php") is True
+    assert discover_sitemap_urls("https://exemplo.com/index.php", None) == discover_sitemap_urls(
+        "https://exemplo.com/", None
+    )
+
+
 # --------------------------------------------------------------------------
 # Descoberta (contra servidor real)
 # --------------------------------------------------------------------------
@@ -288,6 +320,82 @@ def test_robots_ja_baixado_nao_e_baixado_de_novo(server):
     assert pedidos == []  # nenhuma requisição a /robots.txt
     assert r.sitemap_url == f"{base}/mapa.xml"
     assert r.discovered_via == "robots.txt"
+
+
+# --------------------------------------------------------------------------
+# Escopo: de quem são as URLs que o sitemap anuncia
+# --------------------------------------------------------------------------
+
+
+def test_sitemap_da_origem_nao_conta_como_sitemap_do_subdiretorio(server):
+    """A reprodução do defeito: subdiretório passando no sitemap de outro.
+
+    Auditando `host/meusite/` num host cuja raiz é de outro projeto, o resultado
+    era `found: True, url_count: 2, status: OK`, com `…/outro/a` e `…/outro/b`
+    como evidência — para um site que não tem sitemap nenhum. Duas causas: os
+    caminhos convencionais escapavam para a origem, e `_absorb_urls` contava todo
+    <loc> sem olhar host nem caminho.
+    """
+    base, rotas = server
+    rotas["/sitemap.xml"] = (200, XML, urlset(f"{base}/outro/a", f"{base}/outro/b"))
+
+    r = check_sitemap(f"{base}/meusite/")
+
+    assert r.url_count == 0
+    assert r.sample_urls == []
+    assert r.out_of_scope_count == 2
+    # Um documento que não anuncia nada deste site não é o sitemap deste site.
+    assert r.status is Status.WARNING
+    assert r.status.blocks_readiness is True
+    assert any("/outro/a" in motivo for motivo in r.reasons)
+
+
+def test_sitemap_do_subdiretorio_conta_so_as_urls_dele(server):
+    """O caso legítimo do mesmo par de correções: o subdiretório tem o sitemap
+    dele, é lá que se procura primeiro, e o <loc> que aponta para fora fica de
+    fora da contagem em vez de inflá-la em silêncio."""
+    base, rotas = server
+    rotas["/meusite/sitemap.xml"] = (200, XML, urlset(f"{base}/meusite/a", f"{base}/outro/b"))
+
+    r = check_sitemap(f"{base}/meusite/")
+
+    assert r.sitemap_url == f"{base}/meusite/sitemap.xml"
+    assert r.url_count == 1
+    assert r.sample_urls == [f"{base}/meusite/a"]
+    assert r.out_of_scope_count == 1
+    assert r.status is Status.INFO
+
+
+def test_loc_em_outro_site_nao_entra_na_contagem(server, outro_servidor):
+    """Mesma checagem numa auditoria de origem inteira: a porta faz parte da
+    identidade do site, então o <loc> na outra porta é de outro site."""
+    base, rotas = server
+    outra_base, _outras_rotas = outro_servidor
+    rotas["/sitemap.xml"] = (200, XML, urlset(f"{base}/a", f"{outra_base}/b"))
+
+    r = check_sitemap(base)
+
+    assert r.url_count == 1
+    assert r.sample_urls == [f"{base}/a"]
+    assert r.out_of_scope_count == 1
+    assert r.status is Status.INFO
+    assert any(f"{outra_base}/b" in motivo for motivo in r.reasons)
+
+
+def test_loc_relativo_continua_sendo_url_do_site(server):
+    """Fronteira da checagem acima. <loc> relativo está fora da spec e existe na
+    prática; resolvido contra o documento ele é do site, e não resolver o
+    transformaria em 'URL de outro site' — um achado falso no lugar do antigo."""
+    base, rotas = server
+    xml = f'<urlset xmlns="{NS_09}"><url><loc>/a</loc></url></urlset>'
+    rotas["/sitemap.xml"] = (200, XML, xml)
+
+    r = check_sitemap(base)
+
+    assert r.url_count == 1
+    assert r.out_of_scope_count == 0
+    assert r.sample_urls == [f"{base}/a"]
+    assert r.status is Status.OK
 
 
 # --------------------------------------------------------------------------
@@ -422,6 +530,27 @@ def test_nenhum_sitemap_em_lugar_nenhum_e_MISSING_e_nunca_OK(server):
     assert r.status is Status.MISSING
     assert r.kind == "none"
     assert len(r.attempts) == len(r.candidates)
+
+
+def test_urlset_vazio_no_servidor_deixa_o_check_sitemap_em_WARNING(server):
+    """O WARNING do parse tem que sobreviver até o resultado.
+
+    `test_urlset_valido_e_vazio_e_WARNING_e_nao_OK` só exercita parse_sitemap, e
+    com ele apagar `escalate(result.status, doc.status)` de check_sitemap passava
+    na suíte inteira: um sitemap válido anunciando zero URLs voltava OK e o site
+    ficava elegível a 'Ready' sem uma única URL declarada.
+    """
+    base, rotas = server
+    rotas["/sitemap.xml"] = (200, XML, urlset())
+
+    r = check_sitemap(base)
+
+    assert r.found is True
+    assert r.kind == "urlset"
+    assert r.url_count == 0
+    assert r.status is Status.WARNING
+    assert r.status.blocks_readiness is True
+    assert any("zero URLs" in motivo for motivo in r.reasons)
 
 
 def test_erro_5xx_no_sitemap_nao_e_resumido_como_ausencia(server):
@@ -590,22 +719,46 @@ def test_gz_recusado_sem_requisicao_nao_conta_como_documento_buscado(server):
     assert r.status is Status.ERROR
 
 
-def test_sitemap_em_outro_host_e_INFO_e_diz_onde_esta(server):
+def test_sitemap_em_outro_host_e_INFO_e_diz_onde_esta(server, outro_servidor):
     """Google só honra sitemap cross-host para propriedade verificada, então o
     leitor precisa saber disso antes de confiar na contagem. Dois servidores
-    locais em portas diferentes exercitam o ramo sem DNS e sem flakiness."""
+    locais em portas diferentes exercitam o ramo sem DNS e sem flakiness: a
+    porta faz parte do netloc, então não é preciso DNS nem depender de
+    'localhost' resolver para 127.0.0.1."""
     base, rotas = server
-    with outro_servidor() as (outra_base, outras_rotas):
-        outras_rotas["/sitemap.xml"] = (200, XML, urlset(f"{base}/a"))
-        rotas["/robots.txt"] = (200, TXT, f"Sitemap: {outra_base}/sitemap.xml\n")
+    outra_base, outras_rotas = outro_servidor
+    outras_rotas["/sitemap.xml"] = (200, XML, urlset(f"{base}/a"))
+    rotas["/robots.txt"] = (200, TXT, f"Sitemap: {outra_base}/sitemap.xml\n")
 
-        r = check_sitemap(base)
+    r = check_sitemap(base)
 
     assert r.found is True
     assert r.sitemap_url == f"{outra_base}/sitemap.xml"
     assert r.url_count == 1
     assert r.status is Status.INFO
     assert any(outra_base.removeprefix("http://") in motivo for motivo in r.reasons)
+
+
+def test_www_no_sitemap_declarado_nao_e_outro_host(server):
+    """A comparação era de netloc exato, então o site que declara o sitemap na
+    grafia `www.` — o caso comum — ganhava uma afirmação falsa ('hosted on
+    www.ex.com, not ex.com') e um INFO por um sitemap que está na casa dele.
+
+    A base com `www.` nunca é requisitada: o robots já vem pronto (então
+    /robots.txt não é buscado) e a URL declarada, absoluta, é o primeiro
+    candidato e resolve. Se um dia alguém fizer check_sitemap requisitar a base,
+    este teste quebra com erro de DNS — e deve quebrar.
+    """
+    base, rotas = server
+    rotas["/sitemap.xml"] = (200, XML, urlset(f"{base}/a"))
+    base_www = base.replace("http://", "http://www.")
+
+    r = check_sitemap(base_www, robots=parse_robots(f"Sitemap: {base}/sitemap.xml\n"))
+
+    assert r.found is True
+    assert r.url_count == 1
+    assert r.status is Status.OK
+    assert r.reasons == []
 
 
 # --------------------------------------------------------------------------
@@ -628,3 +781,44 @@ def test_amostra_de_urls_reporta_a_que_nao_responde_200(server):
 def test_amostra_sem_urls_e_MISSING_e_nunca_OK():
     vazio = SitemapResult(base_url="https://exemplo.com")
     assert verify_sample_urls(vazio).status is Status.MISSING
+
+
+# --------------------------------------------------------------------------
+# Timeout
+# --------------------------------------------------------------------------
+
+
+def test_timeout_do_check_sitemap_chega_na_wire(server):
+    """O --timeout do CLI era documentado e ignorado por este módulo inteiro.
+
+    Nenhuma das chamadas a fetch daqui passava timeout, então todas usavam o
+    DEFAULT_TIMEOUT de 15s: contra um site cujas rotas de sitemap dormem 8s,
+    `--timeout 1` ainda levava 40s de relógio (5 candidatos x 8s). Aqui a rota
+    dorme mais do que o timeout pedido, então o valor só pode ter chegado no
+    requests se a chamada desistir — sem ele o urlset chega inteiro e o sitemap
+    é encontrado.
+    """
+    base, rotas = server
+    rotas["/sitemap.xml"] = rota_lenta((200, XML, urlset(f"{base}/a")))
+
+    r = check_sitemap(base, timeout=TIMEOUT_CURTO)
+
+    assert r.found is False
+    assert r.url_count == 0
+    assert r.status is Status.ERROR
+    assert any("timeout" in motivo.lower() for _u, _s, motivo in r.attempts)
+
+
+def test_timeout_do_verify_sample_urls_chega_na_wire(server):
+    """A outra porta de entrada pública, com o mesmo buraco: a amostra é a
+    metade de ADS-CRAWL-07 que mais gasta requisição, e uma URL que pendura
+    prendia a auditoria por 15s por URL amostrada, qualquer que fosse a flag."""
+    base, rotas = server
+    rotas["/sitemap.xml"] = (200, XML, urlset(f"{base}/lenta"))
+    rotas["/lenta"] = rota_lenta((200, HTML, "<html>lenta</html>"))
+
+    r = check_sitemap(base)
+    amostra = verify_sample_urls(r, timeout=TIMEOUT_CURTO)
+
+    assert amostra.ok_count == 0
+    assert amostra.status is Status.ERROR

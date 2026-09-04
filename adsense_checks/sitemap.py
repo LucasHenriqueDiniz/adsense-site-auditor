@@ -23,6 +23,16 @@ only one of them is the site's fault. And `found` is never inferred from HTTP
 200 — a single-page-app catch-all answers 200 with index.html for every path,
 including /sitemap.xml, and the old check called that a sitemap.
 
+A third rule joins them: what the report says has to be about the site it was
+asked about. The conventional paths used to be joined with a leading slash, so
+they all resolved against the ORIGIN, and every `<loc>` was counted with no
+check at all. Auditing `host/meusite/` on a host whose root belongs to another
+project therefore reported that project's `host/sitemap.xml`, with its two URLs
+under `host/outro/`, as this site's sitemap — `found: True`, `url_count: 2`,
+`status: OK`, for a site with no sitemap at all. Discovery now looks in the
+audited directory as well as at the origin root, and `in_scope` decides what may
+reach a count.
+
 Requirement: ADS-CRAWL-07.
 """
 
@@ -31,19 +41,21 @@ from __future__ import annotations
 import re
 from collections import deque
 from dataclasses import dataclass, field
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlunsplit
 from xml.etree import ElementTree
 
 import requests
 
-from adsense_checks.http import Fetch, fetch
+from adsense_checks.crawl import looks_like_document, same_site, site_host
+from adsense_checks.http import DEFAULT_TIMEOUT, Fetch, fetch, join_url, split_url
 from adsense_checks.robots import Robots, parse_robots
 from adsense_checks.status import Status, escalate
 
-# Tried in order, after anything robots.txt declares. /sitemap.xml first because
-# it is the convention; the rest are the defaults shipped by the generators that
-# do not use it — wp-sitemap.xml is WordPress core 5.5+, sitemap_index.xml is
-# Yoast, and sitemap-index.xml is the hyphenated spelling several plugins emit.
+# Tried in order under each search base (see _search_bases), after anything
+# robots.txt declares. /sitemap.xml first because it is the convention; the rest
+# are the defaults shipped by the generators that do not use it —
+# wp-sitemap.xml is WordPress core 5.5+, sitemap_index.xml is Yoast, and
+# sitemap-index.xml is the hyphenated spelling several plugins emit.
 CONVENTIONAL_PATHS: tuple[str, ...] = (
     "/sitemap.xml",
     "/sitemap_index.xml",
@@ -93,9 +105,15 @@ class SitemapResult:
     # "robots.txt", "conventional path", or "none".
     discovered_via: str = "none"
     kind: str = "none"
-    # Total page URLs found. A lower bound when `truncated` is set — read
-    # url_count_is_lower_bound before quoting this number anywhere.
+    # Total page URLs found that belong to the audited site. A lower bound when
+    # `truncated` is set — read url_count_is_lower_bound before quoting this
+    # number anywhere.
     url_count: int = 0
+    # URLs the sitemap advertises that are NOT this site's: another host, or
+    # another subdirectory of a shared one. Kept apart instead of folded in,
+    # because a count that quietly includes a stranger's pages is the finding
+    # this field exists to make visible.
+    out_of_scope_count: int = 0
     # Child sitemaps declared by every index seen, whether or not we fetched them.
     child_sitemap_count: int = 0
     # Sitemap documents actually requested, including the candidates that came
@@ -106,6 +124,8 @@ class SitemapResult:
     documents_fetched: int = 0
     truncated: bool = False
     sample_urls: list[str] = field(default_factory=list)
+    # Evidence for out_of_scope_count, bounded the same way sample_urls is.
+    out_of_scope_urls: list[str] = field(default_factory=list)
     candidates: list[str] = field(default_factory=list)
     # (url, status, reason) for every candidate that did not yield a sitemap.
     attempts: list[tuple[str, Status, str]] = field(default_factory=list)
@@ -231,12 +251,82 @@ def parse_sitemap(text: str, *, url: str = "", content_type: str = "") -> Sitema
     return doc
 
 
+# A trailing path segment carrying an extension is a document, not a directory.
+
+
+def _as_dir_base(url: str) -> str:
+    """The audited URL as a base safe for relative joins.
+
+    Same convention as `completeness.as_base`, and for the same reason: a
+    subdirectory install is a site. `urljoin(url, '/sitemap.xml')` throws the
+    subdirectory away and asks the origin, which is how `host/meusite/` came to
+    be audited against `host/sitemap.xml`.
+
+    The file-segment case is the trap in the other direction. The caller's base
+    is the home page's FINAL url, so a site whose `/` lands on `/index.php`
+    would get the directory `/index.php/` — a path nothing can be under, so
+    every URL the site publishes would read as out of scope and a healthy site
+    would be reported as advertising nothing of its own.
+
+    `looks_like_document` decides that on a suffix list rather than on the
+    presence of a dot: `/v1.0` and `/blog.old` are directories, and reading them
+    as files collapsed the base to the origin and undid the scope check entirely.
+    """
+    parsed = split_url(url)
+    path = parsed.path or "/"
+    if not path.endswith("/"):
+        path = path.rsplit("/", 1)[0] + "/" if looks_like_document(path) else path + "/"
+    # A doubled slash left the prefix as `/meusite//`, which nothing matches, so
+    # every URL the site published was declared out of scope.
+    while "//" in path:
+        path = path.replace("//", "/")
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def _search_bases(base_url: str) -> list[str]:
+    """Where a conventional path may be looked for: audited directory, then origin.
+
+    Both are legitimate — a sitemap normally lives at the origin root, and a
+    project page publishes its own — so both are tried, most specific first.
+    Trying the origin is not the defect; reporting what is found there as the
+    subdirectory's own is, and that is `in_scope`'s job rather than this one's.
+    """
+    audited = _as_dir_base(base_url)
+    parsed = split_url(audited)
+    root = urlunsplit((parsed.scheme, parsed.netloc, "/", "", ""))
+    return [audited] if audited == root else [audited, root]
+
+
+def in_scope(url: str, base_url: str) -> bool:
+    """Whether `url` belongs to the site being audited.
+
+    Two conditions. The same site by `crawl.site_host`, so `www.` is not an
+    identity and a non-default port is one. And, when the audited base has a
+    path, under that path: `host/meusite/` does not own `host/outro/a`, and the
+    old `_absorb_urls` counted every `<loc>` with no host or path check at all.
+    """
+    if not same_site(url, base_url):
+        return False
+    prefix = split_url(_as_dir_base(base_url)).path
+    if prefix == "/":
+        return True
+    path = split_url(url).path or "/"
+    # `…/meusite` and `…/meusite/` address one directory; only the second one
+    # starts with the prefix, and excluding the first would drop the home page.
+    return path.startswith(prefix) or path == prefix.rstrip("/")
+
+
 def discover_sitemap_urls(base_url: str, robots: Robots | None = None) -> list[str]:
     """Candidate sitemap URLs, most authoritative first, deduplicated.
 
     robots.txt comes first because it is the site's own declaration of where its
     sitemap lives. Hard-coding /sitemap.xml and ignoring the directive is what
     made the audit report "no sitemap" for every Yoast install on the web.
+
+    The conventional paths then follow, under each search base: the audited
+    directory before the origin root. Joining them with their leading slash — as
+    this did — resolves all five against the origin, so a subdirectory install
+    never had its own sitemap looked for even once.
     """
     candidates: list[str] = []
     seen: set[str] = set()
@@ -250,24 +340,31 @@ def discover_sitemap_urls(base_url: str, robots: Robots | None = None) -> list[s
         for declared in robots.sitemaps:
             # The directive is specified as absolute, but relative values appear
             # in the wild; urljoin leaves an absolute URL untouched either way.
-            add(urljoin(base_url, declared.strip()))
+            # Resolved against base_url and not against a search base: robots.txt
+            # is an origin-level file, so its relative paths are origin-relative.
+            add(join_url(base_url, declared.strip()))
 
-    for path in CONVENTIONAL_PATHS:
-        add(urljoin(base_url, path))
+    for search_base in _search_bases(base_url):
+        for path in CONVENTIONAL_PATHS:
+            # lstrip is the whole point: the leading slash would escape back to
+            # the origin and undo the search base we just chose.
+            add(join_url(search_base, path.lstrip("/")))
 
     return candidates
 
 
-def _fetch_doc(url: str, session: requests.Session | None) -> tuple[SitemapDoc, Fetch]:
+def _fetch_doc(
+    url: str, session: requests.Session | None, timeout: float
+) -> tuple[SitemapDoc, Fetch]:
     """Fetch and parse one sitemap URL through the shared fetch path."""
-    if urlparse(url).path.lower().endswith(".gz"):
+    if split_url(url).path.lower().endswith(".gz"):
         # requests transparently decodes Content-Encoding, not a .gz payload, so
         # Fetch.text would be mojibake. Saying so is honest; parsing it and
         # reporting zero URLs would not be.
         doc = SitemapDoc(url=url, status=Status.ERROR, reason="gzipped sitemap; not readable here")
         return doc, Fetch(url=url)
 
-    got = fetch(url, session=session)
+    got = fetch(url, timeout=timeout, session=session)
     if not got.ok:
         reason = got.error or f"HTTP {got.status_code}"
         return SitemapDoc(url=url, status=got.status, reason=reason), got
@@ -310,9 +407,11 @@ def _fold_failed_candidate(
         result.note(f"candidate {candidate} was not readable: {doc.reason}")
 
 
-def _load_robots(base_url: str, session: requests.Session | None) -> tuple[Robots, str]:
+def _load_robots(
+    base_url: str, session: requests.Session | None, timeout: float
+) -> tuple[Robots, str]:
     """Fetch and parse robots.txt. An unreachable file is 'allow all', per Google."""
-    got = fetch(urljoin(base_url, "/robots.txt"), session=session)
+    got = fetch(join_url(base_url, "/robots.txt"), timeout=timeout, session=session)
     if not got.ok:
         return Robots(missing=True), f"robots.txt not read ({got.error or got.status_code})"
     return parse_robots(got.text), ""
@@ -323,6 +422,7 @@ def check_sitemap(
     *,
     robots: Robots | None = None,
     session: requests.Session | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
     max_depth: int = MAX_INDEX_DEPTH,
     max_child_sitemaps: int = MAX_CHILD_SITEMAPS,
 ) -> SitemapResult:
@@ -331,10 +431,17 @@ def check_sitemap(
     Pass `robots` when the caller has already fetched robots.txt — the original
     defect was a script that had the file in hand and still ignored it. When it
     is None this fetches robots.txt itself rather than skipping discovery.
+
+    `timeout` bounds every request made below it — robots.txt, each candidate,
+    each child of an index. It exists as a parameter because it was missing:
+    check_technical.py has taken a --timeout flag all along and this half of the
+    audit ignored it, so `--timeout 1` against a site whose sitemap routes hang
+    still spent DEFAULT_TIMEOUT per candidate — 40 seconds of wall clock for a
+    flag the CLI documents as one.
     """
     result = SitemapResult(base_url=base_url)
 
-    parsed_base = urlparse(base_url)
+    parsed_base = split_url(base_url)
     if parsed_base.scheme not in ("http", "https") or not parsed_base.netloc:
         # A bare domain used to produce a base of "://" and a report full of
         # invented findings about ":///sitemap.xml". Refuse instead of inventing.
@@ -343,16 +450,16 @@ def check_sitemap(
         return result
 
     if robots is None:
-        robots, note = _load_robots(base_url, session)
+        robots, note = _load_robots(base_url, session, timeout)
         result.note(note)
 
     declared: set[str] = set()
     if not robots.missing:
-        declared = {urljoin(base_url, s.strip()) for s in robots.sitemaps}
+        declared = {join_url(base_url, s.strip()) for s in robots.sitemaps}
     result.candidates = discover_sitemap_urls(base_url, robots)
 
     for candidate in result.candidates:
-        doc, got = _fetch_doc(candidate, session)
+        doc, got = _fetch_doc(candidate, session, timeout)
         if _requested(got):
             result.documents_fetched += 1
         if not doc.is_sitemap:
@@ -368,17 +475,22 @@ def check_sitemap(
         result.status = escalate(result.status, doc.status)
         result.note(doc.reason)
 
-        host = urlparse(candidate).netloc
-        if host != parsed_base.netloc:
+        if not same_site(candidate, base_url):
             # Legal, but Google only honours a cross-host sitemap for a verified
             # property, so the reader needs to know before trusting the count.
+            #
+            # `site_host`, not netloc: comparing netloc exactly made a site that
+            # declares its sitemap with the `www.` spelling — the ordinary case —
+            # collect a false statement ("hosted on www.ex.com, not ex.com") and
+            # an INFO escalation for a sitemap sitting on its own host.
             result.status = escalate(result.status, Status.INFO)
-            result.note(f"sitemap is hosted on {host}, not {parsed_base.netloc}")
+            result.note(f"sitemap is hosted on {site_host(candidate)}, not {site_host(base_url)}")
 
         if doc.kind == "urlset":
-            _absorb_urls(result, doc.urls)
+            _absorb_urls(result, doc)
         else:
-            _resolve_index(result, doc, session, max_depth, max_child_sitemaps)
+            _resolve_index(result, doc, session, timeout, max_depth, max_child_sitemaps)
+        _report_out_of_scope(result)
         break
 
     if not result.found:
@@ -392,17 +504,64 @@ def check_sitemap(
     return result
 
 
-def _absorb_urls(result: SitemapResult, urls: list[str]) -> None:
-    result.url_count += len(urls)
-    room = MAX_SAMPLE_URLS - len(result.sample_urls)
-    if room > 0:
-        result.sample_urls.extend(urls[:room])
+def _absorb_urls(result: SitemapResult, doc: SitemapDoc) -> None:
+    """Count and sample what one document advertises, the site's own URLs apart.
+
+    This used to be `url_count += len(urls)` with no host or path check, which is
+    what let `host/meusite/` be reported as having a two-URL sitemap when the two
+    URLs were `host/outro/a` and `host/outro/b`. Nothing is dropped silently:
+    what does not belong to the audited site is counted and sampled separately,
+    and `_report_out_of_scope` says so.
+    """
+    for loc in doc.urls:
+        # `<loc>` is specified as absolute, but relative values are emitted in the
+        # wild, and an unresolved one has no host — it would read as another
+        # site's URL and be excluded from the site's own count.
+        url = join_url(doc.url or result.base_url, loc)
+        if not in_scope(url, result.base_url):
+            result.out_of_scope_count += 1
+            if len(result.out_of_scope_urls) < MAX_SAMPLE_URLS:
+                result.out_of_scope_urls.append(url)
+            continue
+        result.url_count += 1
+        if len(result.sample_urls) < MAX_SAMPLE_URLS:
+            result.sample_urls.append(url)
+
+
+def _report_out_of_scope(result: SitemapResult) -> None:
+    """Say what the counts left out, and how much of the sitemap that was.
+
+    A `<loc>` outside the audited site is an observation, so it gets a reason and
+    a status rather than silence. When it is the *whole* sitemap, the document
+    advertises nothing for this site and is a WARNING for the same reason an
+    empty `<urlset>` is: from here the two are the same finding.
+    """
+    if not result.out_of_scope_count:
+        return
+    example = result.out_of_scope_urls[0] if result.out_of_scope_urls else ""
+    if result.url_count == 0:
+        # Not gated on `truncated` any more. It was, and truncation LOWERED the
+        # severity of "this sitemap advertises nothing of yours" from WARNING to
+        # INFO: identical facts, opposite verdict, and the truncated run was the
+        # one that exited 0.
+        result.status = escalate(result.status, Status.WARNING)
+        result.note(
+            f"sitemap advertises {result.out_of_scope_count} URL(s) and none of them are"
+            f" inside {result.base_url} (e.g. {example})"
+        )
+        return
+    result.status = escalate(result.status, Status.INFO)
+    result.note(
+        f"{result.out_of_scope_count} advertised URL(s) outside {result.base_url} are not"
+        f" counted in url_count (e.g. {example})"
+    )
 
 
 def _resolve_index(
     result: SitemapResult,
     entry: SitemapDoc,
     session: requests.Session | None,
+    timeout: float,
     max_depth: int,
     max_child_sitemaps: int,
 ) -> None:
@@ -434,7 +593,7 @@ def _resolve_index(
             result.note(f"stopped after {max_child_sitemaps} child sitemaps fetched")
             break
 
-        doc, got = _fetch_doc(url, session)
+        doc, got = _fetch_doc(url, session, timeout)
         children_fetched += 1
         if _requested(got):
             result.documents_fetched += 1
@@ -453,7 +612,7 @@ def _resolve_index(
             # the reader back to the site with nothing to look at.
             result.note(f"child sitemap {url}: {doc.reason}")
         if doc.kind == "urlset":
-            _absorb_urls(result, doc.urls)
+            _absorb_urls(result, doc)
             continue
 
         result.child_sitemap_count += len(doc.children)
@@ -463,7 +622,10 @@ def _resolve_index(
             continue
         queue.extend((grandchild, depth + 1) for grandchild in doc.children)
 
-    if result.url_count == 0 and not result.truncated:
+    if result.url_count == 0 and not result.truncated and not result.out_of_scope_count:
+        # The out-of-scope case has its own, more precise note. Saying "resolved
+        # to zero page URLs" about an index full of another project's URLs would
+        # accuse the site of publishing an empty index, which is not what happened.
         result.status = escalate(result.status, Status.WARNING)
         result.note("sitemap index resolved to zero page URLs")
 
@@ -489,12 +651,14 @@ def verify_sample_urls(
     *,
     sample_size: int = 5,
     session: requests.Session | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> SampleCheck:
     """Fetch the first `sample_size` advertised URLs and report what they answer.
 
     ADS-CRAWL-07 asks that the listed URLs return 200. Kept out of check_sitemap
     so that discovery stays one concern and the request budget stays the caller's
-    decision.
+    decision — and `timeout` is part of that budget, which is why it is the
+    caller's to set here too.
     """
     check = SampleCheck()
     if not result.sample_urls:
@@ -502,7 +666,7 @@ def verify_sample_urls(
         return check
 
     for url in result.sample_urls[:sample_size]:
-        got = fetch(url, session=session)
+        got = fetch(url, timeout=timeout, session=session)
         check.checked.append((url, got.status, got.status_code))
         check.status = escalate(check.status, got.status)
     return check
