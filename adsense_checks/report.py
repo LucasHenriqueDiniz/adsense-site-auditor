@@ -43,7 +43,10 @@ class Line:
 def render(title: str, lines: Iterable[Line], *, verbose: bool = False) -> tuple[str, Status]:
     """The report text and its overall status."""
     lines = list(lines)
-    overall = worst(*(line.status for line in lines))
+    # MISSING for an empty report: `worst()` of nothing is OK, so zero checks
+    # announced success. The verdict line said nothing was observed while the
+    # exit code said everything held — the only place the two disagreed.
+    overall = worst(*(line.status for line in lines)) if lines else Status.MISSING
 
     out = [f"{title}", "=" * len(title), ""]
     for line in lines:
@@ -60,13 +63,26 @@ def render(title: str, lines: Iterable[Line], *, verbose: bool = False) -> tuple
     for line in lines:
         counts[line.status] = counts.get(line.status, 0) + 1
     tally = ", ".join(f"{_GLYPH[s].strip()}={counts[s]}" for s in sorted(counts))
-    out.append(f"{len(lines)} checks: {tally}")
+    noun = "check" if len(lines) == 1 else "checks"
+    out.append(f"{len(lines)} {noun}: {tally}")
 
     # The verdict names the worst status rather than asserting a pass. "No check
     # failed" and "every check passed" are different claims, and only the first
     # is true when something could not be observed.
-    if overall <= Status.INFO:
+    if not lines:
+        # `worst()` of nothing is OK, so an empty report used to announce that
+        # every check passed. Zero checks passed because zero ran.
+        out.append("Verdict: no checks ran. Nothing was observed and nothing is claimed.")
+    elif overall is Status.OK:
         out.append("Verdict: every check observed its condition and passed.")
+    elif overall is Status.INFO:
+        # INFO is this package's "recorded, not decided". Printing the OK
+        # sentence over it put "every check observed its condition" four lines
+        # under a note saying a condition had not been observed.
+        out.append(
+            "Verdict: nothing failed, and some observations were recorded without "
+            "being decided — see the note lines."
+        )
     elif overall is Status.MISSING:
         out.append(
             "Verdict: nothing failed, but something could not be observed. "
