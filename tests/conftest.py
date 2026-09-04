@@ -13,6 +13,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
+# Ver o comentário em _sobe_servidor.
+POLL_INTERVAL = 0.01
+
 
 class _Handler(BaseHTTPRequestHandler):
     routes: dict = {}
@@ -49,9 +52,9 @@ class _Handler(BaseHTTPRequestHandler):
         self._respond(False)
 
 
-@pytest.fixture
-def server():
-    """Sobe um servidor e devolve (base_url, rotas). Mutar `rotas` afeta o servidor."""
+def _sobe_servidor():
+    """Sobe um servidor numa porta livre. Devolve (httpd, base_url, rotas)."""
+
     # dict comum não aceita atributo, e os testes existentes desempacotam dois
     # valores — então o registro viaja pendurado no próprio mapa de rotas.
     class _Routes(dict):
@@ -62,10 +65,40 @@ def server():
     handler = type("H", (_Handler,), {"routes": routes, "received": routes.received})
     httpd = HTTPServer(("127.0.0.1", 0), handler)
     port = httpd.server_address[1]
-    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    # serve_forever espera POLL_INTERVAL antes de notar o shutdown, e o padrão da
+    # stdlib é 0.5s. Com um servidor por teste isso era ~0.45s de teardown cada,
+    # medido: quase 45s dos ~57s que a suíte levava, em testes que não fazem I/O
+    # de rede de verdade.
+    t = threading.Thread(target=lambda: httpd.serve_forever(POLL_INTERVAL), daemon=True)
     t.start()
+    return httpd, f"http://127.0.0.1:{port}", routes
+
+
+@pytest.fixture
+def server():
+    """Sobe um servidor e devolve (base_url, rotas). Mutar `rotas` afeta o servidor."""
     # `routes` e `routes.received` são os mesmos objetos que o handler usa:
     # mutar o primeiro configura o servidor, ler o segundo mostra o que chegou.
-    yield f"http://127.0.0.1:{port}", routes
+    httpd, base, routes = _sobe_servidor()
+    yield base, routes
+    httpd.shutdown()
+    httpd.server_close()
+
+
+@pytest.fixture
+def outro_servidor():
+    """Uma segunda ORIGEM, com a mesma interface de `server`.
+
+    Mesma máquina, outra porta — e a porta faz parte da identidade de um site
+    (ver `crawl.site_host`), então para todo efeito deste repo isto é outro site.
+
+    Existe para os casos em que a origem muda no meio do caminho: apex -> www é
+    o caso real e o mais comum na web, e não dá para reproduzi-lo com um
+    servidor só. Com uma origem apenas, uma checagem que resolve URLs contra a
+    string digitada e outra que resolve contra a resposta final chegam ao mesmo
+    lugar, e o teste passa nas duas.
+    """
+    httpd, base, routes = _sobe_servidor()
+    yield base, routes
     httpd.shutdown()
     httpd.server_close()

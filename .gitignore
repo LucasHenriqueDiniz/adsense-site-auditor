@@ -4,14 +4,23 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
+# Metadados do install editavel (`uv pip install -e .`, documentado em
+# scripts/README.md). Reconstruido a cada install.
+*.egg-info/
+
 # Ambiente local. As dependências ficam declaradas no pyproject.toml; o venv em si
 # é reconstruível com `uv venv && uv pip install requests pytest ruff`.
 .venv/
 
-# Script output artifacts (crawl reports, analysis output)
-crawl*.json
-*_report.*
-*_analysis.*
-depth*.txt
-technical*.txt
-dup*.txt
+# Script output artifacts. Os CLIs escrevem em stdout; estes padrões cobrem o
+# redirecionamento manual (`... > technical.txt`), que cai no diretório onde o
+# comando foi rodado. Ancorados na raiz com "/" de propósito: sem a barra,
+# "*_report.*" também casava tests/test_report.py e mantinha fora do versionamento
+# o único arquivo de teste de adsense_checks/report.py — o módulo que decide o
+# código de saída de todos os CLIs.
+/crawl*.json
+/*_report.*
+/*_analysis.*
+/depth*.txt
+/technical*.txt
+/dup*.txt
