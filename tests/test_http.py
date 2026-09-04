@@ -160,3 +160,39 @@ def test_metodo_em_minusculas_ainda_cai_no_fallback(server):
     r = fetch(base + "/", method="head")
     assert r.status_code == 200
     assert r.text == "<html>corpo</html>"
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("codigo", [399, 400, 401, 404, 500])
+def test_a_fronteira_de_legivel_e_400_nas_duas_propriedades(server, codigo):
+    """`Fetch.ok` e `Fetch.status` decidem a mesma coisa e eram fixados por
+    testes diferentes: uma rodada anterior prendeu o `>= 400` do `status` e
+    deixou o `< 400` do `ok` solto, então trocá-lo por `<= 400` fazia um HTTP 400
+    contar como página legível. Mesmo número, propriedade vizinha."""
+    base, routes = server
+    routes["/x"] = (codigo, {"Content-Type": "text/html"}, "")
+
+    r = fetch(base + "/x")
+
+    assert r.status_code == codigo
+    assert r.ok is (codigo < 400)
+    # E as duas propriedades não podem discordar sobre a mesma resposta.
+    assert r.ok is (r.status is Status.OK)
+
+
+def test_head_recusado_com_400_tambem_cai_para_get(server):
+    """A mesma fronteira, no fallback: `>= 400` virando `>` deixava um 400 em
+    resposta a HEAD passar como veredito em vez de disparar o GET."""
+    base, routes = server
+
+    def rota(metodo):
+        if metodo == "HEAD":
+            return (400, {}, "")
+        return (200, {"Content-Type": "text/html"}, "<html>corpo</html>")
+
+    routes["/"] = rota
+    r = fetch(base + "/", method="HEAD")
+    assert r.status_code == 200
+    assert r.text == "<html>corpo</html>"

@@ -744,3 +744,25 @@ def test_alvo_impossivel_nomeia_o_argumento_e_nao_culpa_o_site():
     """`as_base` devolvia "/" e o relatório dizia "Home page could not be read:
     Invalid URL '/'" — culpando o site pelo que o operador digitou."""
     assert as_base_publico("http://[abc/") == "http://[abc/"
+
+
+def test_pagina_de_confianca_ausente_e_reportada_como_MISSING(server):
+    """Trocar esse `MISSING` por OK fazia a ausência de About sumir do relatório
+    — e a ausência de página de confiança é motivo de recusa no AdSense. O
+    ramo do Contact tem escalação própria e era o único fixado; este é o outro."""
+    base, routes = server
+    # UMA só ausente, de propósito: com as duas faltando, o FAIL agregado
+    # ("Neither an About nor a Contact") domina o status e a mensagem do achado
+    # não muda sob a mutação — só a severidade muda, e nada a observava.
+    # A home tem canal, para o Contact ausente não cair no ramo WARNING.
+    routes["/"] = (200, {}, pagina("Casa", extra=MAILTO))
+    routes["/about"] = (200, {}, pagina("Sobre"))
+
+    r = check_trust_pages(base + "/")
+
+    assert r.pages["about"].status is Status.OK
+    assert r.pages["contact"].status is Status.MISSING
+    assert "No Contact page found" in " | ".join(r.issues)
+    # O status do relatório vem SÓ desse achado, então ele é o que a asserção vê.
+    assert r.status is Status.MISSING
+    assert r.passed is False
