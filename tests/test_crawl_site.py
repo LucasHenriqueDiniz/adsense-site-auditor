@@ -266,3 +266,38 @@ def test_delay_da_linha_de_comando_chega_ao_crawler(server, monkeypatch, capsys)
     assert decorrido < DEFAULT_DELAY, (
         f"crawl levou {decorrido:.3f}s com --delay 0; o padrão é {DEFAULT_DELAY}s por página"
     )
+
+
+def test_verify_canonical_liga_de_fato_a_comparacao_de_duas_sessoes(
+    server, monkeypatch, capsys
+):
+    """Apagar `verify_two_sessions=args.verify_canonical` tornava a flag um
+    no-op: a comparação nunca rodava, ADS-CRAWL-05 passava sem ela, e nada
+    percebia — a flag existe justamente porque sem ela o check fica MISSING e o
+    script não tem caminho algum para exit 0.
+
+    A asserção é sobre o fio: com a flag, cada página com canonical é re-buscada
+    duas vezes a partir de sessões novas.
+    """
+    base, routes = server
+    pagina = (
+        f'<html><head><link rel="canonical" href="{base}/"></head>'
+        "<body><p>conteudo</p></body></html>"
+    )
+    routes["/"] = (200, HTML, pagina)
+    routes["/robots.txt"] = (200, TEXTO, "User-agent: *\nAllow: /\n")
+
+    def rodar(*flags):
+        routes.received.clear()
+        monkeypatch.setattr("sys.argv", ["crawl_site.py", *flags, base + "/"])
+        crawl_site.main()
+        saida = capsys.readouterr().out
+        return saida, sum(1 for _m, caminho, _h in routes.received if caminho == "/")
+
+    sem_flag, pedidos_sem = rodar("--delay", "0")
+    com_flag, pedidos_com = rodar("--delay", "0", "--verify-canonical")
+
+    assert "the two-session comparison was not made" in sem_flag
+    assert "the two-session comparison was not made" not in com_flag
+    # Duas visitas independentes por página com canonical, que sem a flag não acontecem.
+    assert pedidos_com == pedidos_sem + 2

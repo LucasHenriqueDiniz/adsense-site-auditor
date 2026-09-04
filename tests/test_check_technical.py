@@ -272,3 +272,26 @@ def test_sitemap_ausente_nao_imprime_pass(server, monkeypatch, capsys):
 
     assert "[MISS] ADS-CRAWL-07 sitemap" in saida
     assert "no sitemap found" in saida
+
+
+def test_url_anunciada_pelo_sitemap_que_da_404_reprova_a_linha(server, monkeypatch, capsys):
+    """A amostragem passou a existir nesta rodada e nada fixava que o veredito
+    dela entra no status: apagar a escalação deixava os 404 aparecerem na nota com
+    a linha do sitemap ainda em PASS — o defeito que esta mesma rodada diz ter
+    corrigido, um passo adiante."""
+    base, routes = server
+    routes["/robots.txt"] = (200, {"Content-Type": "text/plain"}, "User-agent: *\nAllow: /\n")
+    routes["/"] = (200, {"Content-Type": "text/html"}, "<html><body>ok</body></html>")
+    routes["/sitemap.xml"] = (
+        200,
+        {"Content-Type": "application/xml"},
+        _sitemap(base),  # anuncia /a e /b, que este fixture nao serve
+    )
+
+    monkeypatch.setattr("sys.argv", ["check_technical.py", base + "/"])
+    codigo = check_technical.main()
+    saida = capsys.readouterr().out
+
+    assert "[PASS] ADS-CRAWL-07 sitemap" not in saida
+    assert "0 of 2 sampled URL(s) answered 200" in saida
+    assert codigo == 1

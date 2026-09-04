@@ -1184,3 +1184,25 @@ def test_head_sem_fechamento_nao_zera_a_contagem_de_palavras():
     p = parse_html(html)
     assert p.word_count >= 300
     assert "T" not in p.text  # e o título continua fora da contagem
+
+
+def test_nenhuma_pagina_buscada_nao_aprova_nenhum_dos_tres_checks():
+    """Forçar `Status.ERROR` para OK no ramo `if not result.pages` sobrevivia nas
+    TRÊS checagens: as três linhas imprimiriam PASS ao lado de "no pages were
+    fetched" e o `crawl_site` sairia 0.
+
+    O estado é alcançável por quem monta um `CrawlResult` — `crawl()` sempre
+    registra ao menos a raiz, inclusive no caminho de erro e no de robots
+    bloqueando, que dá uma página e MISSING, não zero. A guarda existe para o
+    chamador, e é ele que este teste representa.
+    """
+    vazio = CrawlResult(start_url="http://exemplo.com/")
+    assert vazio.status is Status.OK  # o crawl "correu"; o que falta é evidência
+    assert vazio.pages == []
+
+    for check in (check_pages_reachable(vazio),
+                  check_redirect_chain(vazio),
+                  check_session_urls(vazio)):
+        assert check.status is Status.ERROR, check.requirement
+        assert check.passed is False, check.requirement
+        assert any("no pages were fetched" in f for f in check.findings), check.requirement
