@@ -546,8 +546,19 @@ def test_arquivo_grande_sem_newline_nenhum_nao_vira_liberar_tudo():
     """`rfind` devolvia -1 e `cut[:0]` esvaziava o arquivo inteiro, então
     qualquer arquivo grande sem newline — uma linha longa de qualquer coisa —
     virava allow-all, que é a direção que esconde um bloqueio real."""
-    texto = "User-agent: *\nDisallow: /" + "a" * (520 * 1024)
-    r = parse_robots(texto)
+    from adsense_checks.robots import _MAX_BYTES, _truncate
+
+    # SEM newline nenhum: a fixture anterior tinha um depois de `User-agent: *`,
+    # então `rfind` achava a posição 13, nunca -1, e o ramo que este teste nomeia
+    # jamais era executado. Trocar a guarda por `if True:` — que é exatamente o
+    # defeito — passava por ele.
+    texto = "Disallow: /" + "a" * (520 * 1024)
+    assert "\n" not in texto
+    assert len(texto.encode()) > _MAX_BYTES
+    assert len(_truncate(texto)) == _MAX_BYTES  # preserva, em vez de esvaziar
+
+    # E pela porta da frente: o grupo sobrevive ao truncamento.
+    r = parse_robots("User-agent: *\nDisallow: /" + "a" * (520 * 1024))
     assert len(r.groups) == 1
     assert r.groups[0].agents == ["*"]
 
