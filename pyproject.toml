@@ -9,6 +9,12 @@ description = "Deterministic checks behind the AdSense site readiness audit skil
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.32",
+    # urllib3 already arrives with requests, but `adsense_checks.http` imports it
+    # by name — `urllib3.util.Timeout`, run as a validator so that `fetch` can
+    # reject a bad timeout before it opens the try block that swallows ValueError.
+    # An undeclared import is the kind that survives until the day a resolver
+    # picks a tree without it; the range is the one requests itself declares.
+    "urllib3>=1.26,<3",
 ]
 
 [project.optional-dependencies]

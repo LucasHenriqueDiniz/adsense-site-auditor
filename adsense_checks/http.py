@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from urllib.parse import SplitResult, urldefrag, urljoin, urlsplit
 
 import requests
+from urllib3.util import Timeout as Urllib3Timeout
 
 from adsense_checks.status import Status
 
@@ -152,6 +153,35 @@ class Fetch:
         return Status.OK
 
 
+def _reject_invalid_timeout(timeout: object) -> None:
+    """Raise on a `timeout` no HTTP client here can use. Silent when it is fine.
+
+    This exists so that `fetch` can catch ValueError around the whole request
+    without swallowing the caller's own bug. urllib3 validates `timeout` deep
+    inside the request — a plain `ValueError` from `timeout=0`, a non-number, or
+    a tuple of the wrong length — and that is indistinguishable, at the `except`,
+    from the ValueError a malformed URL raises. Checking first separates them by
+    WHEN they happen instead of by type: anything left for the try block to catch
+    is about a URL, because the argument was already proven usable.
+
+    It runs urllib3's own validator rather than a hand-rolled `<= 0`, on the same
+    shapes requests accepts, so "usable here" cannot drift from "usable there".
+    """
+    if isinstance(timeout, Urllib3Timeout):
+        return
+    if isinstance(timeout, tuple):
+        try:
+            connect, read = timeout
+        except ValueError:
+            raise ValueError(
+                f"Invalid timeout {timeout!r}. Pass a (connect, read) timeout tuple, "
+                "or a single float to set both timeouts to the same value."
+            ) from None
+        Urllib3Timeout(connect=connect, read=read)
+        return
+    Urllib3Timeout(connect=timeout, read=timeout)
+
+
 def fetch(
     url: str,
     *,
@@ -162,18 +192,23 @@ def fetch(
 ) -> Fetch:
     """GET a URL following redirects. Never raises; failures come back as ERROR.
 
+    "Never raises" is about the network and about URLs — the things a stranger
+    controls. A `timeout` this client cannot use is the caller's own bug and is
+    still raised, at the top, before any request goes out.
+
     HEAD is available via method="HEAD" but falls back to GET when the server
     answers 4xx/5xx to it, because a server refusing HEAD says nothing about the
     page.
     """
     if not split_url(url).netloc:
-        # The bracketed-host ValueError, caught here instead of around the whole
-        # request: `except ValueError` also swallowed `timeout=0` and a bad
-        # timeout tuple, so a caller's bug came back as "the site could not be
-        # reached" about a site that was up the whole time.
+        # Answered here rather than by the try block below, because here we can
+        # name the offender: at this point `url` IS the URL that failed to parse.
+        # Once the request is in flight that stops being true — see the clause at
+        # the bottom, which is reached by redirect targets and proxy hosts too.
         result = Fetch(url=url)
         result.error = f"InvalidURL: {url!r} has no host this client can parse"
         return result
+    _reject_invalid_timeout(timeout)
     sess = session or requests.Session()
     # HTTP methods are case-sensitive on the wire but the caller's spelling is not
     # a verdict: `method="head"` used to miss the fallback below and return the
@@ -218,6 +253,50 @@ def fetch(
         # one. A GET that replaced a refused HEAD does have one, and keeping it
         # is the whole reason for the fallback.
         result.text = "" if answered_with == "HEAD" else resp.text
+    # Order matters, and this clause has to stay second: requests' own InvalidURL,
+    # MissingSchema and InvalidSchema are BOTH a RequestException and a ValueError,
+    # and they already carry a precise message of their own.
     except requests.RequestException as exc:
         result.error = f"{type(exc).__name__}: {exc}"
+    except ValueError as exc:
+        # The bad-URL defect of the netloc guard above, one layer lower: a URL
+        # that got past `urlsplit` and past requests' own prepare step, and blew
+        # up in flight. Two known ways in, neither of them a RequestException,
+        # so both used to walk straight out of `fetch` and break the never-raises
+        # contract:
+        #
+        #   * A DNS label of 64 characters or more, or an empty one as in
+        #     `a..example`. urllib3's `create_connection` runs `host.encode("idna")`
+        #     at connect time and raises LocationParseError. It reaches here from
+        #     the caller's URL, from a redirect target, and from a host in
+        #     HTTP_PROXY.
+        #   * A redirect whose `Location` names a bracketed host that is not a
+        #     valid IPv6 literal — `http://[foo]/`, `http://[]/`, `http://[1.2.3.4]/`.
+        #     requests' `resolve_redirects` calls `urlparse` on the redirect target
+        #     with no guard, and CPython's bracketed-host check raises a PLAIN
+        #     ValueError. That is stdlib, so no dependency pin fences it off.
+        #
+        # Hence ValueError rather than either exception class: the second one has
+        # no class of its own to catch, and enumerating stdlib parse failures is a
+        # game this file has already lost three times — see `split_url`,
+        # `join_url` and `defrag_url`, which are the same sweep made in the same
+        # file for the same reason.
+        #
+        # A blanket `except ValueError` here USED to be a bug of its own: it also
+        # swallowed the plain ValueError urllib3 raises for `timeout=0` or a bad
+        # timeout tuple, handing a caller's bug back as "the site could not be
+        # reached" about a site that was up the whole time. That timeout is now
+        # validated before the try, so nothing this clause can catch is about the
+        # arguments any more.
+        #
+        # Reported as InvalidURL and not as a network failure: the host is not
+        # unreachable, it is one this client cannot pronounce, and that is a
+        # finding about a URL. But NOT in the netloc guard's words — the URL that
+        # failed to parse is often not `url`. On a redirect it is hop two, and
+        # saying `'http://site/mapa.xml' has no host this client can parse` about
+        # a URL that parses perfectly sends the operator to fix the wrong thing.
+        # The offender is named by `{exc}`; `url` is named as what was requested.
+        result.error = (
+            f"InvalidURL: fetching {url!r} reached a URL this client cannot parse ({exc})"
+        )
     return result

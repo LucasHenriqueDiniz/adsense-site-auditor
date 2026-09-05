@@ -209,3 +209,181 @@ def test_o_timeout_padrao_publicado_e_15_segundos():
 
     assert DEFAULT_TIMEOUT == 15
     assert inspect.signature(fetch).parameters["timeout"].default == 15
+
+
+# --------------------------------------------------------------------------
+# URLs que o cliente não consegue parsear, e que não são a URL pedida
+# --------------------------------------------------------------------------
+
+# Um label de DNS para em 63 caracteres. O 64º faz `str.encode("idna")` levantar
+# UnicodeError, e urllib3 — que o chama dentro de `create_connection`, na hora de
+# conectar — transforma isso em LocationParseError. Um label vazio no meio do
+# host falha no mesmo ponto, com a mesma mensagem.
+HOST_COM_LABEL_LONGO_DEMAIS = "a" * 64 + ".invalid"
+HOST_COM_LABEL_VAZIO = "a..invalid"
+
+# Hosts entre colchetes que não são literais IPv6 válidos. Quem levanta aqui é a
+# stdlib, não urllib3: `urlsplit`/`urlparse` checam o conteúdo dos colchetes e
+# levantam ValueError PELADO — nem LocationValueError, nem RequestException. Como
+# é stdlib, nenhum pin de dependência cerca o caso.
+HOSTS_ENTRE_COLCHETES_INVALIDOS = [
+    "http://[foo]/",
+    "//[foo]/",
+    "http://user@[foo]/",
+    "http://[%3A%3A1]/",
+    "http://[::1:99999]/",
+    "http://[:::1]/",
+    "http://[g::1]/",
+    "http://[]/",
+    "http://[1.2.3.4]/",
+    "http://[::1/",
+]
+
+
+@pytest.mark.parametrize("host", [HOST_COM_LABEL_LONGO_DEMAIS, HOST_COM_LABEL_VAZIO])
+def test_host_que_o_cliente_nao_consegue_parsear_vira_erro_no_Fetch(host):
+    """O mesmo defeito de `test_url_malformada_nao_levanta`, uma camada abaixo.
+
+    Este host passa pela guarda de `urlsplit` no topo de `fetch` e passa pelo
+    prepare do próprio requests; quem o recusa é urllib3, na hora de conectar, e
+    o LocationParseError que ele levanta NÃO é RequestException — saía de
+    `fetch` e levava junto todo o `check_sitemap`. O robots.txt de um estranho
+    dizendo `Sitemap: http://<64 a's>.invalid/sitemap.xml` é o exploit inteiro.
+    """
+    r = fetch(f"http://{host}/sitemap.xml", timeout=2)
+    assert r.error is not None
+    # Reportado como URL ruim e não como falha de rede: o host não está
+    # inalcançável, é um que este cliente não consegue pronunciar. Mesmo prefixo
+    # que a guarda de netloc no topo de `fetch` já usa.
+    assert r.error.startswith("InvalidURL:")
+    assert r.ok is False
+    assert r.status is Status.ERROR
+
+
+@pytest.mark.parametrize("destino", HOSTS_ENTRE_COLCHETES_INVALIDOS)
+def test_redirect_para_host_entre_colchetes_nao_levanta(server, destino):
+    """A terceira porta para o mesmo defeito, e a que nenhuma classe de exceção
+    de biblioteca cerca.
+
+    `resolve_redirects` do requests chama `urlparse` no alvo do redirect sem
+    guarda nenhuma, e a checagem de host entre colchetes da CPython levanta
+    ValueError PELADO. Não é RequestException e não é LocationValueError, então
+    saía de `fetch` com traceback cru e sem relatório — e não precisa nem do
+    robots.txt de um estranho: basta a home do site auditado redirecionar para
+    cá. São 18 chamadores de `fetch` no pacote, todos herdando isso.
+    """
+    base, routes = server
+    routes["/"] = (302, {"Location": destino}, "")
+
+    r = fetch(base + "/", timeout=2)
+
+    assert r.error is not None
+    assert r.error.startswith("InvalidURL:")
+    assert r.ok is False
+    assert r.status is Status.ERROR
+
+
+def test_a_mensagem_do_salto_impossivel_cita_a_requisicao_e_o_culpado(server):
+    """A frase precisa ser verdadeira, e nada a prendia.
+
+    Trocar a mensagem inteira por uma constante — sem o `{url!r}` e sem o
+    `({exc})` — passava por todos os testes desta guarda: os de sitemap batem no
+    host porque `sitemap.py` monta a própria razão com a URL candidata dentro,
+    e os daqui só olhavam o prefixo `InvalidURL:`.
+
+    Pior, a frase herdada da guarda de netloc dizia que a URL PEDIDA não tem
+    host parseável. Num salto de redirect ela tem: quem não parseia é o hop 2.
+    O operador lia "a URL do sitemap que declarei está malformada" sobre uma URL
+    que estava perfeita.
+    """
+    base, routes = server
+    destino = f"http://{HOST_COM_LABEL_LONGO_DEMAIS}/x"
+    routes["/mapa.xml"] = (302, {"Location": destino}, "")
+    pedida = base + "/mapa.xml"
+
+    r = fetch(pedida, timeout=2)
+
+    assert r.error.startswith("InvalidURL:")
+    # A URL pedida aparece — mas como o que se pediu, não como a culpada.
+    assert repr(pedida) in r.error
+    assert "has no host this client can parse" not in r.error
+    # E o culpado de verdade aparece, pelo `({exc})`. Ele não está em `pedida`,
+    # então esta asserção morre se o `({exc})` sumir da mensagem.
+    assert HOST_COM_LABEL_LONGO_DEMAIS not in pedida
+    assert HOST_COM_LABEL_LONGO_DEMAIS in r.error
+
+
+def test_a_guarda_de_netloc_continua_acusando_a_url_pedida():
+    """A contraparte do teste acima: aqui `url` É a culpada, e dizê-lo é certo.
+
+    As duas mensagens começam com `InvalidURL:` e precisam continuar diferentes
+    no resto — é a diferença entre mandar o operador conferir a URL que ele
+    escreveu e mandá-lo conferir uma que está certa.
+    """
+    url = "http://[::1:99999]/x"
+
+    r = fetch(url, timeout=1)
+
+    assert r.error == f"InvalidURL: {url!r} has no host this client can parse"
+
+
+def test_url_que_o_proprio_requests_recusa_mantem_a_mensagem_do_requests():
+    """A ordem das duas cláusulas de `fetch`, que deixou de ser livre.
+
+    `InvalidURL`, `MissingSchema`, `InvalidSchema` e `InvalidHeader` do requests
+    são ao mesmo tempo RequestException e ValueError. Enquanto a cláusula larga
+    pegava só LocationValueError as duas eram disjuntas e trocá-las de lugar não
+    mudava nada; agora ela pega ValueError, e vindo primeiro engoliria todas —
+    devolvendo "reached a URL this client cannot parse" no lugar da descrição
+    que o requests já tem, e dizendo isso até sobre um header malformado.
+    """
+    # A porta não é um número: o requests recusa em `prepare_url`, antes de
+    # qualquer socket, e a exceção é das que herdam dos dois lados.
+    r = fetch("http://exemplo.com:porta/", timeout=1)
+
+    assert r.error.startswith("InvalidURL: ")
+    assert "reached a URL this client cannot parse" not in r.error
+
+
+def test_timeout_zero_continua_levantando_em_vez_de_virar_erro_de_rede():
+    """O contrapeso dos testes acima, e o que mantém o `except ValueError` honesto.
+
+    LocationParseError É um ValueError, e o ValueError pelado do host entre
+    colchetes também — mas `timeout=0` levanta outro, do validador de timeout do
+    urllib3. Enquanto o catch estava dentro do try junto com o request, pegar
+    ValueError devolvia o bug do chamador como "o site não pôde ser alcançado",
+    sobre um site que esteve no ar o tempo todo. O que impede isso hoje é o
+    timeout ser validado ANTES do try; se aquela validação sumir, isto pega.
+    """
+    with pytest.raises(ValueError):
+        fetch("http://127.0.0.1:1/", timeout=0)
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [
+        0,
+        -1,
+        "dois",
+        True,
+        (0, 5),
+        (5, 0),
+        (1, 2, 3),
+    ],
+)
+def test_timeout_inutilizavel_levanta_antes_de_qualquer_requisicao(server, timeout):
+    """O mesmo contrato do teste acima, agora com o `except ValueError` largo.
+
+    `fetch` promete não levantar sobre a rede e sobre URLs — o que um estranho
+    controla. O `timeout` é argumento do chamador, e continua sendo bug dele.
+    Como agora a cláusula de baixo pega ValueError inteiro, o que separa os dois
+    é a ORDEM: o timeout é validado antes do try. Por isso o servidor daqui não
+    pode ter recebido nada.
+    """
+    base, routes = server
+    routes["/"] = (200, {}, "<html></html>")
+
+    with pytest.raises(ValueError):
+        fetch(base + "/", timeout=timeout)
+
+    assert routes.received == []

@@ -926,3 +926,90 @@ def test_a_amostra_de_urls_fora_de_escopo_tambem_para_em_50(server):
 
     assert r.out_of_scope_count == 60
     assert len(r.out_of_scope_urls) == 50
+
+
+# --------------------------------------------------------------------------
+# Um host que o cliente HTTP não consegue parsear
+# --------------------------------------------------------------------------
+
+# Mesma constante de test_http.py: 64 caracteres estouram o limite de 63 de um
+# label de DNS, e urllib3 recusa o host na hora de conectar. A URL abaixo é
+# conteúdo de terceiro — o robots.txt de um estranho, ou o <loc> de um índice de
+# sitemap — que é exatamente o modelo de ameaça que a docstring de `_matches` em
+# robots.py já descreve.
+HOST_IMPOSSIVEL = "a" * 64 + ".invalid"
+SITEMAP_IMPOSSIVEL = f"http://{HOST_IMPOSSIVEL}/sitemap.xml"
+# E o mesmo defeito pela porta que nenhuma classe de exceção de biblioteca cerca:
+# um sitemap que existe, responde, e manda o cliente para um host entre colchetes
+# que não é IPv6. Quem levanta é `urlparse` da stdlib, dentro do
+# `resolve_redirects` do requests, com um ValueError pelado.
+SALTO_IMPOSSIVEL = "http://[foo]/sitemap.xml"
+
+
+def test_sitemap_declarado_no_robots_com_host_impossivel_nao_derruba_o_check(server):
+    """O robots.txt de um estranho derrubava o `check_sitemap` inteiro.
+
+    O LocationParseError do urllib3 não é RequestException, então escapava de
+    `fetch` e subia por `discover_sitemap_urls` -> `check_sitemap` -> CLI. Não
+    havia relatório nenhum: o caminho convencional, que serve um sitemap
+    perfeitamente bom, nunca chegou a ser tentado.
+    """
+    base, routes = server
+    routes["/robots.txt"] = (200, TXT, f"Sitemap: {SITEMAP_IMPOSSIVEL}\n")
+    routes["/sitemap.xml"] = (200, XML, urlset(f"{base}/a"))
+
+    r = check_sitemap(base)
+
+    # O caminho convencional foi tentado, e existe relatório.
+    assert r.found is True
+    assert r.url_count == 1
+    assert r.sitemap_url == f"{base}/sitemap.xml"
+    # E o candidato declarado que não deu em nada é nomeado em vez de sumir: o
+    # site anuncia um sitemap que nenhum crawler consegue buscar, e isso é um
+    # achado. Quem nomeia o host aqui é `sitemap.py`, montando a razão com a URL
+    # candidata dentro — a mensagem do `http.py` é prendida em test_http.py.
+    assert any(HOST_IMPOSSIVEL in reason for reason in r.reasons)
+
+
+def test_filho_de_indice_com_host_impossivel_nao_derruba_o_check(server):
+    """A segunda porta para o mesmo defeito: o <loc> de um <sitemapindex>.
+
+    Mesma entrada escolhida pelo site, outro ponto de chamada (`_resolve_index`)
+    e a mesma consequência — a caminhada morria no filho ruim e as URLs do filho
+    bom nunca eram contadas.
+    """
+    base, routes = server
+    routes["/sitemap.xml"] = (
+        200,
+        XML,
+        sitemapindex(SITEMAP_IMPOSSIVEL, f"{base}/bom.xml"),
+    )
+    routes["/bom.xml"] = (200, XML, urlset(f"{base}/a", f"{base}/b"))
+
+    r = check_sitemap(base)
+
+    assert r.url_count == 2
+    assert any(HOST_IMPOSSIVEL in reason for reason in r.reasons)
+
+
+def test_filho_de_indice_que_redireciona_para_host_entre_colchetes_nao_derruba(server):
+    """A terceira porta, e a que não precisa de host exótico nenhum na entrada.
+
+    `http://[foo]/` só aparece no `Location` de um salto: o <loc> do índice é uma
+    URL comum deste mesmo servidor. `resolve_redirects` chama `urlparse` no alvo
+    sem guarda, a CPython levanta ValueError pelado, e nem a cláusula de
+    RequestException nem a de LocationValueError o viam.
+    """
+    base, routes = server
+    routes["/sitemap.xml"] = (
+        200,
+        XML,
+        sitemapindex(f"{base}/torto.xml", f"{base}/bom.xml"),
+    )
+    routes["/torto.xml"] = (302, {"Location": SALTO_IMPOSSIVEL}, "")
+    routes["/bom.xml"] = (200, XML, urlset(f"{base}/a", f"{base}/b"))
+
+    r = check_sitemap(base)
+
+    assert r.url_count == 2
+    assert any("torto.xml" in reason for reason in r.reasons)
