@@ -1617,6 +1617,83 @@ def test_as_duas_metades_nao_pedem_o_mesmo_endereco_duas_vezes():
 # --------------------------------------------------------------------------
 
 
+def test_a_sonda_de_nao_encontrado_segue_o_base_href_dos_links(server):
+    """A costura entre os dois recursos, e ela só existe depois de juntá-los.
+
+    Um deles mudou TODO link pedido para debaixo do `<base href>`. O outro passou
+    a perguntar ao host como é uma página faltando — e perguntava na URL que o
+    operador digitou. Nada reconciliava os dois, e nenhum dos dois commits
+    sozinho tem o defeito.
+
+    Aqui a raiz é honesta e `/app/` responde 200 para tudo. Sondando a raiz, o
+    regime dá `honest`, todo 200 vindo de `/app/` conta como página, e três links
+    mortos saem PASS com exit 0 — debaixo de uma frase afirmando que este host
+    responde 4xx para o que não existe, que é verdade sobre um diretório de onde
+    nada foi buscado.
+    """
+    base, rotas = server
+    rotas["/"] = (200, {}, home_com_base("/app/", menu_de("sobre", "contato", "blog")))
+    # `/app/` inteiro é um soft 404; a raiz 404a de verdade (nenhuma rota curinga).
+    rotas.default = lambda metodo, caminho: (
+        (200, {}, ERRO_404) if caminho.startswith("/app/") else None
+    )
+
+    relatorio = count_broken_nav_links(base + "/")
+
+    assert relatorio.not_found_regime == "fingerprint"
+    assert relatorio.status is Status.MISSING
+    assert [link.url for link in relatorio.same_as_not_found] == [
+        base + "/app/sobre", base + "/app/contato", base + "/app/blog",
+    ]
+
+
+def test_a_auditoria_inteira_sonda_debaixo_do_base_href(server):
+    """A mesma costura pelo caminho de cima, que sonda num lugar diferente.
+
+    `check_completeness` pede a sonda uma vez e entrega às duas sub-checagens, e
+    prender só o `count_broken_nav_links` deixa esta metade solta: apagar o
+    `resolve_base` aqui sobrevivia à suíte inteira. A base é a mesma dos links
+    também aqui, senão as páginas de confiança de `/app/` são julgadas contra o
+    "nada" da raiz.
+    """
+    base, rotas = server
+    rotas["/"] = (200, {}, home_com_base("/app/", menu_de("sobre")))
+    rotas.default = lambda metodo, caminho: (
+        (200, {}, ERRO_404_LONGO) if caminho.startswith("/app/") else None
+    )
+
+    relatorio = check_completeness(base + "/")
+
+    # `/app/` responde 200 para tudo, então nenhuma página de confiança dali pode
+    # ser afirmada — e a navegação não pode ser aprovada.
+    assert relatorio.trust.pages["about"].status is Status.MISSING
+    assert relatorio.nav.not_found_regime == "fingerprint"
+    assert relatorio.nav.status is Status.MISSING
+
+
+def test_o_espelho_da_costura_um_subdiretorio_honesto_sob_uma_raiz_que_nao_e(server):
+    """O outro lado, e o que impede a correção de virar um MISSING para todos.
+
+    Aqui `/app/` é honesto e os três links existem de verdade; só a raiz responde
+    200 para o que não tem. Sondando a raiz, o regime dá `fingerprint` e um site
+    inteiro que funciona vira "não deu para mostrar que levam a lugar algum".
+    """
+    base, rotas = server
+    rotas["/"] = (200, {}, home_com_base("/app/", menu_de("sobre", "contato", "blog")))
+    for caminho in ("sobre", "contato", "blog"):
+        rotas[f"/app/{caminho}"] = (200, {}, pagina(caminho))
+    # A raiz responde 200 para qualquer coisa; `/app/` 404a o que não existe.
+    rotas.default = lambda metodo, caminho: (
+        None if caminho.startswith("/app/") else (200, {}, ERRO_404)
+    )
+
+    relatorio = count_broken_nav_links(base + "/")
+
+    assert relatorio.not_found_regime == "honest"
+    assert relatorio.status is Status.OK
+    assert (relatorio.count, relatorio.same_as_not_found, relatorio.unverified) == (0, [], [])
+
+
 def home_com_base(base_href, corpo):
     """Uma home que declara `<base href>`, com prosa suficiente para ser lida."""
     return (

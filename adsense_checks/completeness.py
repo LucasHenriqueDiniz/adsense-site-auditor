@@ -1624,11 +1624,16 @@ def count_broken_nav_links(
         probe = not_found
         report.not_found_regime = probe.regime
     elif targets:
-        # Probed at the origin the links were resolved against, not at the URL
-        # the operator typed. On a site redirecting apex to www the two are
-        # different hosts, and the answer wanted is the one from the host now
-        # being asked for the links.
-        probe = _probe_not_found(as_base(home_url), session=sess, timeout=timeout)
+        # Probed where the LINKS are, which is `resolve_base` and not the URL the
+        # operator typed. Two things separate them, and both make the answer
+        # useless if the probe is asked at the wrong one: a site redirecting apex
+        # to www serves different hosts, and a `<base href>` moves every link
+        # into a subdirectory that may answer a missing page quite differently
+        # from the root. Asking the root what a missing page looks like and then
+        # judging `/app/` by it reported OK over a menu of dead links.
+        probe = _probe_not_found(
+            as_base(resolve_base(home_url, doc.base_href)), session=sess, timeout=timeout
+        )
         report.not_found_regime = probe.regime
 
     for url, text in targets[:limit]:
@@ -1834,8 +1839,12 @@ def check_completeness(
     # does not have. Costs the same one or two requests wherever it is asked;
     # asked here it is also spent on a site whose menu is empty, and the trust
     # pages are requested on every site there is.
+    # Asked where the links are — `<base href>` moves them, and the probe has to
+    # move with them or it answers about a directory nothing is fetched from.
     not_found = _probe_not_found(
-        as_base(home.final_url or home.url), session=sess, timeout=timeout
+        as_base(resolve_base(home.final_url or home.url, doc.base_href)),
+        session=sess,
+        timeout=timeout,
     )
 
     report.trust = check_trust_pages(

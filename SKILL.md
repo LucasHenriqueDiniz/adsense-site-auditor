@@ -145,6 +145,7 @@ Use helper scripts when available:
 - `scripts/check_completeness.py URL` — items 1 and 2 of the gate above, in part:
   placeholder text (ADS-COMPLETE-01), the About and Contact pages (ADS-UX-05),
   a contact channel in the HTML (ADS-AUTHOR-02) and navigation links that 4xx/5xx
+  or come back with the site's own not-found page under HTTP 200
   (ADS-COMPLETE-01). It does not decide ADS-AUTHOR-01 — whether a real name or
   registered company stands behind the site is `judgement`, and no script here
   touches it. Item 4 of the gate is `analyze_text_depth.py`, run over a sample

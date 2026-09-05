@@ -38,7 +38,7 @@ Every script takes URLs and writes to stdout. There is **no `--output` flag** an
 
 | Script | Arguments | Requirements | What it decides |
 | --- | --- | --- | --- |
-| `check_completeness.py` | `URL` `[--nav-limit N] [--timeout S]` | ADS-COMPLETE-01, ADS-UX-05, ADS-AUTHOR-02 (part) | Unfinished markers on the home page, About/Contact present and not stubs, a contact channel in the HTML, navigation links that 4xx/5xx |
+| `check_completeness.py` | `URL` `[--nav-limit N] [--timeout S]` | ADS-COMPLETE-01, ADS-UX-05, ADS-AUTHOR-02 (part) | Unfinished markers on the home page, About/Contact present and not stubs, a contact channel in the HTML, navigation links that 4xx/5xx or serve the site's own not-found page |
 | `check_technical.py` | `URL` `[--timeout S]` | ADS-CRAWL-01, -02, -06, -07 | Reachability, robots.txt for the three Google crawlers, sitemap discovery, parsing and a five-URL sample fetched to see whether what it advertises answers 200, DNS/TLS/response time |
 | `crawl_site.py` | `URL` `[--depth N] [--max-pages N] [--delay S] [--timeout S] [--verify-stateless] [--verify-canonical]` | ADS-CRAWL-01, -04, -05 | Breadth-first crawl; pages answer 2xx publicly, redirect chains are short and stateless, URLs carry no session ids |
 | `analyze_text_depth.py` | `URL [URL ...]` `[--min-words N]` | ADS-CONTENT-03 | Main-content word count per page, chrome excluded where detectable. It does **not** decide ADS-COMPLETE-02: that requirement counts three articles over 1200 words, and this measures one page at a time |
@@ -60,6 +60,14 @@ description, visible word count, and the links it chose not to follow.
 | `--nav-limit` | 25 | When the limit bites, the broken-link count is a lower bound and the report says so. |
 | `--verify-stateless` | off | Re-requests each redirecting page without cookies, one extra request each. Any page that redirects holds ADS-CRAWL-04 at `MISSING` until it runs. |
 | `--verify-canonical` | off | Re-requests every page twice from fresh sessions to compare the canonical. ADS-CRAWL-05 reports `MISSING` until it runs, so on a site that declares canonicals this flag is the only route to exit 0. |
+
+`check_completeness.py` also asks the audited host, once per run, for one or
+two paths that nothing can route — `adsense-auditor-probe-no-such-page` and a
+second one — resolved under the same base its navigation links are. That is how
+it tells a working page from a "page not found" template served with HTTP 200:
+where the host answers 4xx, a 200 means the page is there; where it does not,
+no 200 from it is evidence either way and the links are reported as unverified
+rather than as broken. Expect those paths in the audited site's 404 log.
 
 The crawler identifies itself as `Mediapartners-Google`, because the question
 this audit asks is what the AdSense crawler is served — sites do serve it
