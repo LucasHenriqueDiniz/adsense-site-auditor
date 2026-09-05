@@ -44,7 +44,11 @@ mistake in a new place — a number reported for something nobody observed:
   * A page whose main content the heuristic cannot isolate is measured on the
     whole `<body>`, menu and footer included. That is a different question from
     the one ADS-CONTENT-03 asks, so `measure_depth` reports it as ERROR instead
-    of grading the menu as prose.
+    of grading the menu as prose. The `<body>` is only the obvious shape of
+    that: `<div id="wrapper">` around the same page is a content container, so
+    it wins the scoring and looks isolated. What gives it away is the furniture
+    left inside the count — see `_furniture`, which also says why an
+    `<article>`'s own `<header>` is not that.
 
 What this module does not decide: the intro/body/conclusion structure that
 ADS-COMPLETE-02 also requires. It supplies the word count and the main text; a
@@ -155,6 +159,19 @@ CONTENT_CONTAINERS = frozenset({"article", "body", "div", "main", "section", "td
 # they are the page, not a part of it, so the "main content" they return is the
 # menu and the footer as well.
 WHOLE_PAGE_ELEMENTS = frozenset({"#document", "body", "html"})
+
+# Page furniture: the regions HTML marks as explicitly *not* the prose.
+#
+# `WHOLE_PAGE_ELEMENTS` only catches the wrapper when the wrapper is the body.
+# `div` is a content container, so `<div id="wrapper">` around the entire page
+# wins the scoring, is not in that set, and reports the menu and the footer as
+# main content — the shape of nearly every CMS theme. These tags are how
+# `measure_depth` notices that the winner is still holding the furniture.
+#
+# The tag alone is not the answer, though: see `_furniture` for whose region a
+# given one of these turns out to be. An `<article>`'s own `<header>` carries
+# the title and the byline, and that is the article, not the page.
+BOILERPLATE_ELEMENTS = frozenset({"aside", "footer", "header", "nav"})
 
 # Opening one of these implicitly closes an open sibling of the same name:
 # `<p>a<p>b` is two paragraphs, not a nested one. Only affects which container
@@ -310,8 +327,15 @@ def _parse(html: str) -> _Parser:
     return parser
 
 
-def _collect(node: _Node) -> str:
-    """Concatenate the subtree's text, separating non-inline elements."""
+def _collect(node: _Node, skip: frozenset[_Node] = frozenset()) -> str:
+    """Concatenate the subtree's text, separating non-inline elements.
+
+    `skip` drops whole subtrees, named by identity rather than by tag: which
+    `<header>` is furniture depends on where it sits, and only the caller knows
+    (see `_furniture`). It never holds `node` itself — the caller asked for
+    this element's text, and "" for it would read as an empty page rather than
+    as a refusal to answer.
+    """
     out: list[str] = []
     # Iterative: 5000 unclosed <div>s in a malformed page would blow a
     # recursive walk's stack, and this module promises not to crash on those.
@@ -321,9 +345,15 @@ def _collect(node: _Node) -> str:
         if isinstance(item, str):
             out.append(item)
             continue
-        if item.dropped:
-            continue
         block = item.tag != "#document" and item.tag not in INLINE_ELEMENTS
+        if item.dropped or item in skip:
+            # The subtree goes; the boundary it drew stays. Leaving with the
+            # separator unwritten is the welding this module exists to stop:
+            # `abc<nav>x</nav>def` would come back as "abcdef", one word that
+            # is on no page, and one word fewer than the two that are.
+            if block:
+                out.append(_SEPARATOR)
+            continue
         if block:
             stack.append(_SEPARATOR)
         stack.extend(reversed(item.content))
@@ -414,6 +444,60 @@ def _main_container(doc: _Parser) -> tuple[_Node, bool]:
         return winner, winner.tag not in WHOLE_PAGE_ELEMENTS
 
     return _find_body(doc), False
+
+
+def _furniture(container: _Node) -> frozenset[_Node]:
+    """The subtrees inside `container` that belong to the page, not to an article.
+
+    A `nav`, `header`, `footer` or `aside` says "this region is not the prose".
+    It does not say whose region it is, and that is the whole question. The
+    canonical `<article>` in the HTML spec opens with a `<header>` holding the
+    heading and the publication date and closes with a `<footer>`; WordPress
+    ships that shape as `entry-header`/`entry-footer` on every single-post
+    theme, title and byline and category line inside the `<article>`. Skipping
+    those by tag name reports "main content not separated from page furniture"
+    about a page whose main content was separated perfectly — and ERROR in this
+    package means the check could not run, not that the page is odd.
+
+    So an `<article>` claims the furniture tags beneath it, and `container`
+    counts as one when it is an article itself: a page that is a single
+    `<article>` with no `<main>` around it wins the heuristic *as* the article,
+    and its own header is still its own. What no article claims belongs to the
+    page, which is what a wrapper is full of.
+
+    Two shapes this gets wrong, in the two directions:
+
+      * a `<header>` sitting straight in a `<main>` with no `<article>` in
+        between is read as furniture even when it holds the page's own title.
+        The window is narrow — such a header is a heading and a date, not a
+        menu — and it is the price of still being able to catch a `<main>`
+        wrapped around the site navigation.
+      * an `<article>` used as the whole-page wrapper claims the menu inside
+        it, so that page's count stays too generous. That is the same class of
+        miss the band gate already accepts, and `<article>` around a whole site
+        is a far rarer mistake than `<div id="wrapper">` around one.
+    """
+    found: set[_Node] = set()
+    # Each entry carries whether an <article> at or below `container` already
+    # claims this node. Seeded from the container's children, so the container
+    # is never furniture itself — nor can it be: `_main_container` returns only
+    # a content container, `<main>`, `<article>` or the body.
+    claimed_by_article = container.tag == "article"
+    stack: list[tuple[_Node, bool]] = [
+        (child, claimed_by_article) for child in container.content if isinstance(child, _Node)
+    ]
+    while stack:
+        node, claimed = stack.pop()
+        if node.dropped:
+            continue
+        if not claimed and node.tag in BOILERPLATE_ELEMENTS:
+            # The whole subtree goes with it, so there is nothing below to look
+            # at: an <article> nested inside a menu is not a page's article.
+            found.add(node)
+            continue
+        claimed = claimed or node.tag == "article"
+        stack.extend((c, claimed) for c in node.content if isinstance(c, _Node))
+    return frozenset(found)
 
 
 def _visible_text(doc: _Parser) -> str:
@@ -554,6 +638,10 @@ def measure_depth(html: str, *, min_words: int = DEFAULT_MIN_WORDS, url: str = "
     main = _normalize(_collect(container))
     words = word_count(main)
     total = word_count(_visible_text(doc))
+    # The same container with its page furniture removed. Never reported as
+    # the count — it is only the control that says whether `words` is a
+    # measurement of the article or of the menu wrapped around it.
+    editorial_words = word_count(_normalize(_collect(container, skip=_furniture(container))))
 
     status = Status.OK
     notes: list[str] = []
@@ -581,6 +669,34 @@ def measure_depth(html: str, *, min_words: int = DEFAULT_MIN_WORDS, url: str = "
         notes.append(
             "main content not isolated: no <main>, <article> or paragraph block stood "
             "out, so this counts the whole <body>, navigation and footer included"
+        )
+    elif classify_depth(editorial_words, min_words=min_words) is not classify_depth(
+        words, min_words=min_words
+    ):
+        # A container that is not the <body> can still be the whole page: a
+        # `<div id="wrapper">` holds the paragraphs, so it wins the scoring,
+        # and `WHOLE_PAGE_ELEMENTS` waves it through with the menu and the
+        # footer inside the count. `main_ratio == 1.0` is the fingerprint of
+        # that, but it cannot be the rule on its own: a bare article with no
+        # chrome also measures 1.0, and it is a page this module read
+        # correctly. The ratio says nothing was separated; it does not say
+        # whether there was anything to separate.
+        #
+        # The furniture answers that. `_furniture` picks out the <nav>,
+        # <header>, <footer> and <aside> that no <article> claims — the page's
+        # own, not an article's title and byline — and this fires only when
+        # discarding them lands the page in a different band, which is
+        # precisely when the verdict being reported is a verdict about the
+        # menu. A 2000-word article with a four-word copyright line moves no
+        # band and stays silent; a wrapper holding an 80-item menu around one
+        # six-word <p> moves from "at or above the bar" to "below the
+        # threshold" and must not read as a pass.
+        status = escalate(status, Status.ERROR)
+        notes.append(
+            "main content not separated from page furniture: the container measured "
+            f"still holds {words - editorial_words} words of <nav>/<header>/<footer>/"
+            "<aside>, and without them this page is "
+            f"{describe_depth(editorial_words, min_words=min_words)}"
         )
     status = escalate(status, classify_depth(words, min_words=min_words))
     notes.append(describe_depth(words, min_words=min_words))

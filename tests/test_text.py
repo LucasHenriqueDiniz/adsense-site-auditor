@@ -528,6 +528,273 @@ def test_conteudo_principal_nao_isolado_e_ERROR_na_medicao():
     assert "main content not isolated" in d.reason
 
 
+def _pagina_com_wrapper(corpo: str, itens: int = 80) -> str:
+    """Um tema de CMS: a página inteira dentro de um só <div id="wrapper">.
+
+    `div` é container de conteúdo, então o wrapper ganha a pontuação, e
+    `WHOLE_PAGE_ELEMENTS` (só #document/body/html) o deixa passar como se a
+    heurística tivesse isolado alguma coisa.
+    """
+    menu = "".join(
+        f'<li><a href="/c{i}">categoria numero {i} do nosso catalogo</a></li>'
+        for i in range(itens)
+    )
+    return (
+        "<html><body><div id=\"wrapper\">"
+        f"<nav><ul>{menu}</ul></nav>"
+        f"<p>{corpo}</p>"
+        "<footer>Todos os direitos reservados</footer>"
+        "</div></body></html>"
+    )
+
+
+def test_wrapper_da_pagina_inteira_nao_e_medido_como_conteudo_principal():
+    """O defeito que isto trava: um corpo editorial de seis palavras reportado
+    como aprovação de 490 palavras, porque o menu e o rodapé foram contados
+    junto.
+
+    `WHOLE_PAGE_ELEMENTS` só pega o wrapper quando o wrapper é o <body>. Um
+    <div> em volta da mesma página não está nesse conjunto, então ele ganhou a
+    pontuação e a contagem voltou OK — exatamente a aprovação falsa sobre
+    ADS-CONTENT-03 que o docstring do módulo diz que se recusa a imprimir."""
+    html = _pagina_com_wrapper("Este e o unico paragrafo editorial.")
+    d = measure_depth(html)
+    # O menu inteiro entrou na contagem, e sozinho já limpa a barra de OK.
+    assert d.words >= borderline_ceiling(300)
+    assert d.main_ratio == 1.0  # nada foi separado de nada
+    assert d.status is Status.ERROR
+    assert "not separated from page furniture" in d.reason
+
+
+def test_pagina_que_e_toda_conteudo_continua_passando():
+    """Ratio 1.0 sozinho não pode ser a regra. Uma página que legitimamente *é*
+    toda conteúdo principal também mede 1.0, e foi lida certo — não havia nada
+    a separar, em vez de uma heurística que não separou nada."""
+    for html in (
+        f'<html><body><div id="content"><p>{_palavras(500)}</p></div></body></html>',
+        f"<html><body><main><h1>Titulo</h1><p>{_palavras(500)}</p></main></body></html>",
+    ):
+        d = measure_depth(html)
+        assert d.main_ratio == 1.0, html[:40]
+        assert d.status is Status.OK, d.reason
+
+
+def test_rodape_curto_dentro_do_container_nao_invalida_a_medicao():
+    """O discriminante é a banda, não a presença de mobília. Quase toda página
+    real tem uma linha de copyright dentro do wrapper de conteúdo; dar erro
+    nelas deixaria a checagem inútil, e a contagem não está em dúvida quando
+    descartá-las deixa a página na mesma banda."""
+    html = (
+        f'<html><body><div id="wrapper"><p>{_palavras(2000)}</p>'
+        "<footer>Todos os direitos reservados</footer></div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.main_ratio == 1.0
+    assert d.status is Status.OK, d.reason
+
+
+# --------------------------------------------------------------------------
+# De quem é a mobília: a tag diz que a região não é prosa, não de quem ela é.
+# --------------------------------------------------------------------------
+
+
+def _post_do_wordpress(corpo: str) -> str:
+    """O tema padrão de post do WordPress, e a forma canônica de <article>.
+
+    `entry-header` e `entry-footer` ficam DENTRO do <article>: o <h1>, a
+    assinatura e a linha de categorias são do artigo, não da página. O header e
+    o footer do site ficam fora do <main>, então a heurística isola direito — o
+    ratio nem chega a 1.0.
+    """
+    return (
+        "<html><body>"
+        "<header class='site-header'><nav><a href='/'>Home</a>"
+        "<a href='/blog'>Blog</a><a href='/sobre'>Sobre</a></nav></header>"
+        "<main><article class='post'>"
+        "<header class='entry-header'>"
+        "<h1 class='entry-title'>Como escolher a racao certa para o seu cachorro</h1>"
+        "<p class='entry-meta'>Publicado por Lucas Ostroski em 4 de marco de 2026</p>"
+        "</header>"
+        f"<div class='entry-content'><p>{corpo}</p></div>"
+        "<footer class='entry-footer'>"
+        "<span class='cat-links'>Categorias: Animais, Saude, Alimentacao</span>"
+        "</footer>"
+        "</article></main>"
+        "<footer class='site-footer'><p>Todos os direitos reservados</p></footer>"
+        "</body></html>"
+    )
+
+
+def test_header_e_footer_dentro_do_article_nao_sao_mobilia_da_pagina():
+    """O falso positivo: a forma mais comum da web reportada como ERROR.
+
+    Pular <header>/<footer> por nome de tag, em qualquer profundidade, apaga o
+    título, a assinatura e a linha de categorias de um post — e como as duas
+    contagens caem em bandas diferentes, a medição virava "main content not
+    separated from page furniture". A frase é falsa: o conteúdo principal FOI
+    separado da mobília da página, que ficou fora do <main>. E ERROR, no
+    contrato deste pacote (status.py), quer dizer que a checagem não conseguiu
+    rodar — ela rodou.
+
+    Com 430 palavras de corpo as duas contagens cruzam a fronteira de banda de
+    propósito: é onde o guard disparava.
+    """
+    corpo = 430
+    html = _post_do_wordpress(_palavras(corpo))
+    d = measure_depth(html)
+    # As duas contagens estão em bandas diferentes: sem o título e a assinatura
+    # a página é borderline, com eles passa da barra. É a condição do guard.
+    assert classify_depth(corpo, min_words=300) is Status.INFO
+    assert d.words >= borderline_ceiling(300)
+    assert d.status is Status.OK, d.reason
+    assert "not separated from page furniture" not in d.reason
+
+
+def test_o_header_do_proprio_article_e_editorial_mesmo_sem_main():
+    """O exemplo de <article> do próprio HTML Living Standard: header com o
+    título e a data, footer com o link dos comentários, e nada em volta.
+
+    Aqui o <article> É o container vencedor, então "o ancestral article mais
+    próximo é o próprio container" não pode significar mobília — o header
+    continua sendo do artigo. Sem isso, a página mais simples que existe com um
+    artigo dentro volta ERROR.
+    """
+    html = (
+        "<html><body><article>"
+        "<header><h2>The Very First Rule of Life</h2><p>3 days ago</p></header>"
+        f"<p>{_palavras(440)}</p>"
+        "<footer><a href='?comments=1'>Show comments</a></footer>"
+        "</article></body></html>"
+    )
+    d = measure_depth(html)
+    assert classify_depth(440, min_words=300) is Status.INFO
+    assert d.words >= borderline_ceiling(300)  # as bandas se cruzam
+    assert d.status is Status.OK, d.reason
+    assert "not separated from page furniture" not in d.reason
+
+
+def test_main_em_volta_do_menu_do_site_continua_sendo_pego():
+    """O outro lado: o <article> perdoa a mobília dentro dele, o <main> não.
+
+    Um <main> em volta do menu inteiro é o mesmo defeito do <div id="wrapper">
+    com outra tag, e o guard tem de continuar pegando — senão a correção do
+    falso positivo vira "confie em qualquer main/article" e a checagem perde os
+    dentes.
+    """
+    menu = "".join(
+        f'<li><a href="/c{i}">categoria numero {i} do nosso catalogo</a></li>'
+        for i in range(80)
+    )
+    html = (
+        f"<html><body><main><nav><ul>{menu}</ul></nav>"
+        "<p>Este e o unico paragrafo editorial.</p></main></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words >= borderline_ceiling(300)
+    assert d.status is Status.ERROR
+    assert "not separated from page furniture" in d.reason
+
+
+def test_o_corte_da_mobilia_nao_solda_as_palavras_vizinhas():
+    """A subárvore vai embora, a fronteira que ela desenhava fica.
+
+    Descartar o <nav> sem escrever o separador cola "ultima" em "palavra" e
+    devolve "ultimapalavra": uma palavra que não está em página nenhuma, e uma
+    a menos que as duas que estão. Isso só empurra `editorial_words` para
+    baixo, então faz o ERROR disparar — e aqui a solda SOZINHA produz o ERROR,
+    porque 299 é WARNING e 300 é borderline, a mesma banda das 303 medidas.
+
+    É a classe de defeito que o docstring do módulo diz existir para impedir.
+    """
+    html = (
+        f'<html><body><div id="wrapper"><p>{_palavras(298)}</p>'
+        "ultima<nav>Menu Home Sobre</nav>palavra</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 303
+    assert d.status is Status.INFO, d.reason
+    assert "not separated from page furniture" not in d.reason
+
+
+def test_o_separador_sobrevive_a_subarvore_descartada():
+    """O mesmo defeito no nível em que ele mora, sem a aritmética de bandas."""
+    from adsense_checks.text import _collect, _furniture, _parse
+
+    doc = _parse("<div>abc<nav>x</nav>def</div>")
+    div = doc.root.content[0]
+    assert div.tag == "div"
+    assert word_count(_collect(div)) == 3  # abc x def
+    assert word_count(_collect(div, skip=_furniture(div))) == 2  # abc def, não abcdef
+
+
+# --------------------------------------------------------------------------
+# Cada membro de BOILERPLATE_ELEMENTS, escrito literalmente. O teste que estava
+# aqui iterava sobre o próprio conjunto sob teste, então tomava os casos de
+# quem deveria vigiar: apagar uma tag do código E da lista literal — o que um
+# autor removendo uma tag faz numa edição só — passava com a suíte verde para
+# `footer`, `header` e `aside`. Só `nav` estava preso por comportamento.
+# --------------------------------------------------------------------------
+
+
+def test_o_conjunto_de_mobilia_e_exatamente_estas_quatro_tags():
+    """A lista literal pega a remoção; os quatro testes abaixo pegam a tag que
+    está na lista e não funciona."""
+    from adsense_checks.text import BOILERPLATE_ELEMENTS
+
+    assert sorted(BOILERPLATE_ELEMENTS) == ["aside", "footer", "header", "nav"]
+
+
+def test_nav_no_wrapper_e_mobilia():
+    """600 palavras de menu em volta de seis de conteúdo: sem reconhecer o
+    <nav>, o wrapper volta OK sobre o menu."""
+    html = (
+        '<html><body><div id="wrapper">'
+        f"<nav><p>{_palavras(600)}</p></nav>"
+        f"<p>{_palavras(6)}</p></div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.status is Status.ERROR, d.reason
+    assert "not separated from page furniture" in d.reason
+    # `words - editorial_words`, nessa ordem: 606 medidas, 6 editoriais.
+    assert "still holds 600 words" in d.reason
+
+
+def test_header_no_wrapper_e_mobilia():
+    """Um <header> que não é de nenhum <article> é o header do site."""
+    html = (
+        '<html><body><div id="wrapper">'
+        f"<header><p>{_palavras(600)}</p></header>"
+        f"<p>{_palavras(6)}</p></div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.status is Status.ERROR, d.reason
+    assert "not separated from page furniture" in d.reason
+
+
+def test_footer_no_wrapper_e_mobilia():
+    """Um <footer> que não é de nenhum <article> é o rodapé do site."""
+    html = (
+        '<html><body><div id="wrapper">'
+        f"<footer><p>{_palavras(600)}</p></footer>"
+        f"<p>{_palavras(6)}</p></div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.status is Status.ERROR, d.reason
+    assert "not separated from page furniture" in d.reason
+
+
+def test_aside_no_wrapper_e_mobilia():
+    """Um <aside> que não é de nenhum <article> é a barra lateral da página."""
+    html = (
+        '<html><body><div id="wrapper">'
+        f"<aside><p>{_palavras(600)}</p></aside>"
+        f"<p>{_palavras(6)}</p></div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.status is Status.ERROR, d.reason
+    assert "not separated from page furniture" in d.reason
+
+
 def test_a_casca_de_spa_e_reconhecida_ate_25_palavras():
     """JS_SHELL_MAX_WORDS, fixado pelo valor nos dois lados da fronteira. Acima
     dela a página tem conteúdo servido e é uma página rasa de verdade, não uma
