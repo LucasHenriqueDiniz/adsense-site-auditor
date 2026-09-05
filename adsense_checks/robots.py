@@ -13,8 +13,9 @@ The rules implemented here follow Google's own robots.txt specification:
     agent when one of its user-agent tokens matches.
   * Matching is case-insensitive, and all non-matching text after the product
     token in the file is ignored: `Googlebot/1.2` and `Googlebot*` both mean
-    `Googlebot`. A value that STARTS with `*` is the wildcard group, whatever
-    follows it.
+    `Googlebot`. A `*` is the wildcard group only when it stands alone or is
+    followed by whitespace: `* Googlebot` is the wildcard group, and `*bot` is
+    no token at all and governs nobody.
   * The token in the file must be the crawler's product token or a prefix of it
     ending on a `-` boundary: `Googlebot` in the file governs the crawler
     `Googlebot-Image`, and never the reverse, and `Google` governs neither.
