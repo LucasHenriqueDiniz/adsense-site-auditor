@@ -48,7 +48,14 @@ from urllib.parse import urlunsplit
 import requests
 
 from adsense_checks.crawl import looks_like_document, normalize_url, same_site
-from adsense_checks.http import DEFAULT_TIMEOUT, Fetch, fetch, join_url, split_url
+from adsense_checks.http import (
+    DEFAULT_TIMEOUT,
+    Fetch,
+    defrag_url,
+    fetch,
+    join_url,
+    split_url,
+)
 from adsense_checks.status import Status, escalate, worst
 from adsense_checks.text import looks_javascript_rendered
 
@@ -78,6 +85,16 @@ MIN_TRUST_PAGE_WORDS = 25
 # nobody looked at. A single total cap did exactly that — it cut the list at six
 # and `pages/about`, the Shopify convention, was the seventh.
 MAX_LINKED_CANDIDATES = 6
+
+# How many spellings of ONE page may be requested. `MAX_LINKED_CANDIDATES` is
+# charged per identity, so `/about` beside `/about/` costs one slot and both
+# still go on the wire — a host serving only the second answers 404 to the
+# first. That discount has to be bounded or it is not a budget: `_canonical`
+# folds the trailing slash with `rstrip`, so `/about//`, `/about///` and two
+# hundred more are all one identity, and a footer holding them made the auditor
+# fire 216 requests, 200 of them at the same page. Two is the whole discount,
+# because two is how many spellings of a path a site actually writes.
+MAX_SPELLINGS_PER_IDENTITY = 2
 
 DEFAULT_NAV_LINK_LIMIT = 25
 
@@ -974,23 +991,45 @@ def _candidates(
         if hint.search(fold(link.text)) or hint.search(fold(split_url(target).path)):
             by_region[link.region].append(target)
     linked = by_region["footer"] + by_region["nav"] + by_region["body"]
-    # Deduplicated by the URL as written, not by its identity. `_canonical`
-    # folds the trailing slash — that is what makes it an identity — and folding
-    # it here silently dropped `/about/`, so a host that serves only that form
-    # and answers 404 to `/about` was reported as having no About page. The
-    # candidate list is a list of ADDRESSES to request, and on the wire the two
-    # are different addresses; the docstring above already promises every
+    # Deduplicated by the address, not by its identity. `_canonical` folds the
+    # trailing slash — that is what makes it an identity — and folding it here
+    # silently dropped `/about/`, so a host that serves only that form and
+    # answers 404 to `/about` was reported as having no About page. The candidate
+    # list is a list of ADDRESSES to request, and on the wire the two are
+    # different addresses; the docstring above already promises every
     # conventional path is tried.
     #
     # The home page is the one comparison where identity is the right notion: it
     # answered already, and asking for another spelling of it learns nothing.
     casa = _canonical(home_url)
+    # Keyed by the ADDRESS THE REQUEST WILL CARRY, which is the href minus its
+    # fragment: a fragment is never sent, so `/sobre#equipe` and `/sobre#historia`
+    # are one GET. Keyed by the href as written, this set stopped counting
+    # requests at all — a footer with 200 anchors into `/sobre` fired 200
+    # byte-identical GETs at it, one per link, with no ceiling anywhere.
     seen: set[str] = set()
+    # Identity -> how many of its spellings are already on the list. The budget
+    # is spent on IDENTITIES while the list requests ADDRESSES: `/sobre` beside
+    # `/sobre/` is one page on any server that folds the trailing slash, and
+    # charging each of them a slot let the two eat two of the six, so a seventh
+    # link went unrequested — the crowding-out this cap exists to prevent,
+    # recreated one level down. Both spellings still go on the wire; what changes
+    # is only the price. `MAX_SPELLINGS_PER_IDENTITY` is what keeps the discount
+    # from being a hole the same size as the one it closes.
+    charged: dict[str, int] = {}
     out: list[_Candidate] = []
-    for url in linked:
-        if url in seen or _canonical(url) == casa or len(out) >= max_linked:
+    for href in linked:
+        url = defrag_url(href) or href
+        identity = _canonical(url)
+        if url in seen or identity == casa:
+            continue
+        spellings = charged.get(identity, 0)
+        if spellings == 0 and len(charged) >= max_linked:
+            continue
+        if spellings >= MAX_SPELLINGS_PER_IDENTITY:
             continue
         seen.add(url)
+        charged[identity] = spellings + 1
         out.append(_Candidate(url=url, declared=True))
     for path in paths:
         url = _join(base, path)

@@ -810,9 +810,9 @@ def test_no_maximo_seis_candidatos_linkados_por_pagina_de_confianca(server):
 
     doc = parse_document(html)
     # Com o teto explícito, para provar que os convencionais não são afetados:
-    # com um teto muito maior a quantidade deles é a mesma. (São menos que
-    # `ABOUT_PATHS` porque `about` e `about/` têm a mesma identidade e um dos
-    # dois é deduplicado — idem `sobre`.)
+    # com um teto muito maior a quantidade deles é a mesma. (São `ABOUT_PATHS`
+    # por inteiro: `about` e `about/` são endereços diferentes no fio e os dois
+    # são pedidos — a dedup aqui é pela URL como escrita, não pela identidade.)
     cands = _candidates(home, doc, "http://ex.com/", ABOUT_PATHS, _ABOUT_HINT, 6)
     largo = _candidates(home, doc, "http://ex.com/", ABOUT_PATHS, _ABOUT_HINT, 100)
     assert len([c for c in cands if c.declared]) == 6
@@ -871,6 +871,182 @@ def test_o_teto_padrao_de_candidatos_linkados_e_6(server):
     linkados = {f"/sobre-{i}" for i in range(9)}
     pedidos = [c for _m, c, _h in routes.received if c in linkados]
     assert len(pedidos) == 6
+
+
+def test_duas_grafias_do_mesmo_endereco_gastam_uma_vaga_do_teto(server):
+    """O teto conta ENDEREÇOS onde deveria contar IDENTIDADES. A home abaixo
+    linka sete candidatos, e dois deles — `/sobre` e `/sobre/` — são grafias de
+    um endereço só: em qualquer servidor que normalize a barra, são a mesma
+    página pedida duas vezes. Cobrando uma vaga de cada, elas comem duas das
+    seis, e o sétimo link nunca é requisitado.
+
+    Aqui o sétimo é o único que responde 200, então o relatório dizia "No About
+    page found" sobre uma URL que ninguém pediu — o mesmo expulsar-o-último que
+    MAX_LINKED_CANDIDATES existe para impedir, refeito um nível abaixo."""
+    base, routes = server
+    links = (
+        '<a href="/sobre">Sobre</a>'
+        '<a href="/sobre/">Sobre</a>'  # mesma identidade, endereco diferente
+        '<a href="/sobre-a">Sobre a</a>'
+        '<a href="/sobre-b">Sobre b</a>'
+        '<a href="/sobre-c">Sobre c</a>'
+        '<a href="/sobre-d">Sobre d</a>'
+        # O setimo. Nao esta em ABOUT_PATHS, entao so chega la pela metade
+        # linkada: se o teto o cortar, ninguem pede esta URL.
+        '<a href="/pages/quem-eu-sou">Sobre</a>'
+    )
+    routes["/"] = (200, {}, pagina("Casa", extra=f"<footer>{links}</footer>"))
+    routes["/pages/quem-eu-sou"] = (200, {}, pagina("Sobre", extra=MAILTO))
+
+    r = check_trust_pages(base + "/")
+
+    assert "/pages/quem-eu-sou" in [c for _m, c, _h in routes.received]
+    assert r.pages["about"].status is Status.OK
+    assert r.pages["about"].url.endswith("/pages/quem-eu-sou")
+
+
+def test_as_duas_grafias_continuam_na_lista_mesmo_gastando_uma_vaga():
+    """A vaga única não pode virar dedup por identidade de novo: a lista é de
+    ENDEREÇOS A PEDIR, e um host que serve só `/sobre/` responde 404 para
+    `/sobre`. As duas grafias continuam sendo requisitadas — o que muda é só
+    quanto elas custam do teto."""
+    links = (
+        '<a href="/sobre">Sobre</a>'
+        '<a href="/sobre/">Sobre</a>'
+        '<a href="/sobre-a">Sobre a</a>'
+        '<a href="/sobre-b">Sobre b</a>'
+        '<a href="/sobre-c">Sobre c</a>'
+        '<a href="/sobre-d">Sobre d</a>'
+        '<a href="/pages/quem-eu-sou">Sobre</a>'
+    )
+    html = f"<html><body><p>Bancada.</p><footer>{links}</footer></body></html>"
+    home = Fetch(url="http://ex.com/", final_url="http://ex.com/", status_code=200,
+                 text=html, headers={"content-type": "text/html"})
+
+    declarados = [
+        c.url
+        for c in _candidates(home, parse_document(html), "http://ex.com/",
+                             ABOUT_PATHS, _ABOUT_HINT, 6)
+        if c.declared
+    ]
+
+    # Sete endereços, seis identidades: as duas grafias cabem, e o sétimo também.
+    assert declarados == [
+        "http://ex.com/sobre",
+        "http://ex.com/sobre/",
+        "http://ex.com/sobre-a",
+        "http://ex.com/sobre-b",
+        "http://ex.com/sobre-c",
+        "http://ex.com/sobre-d",
+        "http://ex.com/pages/quem-eu-sou",
+    ]
+
+
+def test_um_fragmento_nao_e_um_endereco_novo_e_nao_vira_um_pedido_novo(server):
+    """O teto passou a contar identidades e nada passou a contar PEDIDOS.
+
+    Um fragmento nunca vai no fio, então cada `<a href="/sobre#sN">` além do
+    primeiro virava um `GET /sobre` byte a byte igual ao anterior. Com as 200
+    âncoras deste rodapé foram 218 pedidos, 201 deles para a mesma URL — contra
+    24 e 7 antes de o teto passar a contar identidades.
+
+    Escala com a quantidade de links da página auditada e não tem limite: é o
+    HTML de um terceiro mandando o auditor martelar o servidor desse terceiro."""
+    base, routes = server
+    links = "".join(f'<a href="/sobre#s{i}">Sobre</a>' for i in range(200))
+    routes["/"] = (200, {}, home(rodape=links))
+
+    check_trust_pages(base + "/")
+
+    pedidos = [(m, c) for m, c, _h in routes.received]
+    assert pedidos.count(("GET", "/sobre")) == 1
+    # E o caso geral: nenhum endereço foi ao fio duas vezes.
+    assert len(pedidos) == len(set(pedidos))
+
+
+def test_o_desconto_por_grafia_nao_e_um_cheque_em_branco(server):
+    """Duas grafias é o desconto inteiro, e a terceira é recusada.
+
+    `_canonical` dobra a barra final com `rstrip`, então `/sobre`, `/sobre/`,
+    `/sobre//` e mais 197 são UMA identidade só. Um desconto sem limite manda as
+    200 ao fio de graça — medido, 216 pedidos, 200 deles para a mesma página —,
+    e aí "conta identidades" não é um teto, é a ausência de um. Duas é quantas
+    grafias de um caminho um site real escreve: com a barra e sem."""
+    base, routes = server
+    links = "".join(f'<a href="/sobre{"/" * i}">Sobre</a>' for i in range(200))
+    routes["/"] = (200, {}, home(rodape=links))
+
+    check_trust_pages(base + "/")
+
+    grafias = [c for _m, c, _h in routes.received if c.rstrip("/") == "/sobre"]
+    assert sorted(grafias) == ["/sobre", "/sobre/"]
+
+
+def test_a_grafia_repetida_pega_carona_mesmo_chegando_depois_do_teto_cheio():
+    """A carona só decide alguma coisa quando a segunda grafia chega DEPOIS de o
+    teto encher; chegando antes, o link entraria de qualquer jeito e a cláusula
+    nunca roda. Este rodapé separa as duas coisas: seis identidades distintas
+    fecham o teto, e só então vêm `/sobre-0/`, grafia de uma identidade já
+    cobrada, e `/sobre-6`, uma sétima identidade. A carona entra; a sétima não —
+    o desconto afrouxa o teto para grafias, não para páginas."""
+    links = "".join(f'<a href="/sobre-{i}">Sobre {i}</a>' for i in range(6))
+    links += '<a href="/sobre-0/">Sobre 0</a>'
+    links += '<a href="/sobre-6">Sobre 6</a>'
+    html = f"<html><body><p>Bancada.</p><footer>{links}</footer></body></html>"
+    home = Fetch(url="http://ex.com/", final_url="http://ex.com/", status_code=200,
+                 text=html, headers={"content-type": "text/html"})
+
+    declarados = [
+        c.url
+        for c in _candidates(home, parse_document(html), "http://ex.com/",
+                             ABOUT_PATHS, _ABOUT_HINT, 6)
+        if c.declared
+    ]
+
+    assert declarados == [f"http://ex.com/sobre-{i}" for i in range(6)] + [
+        "http://ex.com/sobre-0/"
+    ]
+
+
+def test_o_link_para_a_propria_home_nao_gasta_vaga_do_teto():
+    """Um rodapé que escreve "Sobre" apontando para `/` aponta para a home, que
+    já respondeu — pedir outra grafia dela não ensina nada, e ela é descartada
+    antes de qualquer cobrança. Cobrando-lhe uma vaga, o sexto candidato de
+    verdade cairia fora do teto sem que nenhuma página a mais tivesse sido
+    pedida em troca."""
+    links = '<a href="/">Sobre nós</a>'
+    links += "".join(f'<a href="/sobre-{i}">Sobre {i}</a>' for i in range(6))
+    html = f"<html><body><p>Bancada.</p><footer>{links}</footer></body></html>"
+    home = Fetch(url="http://ex.com/", final_url="http://ex.com/", status_code=200,
+                 text=html, headers={"content-type": "text/html"})
+
+    declarados = [
+        c.url
+        for c in _candidates(home, parse_document(html), "http://ex.com/",
+                             ABOUT_PATHS, _ABOUT_HINT, 6)
+        if c.declared
+    ]
+
+    assert declarados == [f"http://ex.com/sobre-{i}" for i in range(6)]
+
+
+def test_as_duas_metades_nao_pedem_o_mesmo_endereco_duas_vezes():
+    """`/about` é convencional E está linkado no rodapé. Ele entra uma vez, pela
+    metade linkada, e a metade convencional o encontra em `seen` e não repete:
+    duas entradas para o mesmo endereço são dois GETs idênticos, e a segunda
+    ainda chegaria com `declared=False`, apagando o fato de que o site declara
+    essa URL como sua página Sobre."""
+    html = ('<html><body><p>Bancada.</p>'
+            '<footer><a href="/about">About</a></footer></body></html>')
+    home = Fetch(url="http://ex.com/", final_url="http://ex.com/", status_code=200,
+                 text=html, headers={"content-type": "text/html"})
+
+    cands = _candidates(home, parse_document(html), "http://ex.com/",
+                        ABOUT_PATHS, _ABOUT_HINT, 6)
+
+    urls = [c.url for c in cands]
+    assert len(urls) == len(set(urls))
+    assert [c.declared for c in cands if c.url == "http://ex.com/about"] == [True]
 
 
 # --------------------------------------------------------------------------
