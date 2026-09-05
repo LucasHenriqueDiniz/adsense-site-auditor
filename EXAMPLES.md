@@ -22,11 +22,13 @@ So Part 2 contains numbers and no terminal output — there is no command that
 would reproduce a transcript, and printing one would be a fabrication.
 
 The previous version of this file opened by asserting that every block in it was
-verbatim. Four were not: two showed a check name (`https`) and a tally the
-renderer cannot produce, one put findings on the same line as the check and
-showed a `sitemap` line with no evidence, one hand-wrapped findings that the
-renderer never wraps, and two more were Portuguese statistics dumps that no
-script here prints, with no command above them.
+verbatim. Of its nine blocks, seven were not. Three carried a command above a
+shape the renderer cannot produce: two put the finding on the same line as the
+check and named a check `https`, one of those also showing a `sitemap` line with
+no evidence under it, and a third hand-wrapped a finding across two lines, which
+the renderer never does. The remaining four had no command above them at all —
+three Portuguese statistics dumps that no script here prints, and a block of
+`ADS-CRAWL-05` findings lifted out of a run that was not shown.
 
 ---
 
@@ -202,9 +204,10 @@ request cannot establish reliability over time, so uptime is named as a gap
 rather than being quietly folded into a `PASS` — which is what an earlier
 version did, printing a scheme test under the whole requirement ID.
 
-Note `found via robots.txt` on the sitemap line. The check reads the `Sitemap:`
-directive before it tries `/sitemap.xml`, which is what makes it work on the
-many sites that 404 at the conventional path.
+The sitemap line reports the sample rather than the discovery. The check reads
+the `Sitemap:` directive before it tries `/sitemap.xml`, which is what makes it
+work on the many sites that 404 at the conventional path; `-v` names the one
+that answered, as `discovered_via: robots.txt`.
 
 ## Crawl
 

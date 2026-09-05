@@ -188,9 +188,10 @@ have been used here before:
 - Section M is an **output-format example**, not requirements. Its sample table
   repeats `ADS-ELIG-01` and `ADS-ELIG-02` as rows, so counting `| ADS-` rows over
   the whole file returns 83. The `exit` above stops before section M.
-- Three IDs have three parts — `ADS-CONTENT-ORIGINAL`, `ADS-CONTENT-ADDED-VALUE`,
-  `ADS-CONTENT-OVERLAP`. A regex like `ADS-[A-Z]+-[0-9]+` does not match them and
-  returns 78.
+- Three IDs end in a word instead of a number — `ADS-CONTENT-ORIGINAL`,
+  `ADS-CONTENT-ADDED-VALUE`, `ADS-CONTENT-OVERLAP`. A regex like
+  `ADS-[A-Z]+-[0-9]+` does not match them and returns 78. `ADS-CONTENT-ADDED-VALUE`
+  has four parts on top of that, so a pattern written for three still misses it.
 
 Recount rather than trusting 81: the number lives in the reference, and every
 other file that names it is quoting.
