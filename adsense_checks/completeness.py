@@ -136,14 +136,17 @@ DEFAULT_NAV_LINK_LIMIT = 25
 # page 7 of 6 into "abandoned".
 BROKEN_NAV_FAIL_THRESHOLD = 3
 
-# The paths the soft-404 probe asks for, joined onto the audited base so a
-# subdirectory install is probed inside its own install rather than at the apex.
+# The paths the soft-404 probe asks for, joined onto `_request_base` — the same
+# base every other URL this audit requests is joined onto, so a subdirectory
+# install is probed inside its own install rather than at the apex, whether the
+# subdirectory came from the typed URL or from the document's `<base href>`.
 # Fixed rather than random, so the operator can curl the same URL and check the
 # claim the report makes about their host. They differ in length and in shape on
 # purpose: a not-found template that echoes the requested address answers them
 # with different text, and telling those two hosts apart is the whole job of
 # `_probe_not_found`. The second is requested only against a host whose answer
-# to the first already proved it serves 200 for pages it does not have.
+# to the first already proved it serves 200 for pages it does not have — so only
+# the FIRST can ever reach a 404 log, and on a soft-404 host neither does.
 NOT_FOUND_PROBE_PATHS = (
     "adsense-auditor-probe-no-such-page",
     "adsense-auditor-probe-nn-9x7",
@@ -952,6 +955,66 @@ def _join(base: str, path: str) -> str:
     return join_url(base, path.lstrip("/"))
 
 
+def _request_base(document_url: str, base_href: str | None) -> str:
+    """The one base every URL this audit INVENTS is joined onto.
+
+    Invented URLs are the not-found probe and the conventional trust paths
+    (`ABOUT_PATHS`, `CONTACT_PATHS`); a URL the document actually wrote is
+    resolved by `_resolve_target` against `resolve_base` instead, and the two
+    agree wherever the base is on-site.
+
+    ONE base, because the probe's answer is only true of the directory it was
+    measured in. With the probe at `resolve_base` and the 17 conventional paths
+    still at the typed URL, one directory's answer judged another directory's
+    responses: on a home declaring `<base href="/app/">` whose root soft-404s
+    and whose `/app/` is honest, the probe went to `/app/`, said "this host
+    spends a 404 on a missing page", and `/about` and `/contact` — served by the
+    root's error template under HTTP 200 — were reported OK at exit 0. Probing
+    twice, once per base, does not close it: `_candidates` already resolves its
+    LINKED candidates against `<base href>` while its conventional ones stay at
+    the typed base, so one trust report holds both bases and a typed-base probe
+    still judges `/app/` responses — measured, the mirror site (honest root,
+    soft-404 `/app/`) reports About OK at `/app/sobre`, which does not exist.
+    A list with two bases needs one base, not a second probe.
+
+    `resolve_base` is used UNWRAPPED. It already returns the base `urljoin` will
+    use for the links, and `as_base` on top of it applies `looks_like_document`,
+    which `urljoin` does not, so the two parted company on every base without a
+    trailing slash: `<base href="/app">` sent the links to `/sobre` and the probe
+    to `/app/…`, which is both original defects back at once, one in each
+    direction. Same for `/a/b/c`, `/v1.0` and `app`.
+
+    Clamped to the audited site, which `resolve_base` deliberately does not do —
+    an off-site `<base href>` is a TRUE statement about where the links point,
+    and refusing to follow them is the same-site filter's job at each caller. An
+    invented URL is different: it is not something the document wrote, and
+    `crawl` already refuses an off-site seed rather than fetch a host the
+    operator did not name under a robots.txt that was never read for it. Auditing
+    a staging host whose template still carries `<base href="https://www.example
+    .com/">` sent every probe to the production host and let a third party's
+    regime decide staging's verdict, with zero probes reaching the host under
+    audit. And a base with no host at all is worse than off-site: `as_base`
+    prefixes `https://` to anything without `://`, so `<base
+    href="mailto:contato@127.0.0.1:61081">` became a live connection to
+    `https://mailto:contato@127.0.0.1:61081/` — an address assembled out of the
+    markup — which the report then printed as the URL the audited host answered.
+
+    The scheme is checked as well as the host, which is the same guard both link
+    loops already apply to a resolved href and for the same reason: `same_site`
+    compares hosts and ports and deliberately ignores the scheme, so
+    `<base href="ftp://the-audited-host/">` passes it. A transport this client
+    cannot speak is not a missing page — every conventional path came back
+    "No connection adapters were found" and the report blamed the site for URLs
+    it could never have been asked over HTTP.
+    """
+    resolved = resolve_base(document_url, base_href)
+    if split_url(resolved).scheme in ("http", "https") and same_site(resolved, document_url):
+        return resolved
+    # `resolve_base` with no href is the document's own URL, credentials off —
+    # the same fallback a document declaring no base gets.
+    return resolve_base(document_url, None)
+
+
 def _resolve_target(base: str, href: str) -> str:
     """The absolute URL a href points at, with any `user:pass@` taken off it.
 
@@ -1023,10 +1086,10 @@ def check_trust_pages(
 
     Candidates come from the home page's own footer and navigation links first —
     a site that links to /pages/quem-eu-sou has an About page, and only reading
-    its links can find it — then from the conventional paths, joined relative to
-    `base_url` so a subdirectory install is not silently swapped for the domain
-    root. Only the linked candidates are capped; every conventional path is
-    tried, so "no candidate answered" is never said about a URL that was never
+    its links can find it — then from the conventional paths, joined onto
+    `_request_base` so a subdirectory install is not silently swapped for the
+    domain root. Only the linked candidates are capped; every conventional path
+    is tried, so "no candidate answered" is never said about a URL that was never
     requested.
 
     Each page ends in exactly one of four states, and three of them are not a
@@ -1060,7 +1123,7 @@ def check_trust_pages(
     home_text = home_doc.text
 
     for kind, (label, paths, hint) in _TRUST_KINDS.items():
-        candidates = _candidates(home, home_doc, base, paths, hint, max_linked_candidates)
+        candidates = _candidates(home, home_doc, paths, hint, max_linked_candidates)
         outcome = _resolve_trust_page(
             kind=kind,
             candidates=candidates,
@@ -1109,7 +1172,6 @@ class _Candidate:
 def _candidates(
     home: Fetch,
     home_doc: Document,
-    base: str,
     paths: tuple[str, ...],
     hint: re.Pattern[str],
     max_linked: int,
@@ -1119,6 +1181,12 @@ def _candidates(
     The cap applies to the linked half only. Sharing one budget let a handful of
     matching footer links push the conventions out of the list entirely, and cut
     the conventions themselves mid-tuple.
+
+    Both halves are joined onto ONE base. They used not to be — the linked half
+    followed `<base href>` and the conventional half stayed at the URL the
+    operator typed — and the not-found probe, which judges every response in
+    this list, can only have been measured in one directory. See `_request_base`
+    for the two `[PASS] exit 0` reports that came out of the split.
     """
     home_url = home.final_url or home.url
     # The same base `_nav_targets` and the crawler resolve against. A home
@@ -1126,7 +1194,16 @@ def _candidates(
     # joining against `home_url` alone requested `/sobre`, got a 404, and the
     # report then said "No About page found" — the one claim this check's
     # docstring forbids, made about a URL nobody ever asked for.
+    #
+    # Unclamped on purpose, unlike the conventional paths below: an off-site
+    # `<base href>` really does move the document's own links off-site, and the
+    # `_same_site` guard in the loop is what declines to follow them. Clamping
+    # here would invent an on-site address for a link that points elsewhere and
+    # then report the audited host's answer as that link's.
     link_base = resolve_base(home_url, home_doc.base_href)
+    # The conventional paths are guesses this module writes, not links the
+    # document wrote, so they go where every other invented URL goes.
+    guess_base = _request_base(home_url, home_doc.base_href)
     by_region: dict[str, list[str]] = {"footer": [], "nav": [], "body": []}
     for link in home_doc.links:
         href = link.href.strip()
@@ -1192,7 +1269,7 @@ def _candidates(
         charged[identity] = spellings + 1
         out.append(_Candidate(url=url, declared=True))
     for path in paths:
-        url = _join(base, path)
+        url = _join(guess_base, path)
         if url in seen or _canonical(url) == casa:
             continue
         seen.add(url)
@@ -1624,15 +1701,17 @@ def count_broken_nav_links(
         probe = not_found
         report.not_found_regime = probe.regime
     elif targets:
-        # Probed where the LINKS are, which is `resolve_base` and not the URL the
-        # operator typed. Two things separate them, and both make the answer
-        # useless if the probe is asked at the wrong one: a site redirecting apex
-        # to www serves different hosts, and a `<base href>` moves every link
-        # into a subdirectory that may answer a missing page quite differently
-        # from the root. Asking the root what a missing page looks like and then
-        # judging `/app/` by it reported OK over a menu of dead links.
+        # Probed where the LINKS land, and `_request_base` is what makes that
+        # one address rather than an approximation of one. Three things separate
+        # it from the URL the operator typed, and each makes the answer useless:
+        # a site redirecting apex to www answers as a different host; a `<base
+        # href>` moves every link into a subdirectory that may answer a missing
+        # page quite differently from the root — asking the root and then judging
+        # `/app/` by it reported OK over a menu of dead links; and `as_base` on
+        # top of a resolved base rounded the address to a directory `urljoin`
+        # would not, which put the probe and the links in different places again.
         probe = _probe_not_found(
-            as_base(resolve_base(home_url, doc.base_href)), session=sess, timeout=timeout
+            _request_base(home_url, doc.base_href), session=sess, timeout=timeout
         )
         report.not_found_regime = probe.regime
 
@@ -1839,10 +1918,12 @@ def check_completeness(
     # does not have. Costs the same one or two requests wherever it is asked;
     # asked here it is also spent on a site whose menu is empty, and the trust
     # pages are requested on every site there is.
-    # Asked where the links are — `<base href>` moves them, and the probe has to
-    # move with them or it answers about a directory nothing is fetched from.
+    # Asked at `_request_base`, which is where every URL below is requested from
+    # — the navigation links, the linked trust candidates and the conventional
+    # trust paths alike. A probe measured anywhere else answers about a directory
+    # nothing is fetched from, and this one answer is what both sub-checks use.
     not_found = _probe_not_found(
-        as_base(resolve_base(home.final_url or home.url, doc.base_href)),
+        _request_base(home.final_url or home.url, doc.base_href),
         session=sess,
         timeout=timeout,
     )

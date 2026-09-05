@@ -38,7 +38,7 @@ Every script takes URLs and writes to stdout. There is **no `--output` flag** an
 
 | Script | Arguments | Requirements | What it decides |
 | --- | --- | --- | --- |
-| `check_completeness.py` | `URL` `[--nav-limit N] [--timeout S]` | ADS-COMPLETE-01, ADS-UX-05, ADS-AUTHOR-02 (part) | Unfinished markers on the home page, About/Contact present and not stubs, a contact channel in the HTML, navigation links that 4xx/5xx or serve the site's own not-found page |
+| `check_completeness.py` | `URL` `[--nav-limit N] [--timeout S]` | ADS-COMPLETE-01, ADS-UX-05, ADS-AUTHOR-02 (part) | Unfinished markers on the home page, About/Contact present and not stubs, a contact channel in the HTML, navigation links that 4xx/5xx. Links answering 200 on a host that also answers 200 for URLs it does not have are reported `MISSING` — unverified, not broken: they are left out of the broken count and cannot reach the FAIL threshold |
 | `check_technical.py` | `URL` `[--timeout S]` | ADS-CRAWL-01, -02, -06, -07 | Reachability, robots.txt for the three Google crawlers, sitemap discovery, parsing and a five-URL sample fetched to see whether what it advertises answers 200, DNS/TLS/response time |
 | `crawl_site.py` | `URL` `[--depth N] [--max-pages N] [--delay S] [--timeout S] [--verify-stateless] [--verify-canonical]` | ADS-CRAWL-01, -04, -05 | Breadth-first crawl; pages answer 2xx publicly, redirect chains are short and stateless, URLs carry no session ids |
 | `analyze_text_depth.py` | `URL [URL ...]` `[--min-words N]` | ADS-CONTENT-03 | Main-content word count per page, chrome excluded where detectable. It does **not** decide ADS-COMPLETE-02: that requirement counts three articles over 1200 words, and this measures one page at a time |
@@ -63,11 +63,29 @@ description, visible word count, and the links it chose not to follow.
 
 `check_completeness.py` also asks the audited host, once per run, for one or
 two paths that nothing can route — `adsense-auditor-probe-no-such-page` and a
-second one — resolved under the same base its navigation links are. That is how
-it tells a working page from a "page not found" template served with HTTP 200:
-where the host answers 4xx, a 200 means the page is there; where it does not,
-no 200 from it is evidence either way and the links are reported as unverified
-rather than as broken. Expect those paths in the audited site's 404 log.
+second one. That is how it tells a working page from a "page not found"
+template served with HTTP 200: where the host answers 4xx, a 200 means the page
+is there; where it does not, no 200 from it is evidence either way and the
+links are reported as unverified rather than as broken.
+
+The probe is asked at the same base every other URL of the run is asked at —
+the navigation links, the About/Contact pages the home page links to, and the
+conventional About/Contact paths this script guesses. That base is the home
+page's own `<base href>` when it declares one, and the URL that answered
+otherwise, so on a site declaring `<base href="/app/">` all of it happens
+inside `/app/`. The answer is a fact about a directory and not about a host, so
+splitting it — probing one place and requesting another — reports a site as
+whole over dead links, which is what it used to do.
+
+That base never leaves the site you named. An off-site or non-HTTP
+`<base href>` is honoured for the links the page actually wrote — they do point
+elsewhere, and they are skipped as off-site — but the probe and the guessed
+paths fall back to the audited host, the way `crawl_site.py` refuses a seed
+that is not on the site under audit.
+
+Only the FIRST probe path can appear in a 404 log. The second is sent only to a
+host that already answered below 400 to the first, so it never 404s; and on a
+host that soft-404s, neither path appears in the log at all.
 
 The crawler identifies itself as `Mediapartners-Google`, because the question
 this audit asks is what the AdSense crawler is served — sites do serve it
