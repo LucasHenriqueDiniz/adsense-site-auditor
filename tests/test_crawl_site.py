@@ -301,3 +301,46 @@ def test_verify_canonical_liga_de_fato_a_comparacao_de_duas_sessoes(
     assert "the two-session comparison was not made" not in com_flag
     # Duas visitas independentes por página com canonical, que sem a flag não acontecem.
     assert pedidos_com == pedidos_sem + 2
+
+
+def test_as_listas_truncadas_so_ganham_reticencias_acima_do_teto(server, monkeypatch, capsys):
+    """Dois tetos diferentes imprimem URLs barradas pelo robots: o despejo do -v
+    corta em 5, a linha do crawl corta em 3. Um fixture com 3 fica sob os dois e
+    não distingue nada — cada teto precisa do seu próprio par de valores."""
+    base, routes = server
+
+    def rodar(n_barradas):
+        routes.received.clear()
+        links = "".join(f'<a href="/priv/{i}">p</a>' for i in range(n_barradas))
+        routes["/"] = (200, HTML, f"<html><body><p>oi</p>{links}</body></html>")
+        routes["/robots.txt"] = (
+            200, TEXTO, "User-agent: Mediapartners-Google\nDisallow: /priv/\n")
+        for i in range(n_barradas):
+            routes[f"/priv/{i}"] = (200, HTML, "<html><body>x</body></html>")
+        monkeypatch.setattr("sys.argv", ["crawl_site.py", "--delay", "0", "-v", base + "/"])
+        crawl_site.main()
+        saida = capsys.readouterr().out
+        return {
+            "crawl": next(ln for ln in saida.splitlines() if "not fetched, disallowed" in ln),
+            "dump": next(ln for ln in saida.splitlines() if ln.startswith("Blocked by robots.txt")),
+        }
+
+    # Teto da linha do crawl: 3.
+    assert not rodar(3)["crawl"].rstrip().endswith("...")
+    assert rodar(4)["crawl"].rstrip().endswith("...")
+    # Teto do despejo do -v: 5.
+    assert not rodar(5)["dump"].rstrip().endswith("...")
+    assert rodar(6)["dump"].rstrip().endswith("...")
+
+
+def test_um_unico_h1_nao_ganha_o_sufixo_de_quantidade(server, monkeypatch, capsys):
+    """`page.h1_count > 1`: com um só, "(+0 more)" seria ruído."""
+    base, routes = server
+    routes["/"] = (200, HTML, "<html><body><h1>Um</h1><p>oi</p></body></html>")
+
+    monkeypatch.setattr("sys.argv", ["crawl_site.py", "--delay", "0", "-v", base + "/"])
+    crawl_site.main()
+    saida = capsys.readouterr().out
+
+    assert "h1: Um" in saida
+    assert "more)" not in saida

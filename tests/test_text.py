@@ -556,3 +556,42 @@ def test_o_charset_declarado_e_procurado_so_no_primeiro_kib():
     # Dentro da janela: encontrado. Fora: ignorado.
     assert _declared_charset(documento(900)) == "iso-8859-7"
     assert _declared_charset(documento(1100)) == ""
+
+
+def test_exatamente_25_palavras_ja_nao_e_casca():
+    """`>= JS_SHELL_MAX_WORDS`: no valor exato a página tem conteúdo servido."""
+    def casca(n):
+        return ('<html><head><script src="/b.js"></script></head><body>'
+                f'<p>{" ".join(["palavra"] * n)}</p><div id="root"></div></body></html>')
+
+    assert looks_javascript_rendered(casca(24)) is True
+    assert looks_javascript_rendered(casca(25)) is False
+
+
+def test_exatamente_o_minimo_de_palavras_nao_fica_abaixo_dele():
+    """`words < min_words`: no valor exato a página não está abaixo da barra."""
+    assert classify_depth(299, min_words=300) is Status.WARNING
+    assert classify_depth(300, min_words=300) is not Status.WARNING
+
+
+def test_empate_de_palavras_mantem_o_primeiro_container():
+    """`words > best_words` em `_richest`: no empate, o primeiro ganha. Com
+    `>=` o último venceria, e qual `<article>` é "o principal" mudaria com a
+    ordem no documento."""
+    html = ("<html><body>"
+            "<article><p>um dois tres quatro cinco</p></article>"
+            "<article><p>seis sete oito nove dez</p></article>"
+            "</body></html>")
+    assert "um dois" in main_content_text(html)
+
+
+def test_o_rotulo_e_a_classificacao_concordam_na_fronteira():
+    """Há dois `words < min_words`: um em `classify_depth`, que decide o status,
+    e outro em `describe_depth`, que escreve o rótulo. O docstring do módulo
+    existe por causa de uma divergência entre os dois — o resumo dizia
+    "BORDERLINE (300-450)" enquanto o código classificava 450 como OK — então
+    a fronteira tem de ser a mesma nos dois."""
+    assert classify_depth(300, min_words=300) is Status.INFO
+    assert "borderline" in describe_depth(300, min_words=300)
+    assert classify_depth(299, min_words=300) is Status.WARNING
+    assert "below the configured threshold" in describe_depth(299, min_words=300)

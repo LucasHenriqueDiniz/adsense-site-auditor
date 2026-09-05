@@ -263,7 +263,10 @@ class _Parser(HTMLParser):
         if not any(node.tag == tag for node in self.open[1:]):
             return
         # Pop through anything left open inside it — malformed nesting closes
-        # implicitly instead of jamming the parser.
+        # implicitly instead of jamming the parser. The `> 1` cannot bind: the
+        # guard above has already proved a matching tag is open below the root,
+        # so the loop always breaks first. It stays as the bound that makes that
+        # local, rather than something the next reader has to re-derive.
         while len(self.open) > 1:
             if self.open.pop().tag == tag:
                 break

@@ -1312,3 +1312,30 @@ def test_o_teto_padrao_de_paginas_do_modulo_e_100(server):
 
     assert len(r.pages) == 100
     assert r.stopped_reason == "stopped at max_pages=100"
+
+
+def test_exatamente_dois_saltos_de_redirect_ainda_passam(server):
+    """`redirect_hops > max_hops` (2). Os testes existentes ficavam de um lado e
+    de outro da fronteira, nunca em cima dela."""
+    base, routes = server
+    routes["/"] = (200, HTML, pagina("Home", '<a href="/r1">r</a>'))
+    routes["/r1"] = (302, {**HTML, "Location": base + "/r2"}, "")
+    routes["/r2"] = (302, {**HTML, "Location": base + "/fim"}, "")
+    routes["/fim"] = (200, HTML, pagina("Fim"))
+
+    r = crawl(base + "/", max_depth=1, delay=0, respect_robots=False)
+    dois = check_redirect_chain(r, max_hops=2)
+    um = check_redirect_chain(r, max_hops=1)
+
+    assert not any("redirect hops" in f for f in dois.findings)
+    assert any("2 redirect hops (limit 1)" in f for f in um.findings)
+
+
+def test_pagina_com_exatamente_400_nao_e_alcancavel(server):
+    """`page.status_code >= 400` no check de alcançabilidade: 399 passa, 400 não."""
+    base, routes = server
+    routes["/"] = (200, HTML, pagina("Home", '<a href="/x">x</a>'))
+    for codigo, esperado in ((399, Status.OK), (400, Status.FAIL)):
+        routes["/x"] = (codigo, HTML, "")
+        r = crawl(base + "/", max_depth=1, delay=0, respect_robots=False)
+        assert check_pages_reachable(r).status is esperado, codigo

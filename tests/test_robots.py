@@ -595,3 +595,38 @@ def test_curinga_no_primeiro_caractere_casa():
     assert is_allowed(r, INDEX_CRAWLER, "/docs/x.pdf") is False
     assert is_allowed(r, INDEX_CRAWLER, "/x.pdf") is False
     assert is_allowed(r, INDEX_CRAWLER, "/docs/x.html") is True
+
+
+def test_o_arquivo_exatamente_no_cap_sobrevive_inteiro():
+    """`len(raw) <= _MAX_BYTES`: no tamanho exato nada é cortado."""
+    from adsense_checks.robots import _MAX_BYTES, _truncate
+
+    exato = "a" * _MAX_BYTES
+    assert len(_truncate(exato)) == _MAX_BYTES
+    assert len(_truncate(exato + "b")) < len(exato) + 1
+
+
+def test_escape_percentual_truncado_nao_e_lido_como_hex():
+    """`i + 2 < len(raw)`: com `<=`, um `%` seguido de UM dígito no fim da
+    string lê um hex de um caractere e vira outro byte — `/a%2` viraria `/a%02`
+    em vez do `%` literal que a regra de fato tem."""
+    from adsense_checks.robots import _normalize
+
+    assert _normalize("/a%2") == "/a%252"
+    assert _normalize("/a%") == "/a%25"
+    # E um escape completo continua sendo decodificado normalmente.
+    assert _normalize("/a%7Eb") == "/a~b"
+
+
+def test_arquivo_exatamente_no_cap_com_newline_nao_perde_a_ultima_linha():
+    """`len(raw) <= _MAX_BYTES`: no tamanho exato nada é cortado. Com `<`, o
+    arquivo entra no ramo de truncamento e o corte de volta até a última quebra
+    descarta a linha final — uma regra que o site escreveu."""
+    from adsense_checks.robots import _MAX_BYTES, _truncate
+
+    corpo = "Disallow: /a\n" * (_MAX_BYTES // 13)
+    corpo += "b" * (_MAX_BYTES - len(corpo.encode()))
+    assert len(corpo.encode()) == _MAX_BYTES
+
+    assert _truncate(corpo) == corpo  # intacto
+    assert len(_truncate(corpo + "c")) < len(corpo)  # um byte a mais e corta

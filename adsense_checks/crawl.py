@@ -757,6 +757,8 @@ def crawl(
             result.blocked_by_robots.append(url)
             continue
 
+        # `> 0` and `>= 0` are the same program — `time.sleep(0)` is a no-op —
+        # and a negative delay is skipped by both. The comparison states intent.
         if delay > 0:
             time.sleep(delay)
         response = fetch(url, timeout=timeout, session=sess, user_agent=user_agent)

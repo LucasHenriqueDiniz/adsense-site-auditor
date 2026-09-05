@@ -140,6 +140,9 @@ class Fetch:
             return Status.ERROR
         if self.status_code is None:
             return Status.ERROR
+        # `>= 500` and `> 500` decide the same thing: 500 falls through to the
+        # `>= 400` below and comes back FAIL either way. Kept for the reader,
+        # who should not have to trace two branches to learn that a 500 fails.
         if self.status_code >= 500:
             return Status.FAIL
         if self.status_code == 404:

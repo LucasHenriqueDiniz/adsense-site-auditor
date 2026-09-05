@@ -729,3 +729,51 @@ def test_uma_fonte_ilegivel_entre_fontes_boas_ainda_impede_o_pass():
     assert r.band == "safe"  # e nada nela move o status
     assert any("has no text" in m for m in r.reasons)
     assert r.status is Status.MISSING
+
+
+def test_a_razao_de_paginas_duplicadas_reprova_acima_de_30_por_cento():
+    """`ratio > page_ratio_threshold`: exatamente 30% avisa, acima reprova."""
+    def corpus(n_dup, n_total):
+        d = " ".join(f"igual{i}" for i in range(60))
+        t = {f"http://x/dup{i}": d for i in range(n_dup)}
+        t.update({f"http://x/u{i}": " ".join(f"unico{i}x{j}" for j in range(60))
+                  for j in range(n_total - n_dup) for i in [j]})
+        return t
+
+    # 3 de 10 duplicadas = exatamente 0.30 -> WARNING, nao FAIL.
+    r30 = check_duplication(corpus(3, 10))
+    assert abs(r30.duplicate_ratio - 0.3) < 1e-9
+    assert r30.status is Status.WARNING
+    # 4 de 10 = 0.40 -> FAIL.
+    assert check_duplication(corpus(4, 10)).status is Status.FAIL
+
+
+def test_um_par_exatamente_no_limiar_forma_grupo():
+    """`score >= threshold`: no valor exato o par agrupa, e o cabeçalho do
+    relatório promete `>=`."""
+    a = " ".join(f"p{i}" for i in range(10))
+    grupos = find_duplicate_groups({"u1": a, "u2": a}, threshold=1.0)
+    assert len(grupos) == 1  # similaridade 1.0, limiar 1.0
+    assert find_duplicate_groups({"u1": a, "u2": a + " extra"}, threshold=1.0) == ()
+
+
+def test_as_faixas_de_overlap_decidem_nos_valores_exatos():
+    """`>= OVERLAP_HIGH_RISK` e `>= OVERLAP_MONITOR`: 60% já é alto risco e 40%
+    já é monitorar. As faixas eram testadas em `overlap_band`, a função pura; o
+    status que `compare_against` deriva delas não ficava no valor."""
+    nosso = [f"p{i}" for i in range(10)]
+
+    def fonte(compartilhadas):
+        return " ".join(nosso[:compartilhadas] + [f"z{i}" for i in range(10)])
+
+    # containment = compartilhadas/10 sobre shingles de 1 palavra
+    alto = compare_against(" ".join(nosso), {"r": fonte(6)}, shingle_size=1,
+                           expected_sources=1)
+    monitor = compare_against(" ".join(nosso), {"r": fonte(4)}, shingle_size=1,
+                              expected_sources=1)
+    seguro = compare_against(" ".join(nosso), {"r": fonte(3)}, shingle_size=1,
+                             expected_sources=1)
+
+    assert (alto.band, alto.status) == ("high-risk", Status.FAIL)
+    assert (monitor.band, monitor.status) == ("monitor", Status.WARNING)
+    assert (seguro.band, seguro.status) == ("safe", Status.OK)

@@ -327,3 +327,30 @@ def test_a_fronteira_de_resposta_lenta_e_2500ms():
     assert rapido.status is Status.INFO  # só a lacuna de uptime
     assert lento.status is Status.WARNING
     assert any("over the" in f for f in lento.findings)
+
+
+def test_as_fronteiras_de_status_do_robots_sao_exatas(server):
+    """`code >= 400` e `code >= 500`, nos valores. 399 é legível, 400 não é;
+    499 é 4xx e o Google rastreia como se não houvesse arquivo, 500 para o
+    rastreamento do site inteiro."""
+    base, routes = server
+    for codigo, esperado in ((399, Status.OK), (400, Status.INFO),
+                             (499, Status.INFO), (500, Status.FAIL)):
+        routes["/robots.txt"] = (codigo, {"Content-Type": "text/plain"},
+                                 "User-agent: *\nAllow: /\n")
+        assert check_technical._robots(base, 5)[0].status is esperado, codigo
+
+
+def test_a_fronteira_de_home_com_erro_e_400_exato():
+    """`home.status_code >= 400` no availability: 399 é uma resposta servida e
+    pode ser cronometrada; 400 não."""
+    for codigo, esperado in ((399, Status.INFO), (400, Status.MISSING)):
+        f = _home_fetch("https://x/")
+        f.status_code = codigo
+        assert check_technical._availability(f).status is esperado, codigo
+
+
+def test_exatamente_2500ms_ainda_nao_e_lento():
+    """`elapsed_ms > SLOW_RESPONSE_MS`: no valor exato não avisa."""
+    igual = check_technical._availability(_home_fetch("https://x/", elapsed_ms=2500.0))
+    assert igual.status is Status.INFO

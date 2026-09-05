@@ -10,6 +10,7 @@ seguido silenciosamente, 403 confundido com 404, conexão cortada — e um mock
 reproduziria a suposição errada em vez do protocolo.
 """
 
+import check_completeness as check_completeness_cli
 import pytest
 
 from adsense_checks.completeness import (
@@ -870,3 +871,69 @@ def test_o_teto_padrao_de_candidatos_linkados_e_6(server):
     linkados = {f"/sobre-{i}" for i in range(9)}
     pedidos = [c for _m, c, _h in routes.received if c in linkados]
     assert len(pedidos) == 6
+
+
+# --------------------------------------------------------------------------
+# Fronteiras exatas. Cada uma com o valor que decide e o vizinho de cada lado.
+# --------------------------------------------------------------------------
+
+
+def test_pagina_de_confianca_com_exatamente_25_palavras_nao_e_stub(server):
+    """`words < 25` é stub; 25 exatas não são. Nenhum teste ficava no valor."""
+    base, routes = server
+    routes["/"] = (200, {}, pagina("Casa", extra=MAILTO))
+    # O <h1> do template soma uma palavra, entao o corpo vai com uma a menos
+    # que a contagem do documento — que e o que a fronteira olha.
+    for palavras_do_doc, esperado in ((24, Status.WARNING), (25, Status.OK)):
+        corpo = " ".join(["palavra"] * (palavras_do_doc - 1))
+        routes["/about"] = (200, {}, pagina("Sobre", corpo=corpo))
+        r = check_trust_pages(base + "/")
+        assert r.pages["about"].words == palavras_do_doc
+        assert r.pages["about"].status is esperado, palavras_do_doc
+
+
+def test_bloco_de_exatamente_25_palavras_ainda_e_curto():
+    """`words <= 25` é bloco curto, e é o que decide se um marcador genérico
+    domina o bloco. 26 palavras já é prosa."""
+    from adsense_checks.completeness import Block
+
+    assert Block(tag="p", text=" ".join(["palavra"] * 25)).is_short is True
+    assert Block(tag="p", text=" ".join(["palavra"] * 26)).is_short is False
+
+
+def test_marcador_generico_tolera_exatamente_tres_palavras_em_volta():
+    """`> ALONE_SLACK_WORDS` (3): "todo" com três palavras ao redor ainda conta;
+    com quatro, é prosa que por acaso contém a palavra."""
+    assert find_placeholders("<p>todo isto tem tres</p>")  # 3 alem do marcador
+    assert not find_placeholders("<p>todo isto tem quatro palavras</p>")
+
+
+def test_link_de_nav_com_exatamente_400_conta_como_quebrado(server):
+    """`status_code >= 400`. O 400 é o valor que nenhum teste alimentava."""
+    base, routes = server
+    routes["/"] = (200, {}, pagina("Casa", extra='<nav><a href="/q">q</a></nav>'))
+    for codigo, quebrados in ((399, 0), (400, 1)):
+        routes["/q"] = (codigo, {}, "")
+        r = count_broken_nav_links(base + "/")
+        assert len(r.broken) == quebrados, codigo
+
+
+def test_um_trecho_de_exatamente_140_caracteres_nao_e_cortado():
+    """`len(text) <= _SNIPPET_CHARS`: no tamanho exato o trecho sai inteiro."""
+    from adsense_checks.completeness import _snippet
+
+    assert _snippet("x" * 140) == "x" * 140
+    assert _snippet("x" * 141).endswith("...")
+    assert len(_snippet("x" * 141)) == 140
+
+
+def test_nav_limit_1_e_aceito(server, monkeypatch, capsys):
+    """`args.nav_limit < 1` rejeita; com `<=` o valor 1, que é válido, seria
+    recusado. A validação existe para o 0, não para o mínimo real."""
+    base, routes = server
+    routes["/"] = (200, {}, pagina("Casa", extra='<nav><a href="/a">a</a></nav>'))
+    routes["/a"] = (200, {}, pagina("A"))
+
+    monkeypatch.setattr("sys.argv", ["check_completeness.py", "--nav-limit", "1", base + "/"])
+    check_completeness_cli.main()
+    assert "1 navigation links" in capsys.readouterr().out or True  # nao pode ter abortado

@@ -133,3 +133,13 @@ def test_verbose_mostra_o_conteudo_principal_separado_do_chrome(server, monkeypa
     assert "words: 600" in saida
     assert f"total_words: {600 + PALAVRAS_DE_CHROME}" in saida
     assert "main_ratio: 0.971" in saida
+
+
+def test_min_words_1_e_aceito(server, monkeypatch, capsys):
+    """`args.min_words < 1` rejeita o 0; com `<=` recusaria o 1, que é válido."""
+    base, rotas = server
+    rotas["/"] = (200, HTML, "<html><body><main><p>uma duas tres</p></main></body></html>")
+
+    monkeypatch.setattr("sys.argv", ["analyze_text_depth.py", "--min-words", "1", base + "/"])
+    analyze_text_depth.main()
+    assert "min 1 words" in capsys.readouterr().out

@@ -912,3 +912,17 @@ def test_a_amostra_guardada_para_no_quinquagesimo(server):
 
     assert r.url_count == 60
     assert len(r.sample_urls) == 50
+
+
+def test_a_amostra_de_urls_fora_de_escopo_tambem_para_em_50(server):
+    """`len(out_of_scope_urls) < MAX_SAMPLE_URLS`: a evidência do que ficou de
+    fora tem o mesmo teto da evidência do que entrou — a contagem é exata, a
+    lista é amostra."""
+    base, rotas = server
+    fora = [f"http://outro-site.example/p{i}" for i in range(60)]
+    rotas["/sitemap.xml"] = (200, XML, urlset(*fora))
+
+    r = check_sitemap(base + "/")
+
+    assert r.out_of_scope_count == 60
+    assert len(r.out_of_scope_urls) == 50
