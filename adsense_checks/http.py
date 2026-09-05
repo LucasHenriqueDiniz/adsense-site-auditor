@@ -181,6 +181,11 @@ def _reject_invalid_timeout(timeout: object) -> None:
     function can be said to have allowed through nor an error about a URL.
     """
     if isinstance(timeout, Urllib3Timeout):
+        # Already urllib3's own object, so its constructor ran — but that only
+        # refuses values at or below zero, and the ceiling and `nan` are ours to
+        # catch. Reading the members back is the only way to reach them.
+        _reject_unwaitable(timeout.connect_timeout)
+        _reject_unwaitable(timeout.read_timeout)
         return
     if isinstance(timeout, tuple):
         try:
@@ -199,13 +204,21 @@ def _reject_invalid_timeout(timeout: object) -> None:
 
 
 def _reject_unwaitable(seconds: object) -> None:
-    """Raise on a duration past what `socket.settimeout` can represent."""
+    """Raise on a duration `socket.settimeout` cannot represent.
+
+    Spelled as `not 0 < x < ceiling` rather than `x >= ceiling`, because `nan`
+    answers False to every comparison and so satisfies neither this bound nor
+    urllib3's own `<= 0`. It reached `socket.settimeout`, which refuses it as a
+    plain ValueError, and the clause around the request then reported a live
+    site as a URL this client cannot parse — the wrong thing to send an operator
+    to fix, and the exact failure the try block's ordering exists to prevent.
+    """
     if seconds is None:
         return
-    if not isinstance(seconds, (int, float)) or seconds >= MAX_WAIT_SECONDS:
+    if not isinstance(seconds, (int, float)) or not 0 < seconds < MAX_WAIT_SECONDS:
         raise ValueError(
             f"Attempted to set a timeout of {seconds!r} seconds, but the timeout "
-            f"cannot be set to a value at or above {MAX_WAIT_SECONDS}."
+            f"must be a number above 0 and below {MAX_WAIT_SECONDS}."
         )
 
 

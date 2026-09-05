@@ -371,6 +371,7 @@ def test_timeout_zero_continua_levantando_em_vez_de_virar_erro_de_rede():
         (5, 0),
         (1, 2, 3),
         float("inf"),
+        float("nan"),
         MAX_WAIT_SECONDS,
         (MAX_WAIT_SECONDS, 5),
         (5, MAX_WAIT_SECONDS),

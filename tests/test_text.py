@@ -835,6 +835,30 @@ def test_exatamente_25_palavras_ja_nao_e_casca():
     assert looks_javascript_rendered(casca(25)) is False
 
 
+def test_um_svg_entre_duas_palavras_nao_as_solda_numa_so():
+    """O acoplamento entre o corte de subárvore e a guarda de casca de SPA.
+
+    `_collect` passou a emitir o separador de bloco também para as subárvores
+    `dropped`, então `Entrar<svg/>Sair` — o ícone inline de todo cabeçalho —
+    deixou de virar a palavra única "EntrarSair". Isso é mais correto, e mexe em
+    `extract_text`, que `looks_javascript_rendered` consulta: uma casca de 24
+    palavras com um ícone assim passou a contar 25 e a cruzar
+    `JS_SHELL_MAX_WORDS`, devolvendo `False` para uma página sem conteúdo
+    nenhum. A contagem é o mais fraco dos três sinais da guarda e o único
+    arbitrário; este teste existe para que ela não volte a se mover em silêncio
+    junto com a extração.
+    """
+    assert extract_text("<p>Entrar<svg><path/></svg>Sair</p>").split() == ["Entrar", "Sair"]
+
+    corpo = " ".join(["palavra"] * 23)
+    casca = ('<html><head><script src="/b.js"></script></head><body>'
+             f'<nav>{corpo}</nav>Entrar<svg><path/></svg>Sair'
+             '<div id="root"></div></body></html>')
+
+    assert word_count(extract_text(casca)) == 25
+    assert looks_javascript_rendered(casca) is False
+
+
 def test_exatamente_o_minimo_de_palavras_nao_fica_abaixo_dele():
     """`words < min_words`: no valor exato a página não está abaixo da barra."""
     assert classify_depth(299, min_words=300) is Status.WARNING

@@ -23,6 +23,7 @@ Serves ADS-CRAWL-01, ADS-CRAWL-04 and ADS-CRAWL-05.
     python scripts/crawl_site.py https://example.com [--depth 2] [--max-pages 50] [-v]
 """
 
+
 def _dump_pages(result) -> None:
     """Per-page evidence, under -v.
 

@@ -29,6 +29,7 @@ ADS-AUTHOR-02 (a contact channel exists in the HTML). ADS-AUTHOR-01 — a
 verifiable real name behind the site — is `judgement` and no script decides it.
 """
 
+
 def _all_findings(report: CompletenessReport) -> list[Finding]:
     """Every finding recorded anywhere in the report.
 

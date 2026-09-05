@@ -13,6 +13,7 @@ script could not read must not be reported as a site that passed.
     python scripts/check_technical.py https://example.com [-v]
 """
 
+
 from __future__ import annotations
 
 import argparse

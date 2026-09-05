@@ -78,7 +78,9 @@ ALONE_SLACK_WORDS = 3
 # contact page is often a form, an address and one sentence.
 MIN_TRUST_PAGE_WORDS = 25
 
-# How many of the home page's own links may be probed per trust page. The
+# How many of the home page's own linked PAGES may be probed per trust page —
+# identities, not hrefs, so the worst case is this many times
+# `MAX_SPELLINGS_PER_IDENTITY` requests. The
 # conventional paths (`ABOUT_PATHS`, `CONTACT_PATHS`) are always tried in full
 # and are never counted against this budget: a path this module declares and
 # then never requests turns "No About page found" into a claim about a URL

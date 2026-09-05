@@ -33,7 +33,9 @@ Restart Claude Code. Verify with:
 /adsense-site-auditor
 ```
 
-The helper scripts are optional and only need `requests`:
+The helper scripts are optional. `requests` is the only package to install;
+`adsense_checks.http` also imports `urllib3` by name, which arrives with it and
+is declared in `pyproject.toml` so a resolver cannot pick a tree without it:
 
 ```bash
 pip install requests
