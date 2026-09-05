@@ -32,6 +32,16 @@ class _Handler(BaseHTTPRequestHandler):
         self.received.append((self.command, self.path, dict(self.headers)))
         route = self.routes.get(self.path)
         if route is None:
+            # `default` é a rota curinga: o que o servidor responde para um
+            # caminho que ele não tem. Um site que serve soft 404 responde 200
+            # AQUI, e é a única forma honesta de reproduzi-lo — registrar rota
+            # por rota só responderia às URLs que o auditor já resolveu pedir,
+            # e aí o teste combinaria com a implementação em vez de com o site.
+            # Sendo callable, recebe (método, caminho): é como se escreve um
+            # template de erro que ecoa a URL pedida.
+            default = self.routes.default
+            route = default(self.command, self.path) if callable(default) else default
+        if route is None:
             self.send_response(404)
             self.end_headers()
             if body_allowed:
@@ -59,6 +69,10 @@ def _sobe_servidor():
     # valores — então o registro viaja pendurado no próprio mapa de rotas.
     class _Routes(dict):
         received: list
+        # Nenhuma rota curinga por padrão: o servidor 404 no caminho que não
+        # conhece, que é o comportamento correto e o de todos os testes já
+        # escritos. Ver `_Handler._respond`.
+        default = None
 
     routes = _Routes()
     routes.received = []

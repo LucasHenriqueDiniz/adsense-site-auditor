@@ -1,8 +1,29 @@
 """Unfinished-site detection and the trust pages AdSense expects to find.
 
-Covers ADS-COMPLETE-01 (unfinished markers plus navigation links that 404),
-ADS-UX-05 (the About/Contact pages answer 200 and are not stubs) and part of
-ADS-AUTHOR-02 (at least one contact channel exists in the HTML).
+Covers ADS-COMPLETE-01 (unfinished markers plus navigation links leading
+nowhere), ADS-UX-05 (the About/Contact pages answer 200 and are not stubs) and
+part of ADS-AUTHOR-02 (at least one contact channel exists in the HTML).
+
+"Leading nowhere" is not the same question as "answers 4xx". A CMS serving its
+"page not found" template with HTTP 200 — the soft 404 — used to make a menu of
+dead links report `broken 0`, and `crawl._load_robots` already refuses to read
+an HTML body as robots rules for exactly this reason. `_probe_not_found` asks
+the host once what it serves for a URL that cannot exist, and the answer decides
+what a 200 from that host is worth at all.
+
+What the probe is allowed to decide is deliberately narrow. On a host that
+answers a success code for a URL that cannot exist, no 200 is evidence about the
+page behind it — in either direction — so every such link is reported as
+unverified, never as broken. Recognising the not-found page in a link's response
+sharpens the sentence the report prints; it does not turn the verdict into a
+failure. The reason is that "this response is byte-identical to the page served
+for nothing" is a true description of a dead link AND of several live ones: a
+WordPress empty category, empty tag and out-of-range page number all render the
+same `content-none.php` partial the 404 template renders, and on a catch-all
+that answers with the home page, `/index.php` is a real route. `_is_home_again`
+uses that same equality to reject a candidate and keep looking — an exclusion.
+Reusing an exclusion rule as an accusation is what produced `FAIL, count 3` on
+working sites.
 
 Two defects of the previous implementation are made structurally impossible
 here rather than patched in place:
@@ -108,8 +129,25 @@ MAX_SPELLINGS_PER_IDENTITY = 2
 DEFAULT_NAV_LINK_LIMIT = 25
 
 # One broken link in the navigation is a defect; three reads as an abandoned
-# site. The number is arbitrary but fixed, which is what makes it reproducible.
+# site. The number is arbitrary but fixed, which is what makes it reproducible —
+# and only observed 4xx/5xx are counted against it. Nothing inferred from a
+# host's not-found page reaches this threshold, because an inference that can
+# cross it turns a WordPress site with an empty category, an empty tag and a
+# page 7 of 6 into "abandoned".
 BROKEN_NAV_FAIL_THRESHOLD = 3
+
+# The paths the soft-404 probe asks for, joined onto the audited base so a
+# subdirectory install is probed inside its own install rather than at the apex.
+# Fixed rather than random, so the operator can curl the same URL and check the
+# claim the report makes about their host. They differ in length and in shape on
+# purpose: a not-found template that echoes the requested address answers them
+# with different text, and telling those two hosts apart is the whole job of
+# `_probe_not_found`. The second is requested only against a host whose answer
+# to the first already proved it serves 200 for pages it does not have.
+NOT_FOUND_PROBE_PATHS = (
+    "adsense-auditor-probe-no-such-page",
+    "adsense-auditor-probe-nn-9x7",
+)
 
 _SNIPPET_CHARS = 140
 
@@ -786,14 +824,56 @@ class NavLinkReport(_Verdict):
     found: int = 0
     checked: int = 0
     broken: list[NavLink] = field(default_factory=list)
+    # Links that answered HTTP 200 with exactly the page this host serves for a
+    # URL that does not exist. Named for what was seen, not for the conclusion
+    # somebody would like to draw from it: the same observation describes a dead
+    # link and a live route that renders the site's "nothing here" partial. Kept
+    # apart from `unverified` only so the report can print the sharper sentence;
+    # both carry the same weight in the verdict, and neither is `count`.
+    same_as_not_found: list[NavLink] = field(default_factory=list)
+    # Links that answered HTTP 200 on a host where 200 was not shown to mean
+    # anything. Neither working nor broken, and never folded into either.
+    unverified: list[NavLink] = field(default_factory=list)
     unresolved: list[NavLink] = field(default_factory=list)
     used_all_links: bool = False
+    # What the host does with a URL that does not exist: "honest", "fingerprint",
+    # "opaque", or "" when no probe was sent. An observation, not a verdict.
+    not_found_regime: str = ""
     findings: list[Finding] = field(default_factory=list)
 
     @property
     def count(self) -> int:
-        """Broken links found. A lower bound whenever `truncated` is true."""
+        """Links OBSERVED to lead nowhere: the 4xx/5xx, and only those.
+
+        A lower bound whenever `truncated` is true. Everything the not-found
+        probe merely inferred is deliberately outside this number, in both
+        directions. Counted as working, `unverified` is the soft-404 hole this
+        module exists to close; counted as broken, `same_as_not_found` crosses
+        BROKEN_NAV_FAIL_THRESHOLD on a site whose menu works — three links is
+        one empty category, one empty tag and one page past the last, all of
+        which render the partial the 404 template renders. This property feeds
+        the threshold, so what it must never contain is a guess.
+        """
         return len(self.broken)
+
+    @property
+    def unclassified(self) -> list[NavLink]:
+        """Every 200 that could not be read as a page, whichever way it looked.
+
+        Two lists because the sentences differ, one property because the weight
+        does not: nothing in here was observed to work and nothing in here was
+        observed to be broken.
+        """
+        return self.same_as_not_found + self.unverified
+
+    @property
+    def unverified_reason(self) -> str:
+        """Why the unverified links could not be read as pages.
+
+        Derived rather than stored: it is one observation about the host, so
+        there is no second copy to drift from the links it explains.
+        """
+        return self.unverified[0].reason if self.unverified else ""
 
     @property
     def truncated(self) -> bool:
@@ -937,6 +1017,7 @@ def check_trust_pages(
     timeout: float = DEFAULT_TIMEOUT,
     home_page: Fetch | None = None,
     max_linked_candidates: int = MAX_LINKED_CANDIDATES,
+    not_found: _NotFoundProbe | None = None,
 ) -> TrustPagesReport:
     """Look for About/Sobre and Contact/Contato (ADS-UX-05, ADS-AUTHOR-02 part).
 
@@ -952,6 +1033,13 @@ def check_trust_pages(
     pass: OK, MISSING (nothing answered), WARNING (a stub or a placeholder) and
     ERROR (a 403, a 5xx, a timeout — the page may well exist and we cannot say).
     An access failure is never an approval.
+
+    `not_found` is what the host answers for a URL that cannot exist, obtained
+    once by the caller. Given it, a candidate answering 200 with exactly that
+    page is skipped the way `_is_home_again` skips the catch-all, and the report
+    records how the pages below were judged. Without it this check runs as
+    before — and used to print PASS for `/about` in the same report whose
+    navigation line said that very page is what the host serves for nothing.
     """
     base = as_base(base_url)
     sess = session or requests.Session()
@@ -980,9 +1068,23 @@ def check_trust_pages(
             home_text=home_text,
             session=sess,
             timeout=timeout,
+            not_found=not_found,
         )
         report.pages[kind] = outcome
         _record_page(report, label, outcome, home_doc)
+
+    if not_found is not None and not not_found.trustworthy:
+        # One line for the whole check, not one per page: it is a single fact
+        # about the host. Recorded because without it this report contradicted
+        # itself — [PASS] about page, and four lines down "this host answers 200
+        # for URLs it does not have" — and the reader had no way to know that
+        # the pass rests on the words on the page rather than on the 200.
+        report.add(
+            Status.INFO,
+            f"This host answered HTTP 200 for {not_found.url}, which does not exist, so the "
+            "trust pages above were judged on the content they served and not on their status "
+            "code",
+        )
 
     missing = [k for k, p in report.pages.items() if p.status is Status.MISSING]
     if len(missing) == len(_TRUST_KINDS):
@@ -1106,6 +1208,7 @@ def _resolve_trust_page(
     home_text: str,
     session: requests.Session,
     timeout: float,
+    not_found: _NotFoundProbe | None = None,
 ) -> PageOutcome:
     attempts: list[tuple[str, str]] = []
     # Tracks the worst thing that stopped us from reading a candidate. It only
@@ -1145,6 +1248,21 @@ def _resolve_trust_page(
             # Following redirects made this the old checker's silent false OK.
             attempts.append((response.final_url, "served the home page"))
             continue
+        if _is_not_found_page(not_found, response):
+            # The same move one line up, against the other page a catch-all
+            # answers with. Used HERE, as an exclusion, this equality is sound:
+            # the worst it can do is keep looking at the next candidate and end
+            # at MISSING, which is the honest answer when the only thing found
+            # was the not-found page. Used as an accusation it is not sound,
+            # which is why count_broken_nav_links refuses to fail a link on it.
+            attempts.append(
+                (
+                    response.final_url,
+                    f"served the page this host answers with for {not_found.url}, "
+                    "which does not exist",
+                )
+            )
+            continue
         return _judge_page(kind, response, doc, attempts, declared_blocked)
     if access is Status.ERROR:
         return PageOutcome(
@@ -1169,6 +1287,18 @@ def _is_home_again(response: Fetch, home: Fetch, doc: Document, home_text: str) 
     # Same bytes of visible text at a different URL is the SPA catch-all: the
     # router answered 200 for a route it does not have.
     return bool(home_text) and doc.text == home_text
+
+
+def _is_not_found_page(probe: _NotFoundProbe | None, response: Fetch) -> bool:
+    """Whether this response IS the page the host serves for a URL that does not exist.
+
+    Only ever an answer on a host whose not-found page was pinned down, and only
+    ever used to stop treating a response as the page that was asked for. Never
+    used to declare one broken — see `count_broken_nav_links`.
+    """
+    if probe is None or probe.regime != "fingerprint":
+        return False
+    return _readable_text(response) == probe.fingerprint
 
 
 def _judge_page(
@@ -1259,6 +1389,146 @@ def _record_page(
 
 
 # --------------------------------------------------------------------------
+# What HTTP 200 is worth on this host
+# --------------------------------------------------------------------------
+
+# How the host answers for a URL that does not exist, which is what decides
+# whether its status codes carry any information at all.
+ProbeRegime = Literal["honest", "fingerprint", "opaque"]
+
+
+@dataclass(frozen=True)
+class _NotFoundProbe:
+    regime: ProbeRegime
+    # The visible text this host serves for a URL that does not exist. Set in
+    # the "fingerprint" regime only, and never empty — an empty document matches
+    # every content-free response, which is evidence of nothing.
+    fingerprint: str = ""
+    url: str = ""
+    # Why a 200 from this host says nothing about the page behind it. Set in
+    # BOTH non-honest regimes, because in both of them that is the fact the
+    # report has to print: "fingerprint" narrows down what the not-found page
+    # looks like, it does not restore the meaning of the status code.
+    reason: str = ""
+
+    @property
+    def trustworthy(self) -> bool:
+        """Whether HTTP 200 from this host is evidence that a page is there."""
+        return self.regime == "honest"
+
+
+def _readable_text(response: Fetch) -> str | None:
+    """The response's visible text, or None when it cannot serve as evidence.
+
+    None for a document that would not parse and for one with no visible text:
+    accepting the empty string as a fingerprint would match a nav link pointing
+    at a PDF, an image or a genuinely empty page, and report it as a soft 404 on
+    the strength of both sides being blank.
+    """
+    doc = parse_document(response.text)
+    if doc.parse_error:
+        return None
+    return doc.text.strip() or None
+
+
+def _probe_not_found(
+    base: str, *, session: requests.Session, timeout: float
+) -> _NotFoundProbe:
+    """Ask the host what it serves for a URL that does not exist.
+
+    `count_broken_nav_links` decided on `status_code >= 400` alone, and a CMS
+    answering 200 with its "page not found" template — the soft 404, and it is
+    common — reported `broken 0` over a menu whose every link goes nowhere. A
+    status code is only evidence when the host is willing to spend one on a page
+    it does not have, and the only way to learn whether this host does is to ask
+    it for a page it cannot have. The same reasoning already runs for robots.txt
+    in `crawl._load_robots`, which refuses to parse an HTML body as rules.
+
+    Three answers, and only the first of them restores the meaning of a 200:
+
+      * `honest` — the probe got 4xx/5xx. This host spends a status code on a
+        missing page, so a nav link answering 200 is a page. **One request**, and
+        it is the common case: the second probe is never sent.
+      * `fingerprint` — both probes got the same status and the same visible
+        text. That text is what this host serves for nothing, so a response
+        carrying it is worth naming. It is NOT worth failing a link over: the
+        same equality holds for a real route rendering the site's "nothing
+        here" partial, and it is the equality `_is_home_again` uses to skip a
+        candidate rather than to condemn one.
+      * `opaque` — the host answers 200 for a URL that does not exist but not
+        with a recognisable page (the template echoes the requested address, or
+        carries no text), or the probe could not be made at all.
+
+    The regime is a fact about the HOST, and `fingerprint` is a weaker fact than
+    it looks: it says two samples matched, not that the template is stable. On a
+    host whose error page carries a timestamp or a request id the two probes
+    match or not depending on where a second boundary fell, so anything the
+    caller decides differently between `fingerprint` and `opaque` is a verdict
+    decided by a coin. Both therefore mean the same thing to the caller — HTTP
+    200 proves nothing here — and only the sentence printed differs.
+    """
+    first_url = _join(base, NOT_FOUND_PROBE_PATHS[0])
+
+    def opaque(reason: str) -> _NotFoundProbe:
+        return _NotFoundProbe("opaque", url=first_url, reason=reason)
+
+    first = fetch(first_url, session=session, timeout=timeout)
+    if first.error is not None:
+        return opaque(
+            f"{first_url} could not be fetched ({first.error}), so what this host answers "
+            "for a URL that does not exist is unknown"
+        )
+    if first.status_code is None:
+        return opaque(f"{first_url} answered without a status code")
+    if first.status_code >= 400:
+        return _NotFoundProbe("honest", url=first_url)
+
+    # Past here the host is a proven soft-404 host: it answered a success code
+    # for a path nothing routes.
+    served = f"{first_url} does not exist and this host answered HTTP {first.status_code} for it"
+    first_text = _readable_text(first)
+    if first_text is None:
+        # No second request: whatever it came back with, a blank page can never
+        # be the thing other links are recognised by.
+        return opaque(
+            f"{served} carrying no readable text, and a blank page matches every blank "
+            "response, so it cannot be used to recognise the other links"
+        )
+
+    # The second request is spent only on a host that has already misbehaved,
+    # and it buys exactly one thing — whether the page served for nothing is the
+    # same page every time, and so usable to recognise the other links by.
+    second_url = _join(base, NOT_FOUND_PROBE_PATHS[1])
+    second = fetch(second_url, session=session, timeout=timeout)
+    if second.error is not None:
+        return opaque(
+            f"{served}; the second probe {second_url} could not be fetched ({second.error}), "
+            "so its not-found page could not be identified"
+        )
+    if second.status_code != first.status_code:
+        return opaque(
+            f"{served}, and HTTP {second.status_code} for {second_url}, which does not exist "
+            "either: this host's status codes do not say whether a page is there"
+        )
+    # Reported apart from the blank case above rather than as one either/or,
+    # because the report's job is to say what was seen: "the page it serves for
+    # nothing is blank" and "it serves a different page every time" send the
+    # reader to different places.
+    if first_text != _readable_text(second):
+        return opaque(
+            f"{served}, and it serves a DIFFERENT page for each such URL — the template echoes "
+            f"the address, as {second_url} showed — so there is no one page to recognise the "
+            "other links by"
+        )
+    return _NotFoundProbe(
+        "fingerprint",
+        fingerprint=first_text,
+        url=first_url,
+        reason=f"{served}, so HTTP 200 from this host does not show that a page is there",
+    )
+
+
+# --------------------------------------------------------------------------
 # Broken navigation links
 # --------------------------------------------------------------------------
 
@@ -1270,18 +1540,56 @@ def count_broken_nav_links(
     session: requests.Session | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     home_page: Fetch | None = None,
+    not_found: _NotFoundProbe | None = None,
 ) -> NavLinkReport:
-    """Follow the home page's navigation links and count the ones that 4xx/5xx.
+    """Follow the home page's navigation links and count the ones leading nowhere.
 
     Part of ADS-COMPLETE-01: a menu pointing at pages that do not exist is what
     an abandoned site looks like from the crawler's side.
 
     Only same-site http(s) links are followed, at most `limit` of them. When the
     limit bites, `truncated` is true and `count` is a lower bound — the report
-    says so as an INFO finding rather than leaving a partial number looking
+    says so as a MISSING finding rather than leaving a partial number looking
     complete. Links that fail at the transport layer are `unresolved`, not
     "fine": they raise the status to ERROR, because a link nobody could resolve
     has not been shown to work.
+
+    A link answering HTTP 200 is only a working page on a host that would have
+    said 404 otherwise, so `_probe_not_found` asks the host that question once —
+    not once per link — and the answer decides what the 200s are worth. Pass
+    `not_found` to reuse an answer already obtained for this host; without it
+    the probe is sent here, and only when there is a menu to sort.
+
+      * The host is `honest`: it 4xx'd a URL that cannot exist, so a 200 is a
+        page and a 4xx/5xx is a broken link. This is the only regime in which
+        this function reports anything as working.
+      * The host answered a success code for a URL that cannot exist: then no
+        200 from it is evidence about the page behind it, and every one of them
+        is recorded as unverified — `same_as_not_found` when the response is
+        exactly the page the probe drew, `unverified` otherwise. Both are
+        MISSING, neither reaches `count`, and neither can reach
+        `BROKEN_NAV_FAIL_THRESHOLD`.
+
+    That last rule is the whole design and it is deliberately blunt. The sharper
+    version — fail the links matching the not-found page, pass the rest — was
+    tried and is wrong twice over. It fails working sites: an empty WordPress
+    category, an empty tag and a page past the last one render the same
+    `content-none.php` the 404 template renders, which is three links and
+    exactly the threshold; on a catch-all serving the home page, `/index.php`
+    and `/pt/` are real routes. And it is not reproducible: whether the two
+    probes matched decides whether the comparison happens at all, so a host
+    whose error page carries a clock returned OK, WARNING or MISSING for the
+    same dead menu depending on the run.
+
+    A 4xx/5xx is untouched by any of this and still feeds the threshold on every
+    host: that one was observed, not inferred. Links that fail at the transport
+    layer stay `unresolved` and ERROR.
+
+    What it still misses, stated rather than hidden: a host that 404s the probe
+    path but soft-404s inside one subtree (a CMS mounted under `/blog/`) is
+    treated as honest throughout. The probe path is fixed and published in
+    `NOT_FOUND_PROBE_PATHS`, so a host could also special-case it; nothing here
+    defends against a site that lies on purpose.
     """
     base = as_base(base_url)
     sess = session or requests.Session()
@@ -1307,22 +1615,86 @@ def count_broken_nav_links(
         report.used_all_links = bool(targets)
 
     report.found = len(targets)
+
+    # Asked once for the whole menu, and only when there is something to sort:
+    # on a menu of nothing the answer would decide nothing and the request would
+    # be spent against someone else's host for free.
+    probe = _NotFoundProbe("honest")
+    if not_found is not None:
+        probe = not_found
+        report.not_found_regime = probe.regime
+    elif targets:
+        # Probed at the origin the links were resolved against, not at the URL
+        # the operator typed. On a site redirecting apex to www the two are
+        # different hosts, and the answer wanted is the one from the host now
+        # being asked for the links.
+        probe = _probe_not_found(as_base(home_url), session=sess, timeout=timeout)
+        report.not_found_regime = probe.regime
+
     for url, text in targets[:limit]:
         report.checked += 1
         response = fetch(url, session=sess, timeout=timeout)
         if response.error is not None:
             report.unresolved.append(NavLink(url=url, text=text, reason=response.error))
-        elif response.status_code is not None and response.status_code >= 400:
+            continue
+        code = response.status_code
+        if code is not None and code >= 400:
+            # Observed off the wire, on any host. This is the only branch that
+            # is allowed to call a link broken.
             report.broken.append(
-                NavLink(url=url, text=text, status_code=response.status_code,
-                        reason=f"HTTP {response.status_code}")
+                NavLink(url=url, text=text, status_code=code, reason=f"HTTP {code}")
+            )
+            continue
+        if probe.trustworthy:
+            continue
+        # The host answers a success code for a URL that cannot exist, so this
+        # 200 shows nothing about the page behind it. Which of the two lists it
+        # lands in changes the sentence and not the weight.
+        if probe.regime == "fingerprint" and _readable_text(response) == probe.fingerprint:
+            report.same_as_not_found.append(
+                NavLink(
+                    url=url, text=text, status_code=code,
+                    reason=f"HTTP {code} serving exactly the page {probe.url} serves, and that "
+                           "URL does not exist",
+                )
+            )
+        else:
+            report.unverified.append(
+                NavLink(url=url, text=text, status_code=code, reason=probe.reason)
             )
 
+    severity = Status.FAIL if report.count >= BROKEN_NAV_FAIL_THRESHOLD else Status.WARNING
     if report.broken:
         listed = ", ".join(f"{link.url} ({link.status_code})" for link in report.broken[:5])
-        many = len(report.broken) >= BROKEN_NAV_FAIL_THRESHOLD
-        severity = Status.FAIL if many else Status.WARNING
         report.add(severity, f"{len(report.broken)} navigation link(s) return 4xx/5xx: {listed}")
+    if report.same_as_not_found:
+        listed = ", ".join(link.url for link in report.same_as_not_found[:5])
+        report.add(
+            # MISSING, not FAIL, and this is the decision the whole probe exists
+            # to support. Serving the not-found page is what a dead link looks
+            # like AND what a live route rendering the site's "nothing here"
+            # partial looks like, and the two are indistinguishable from here.
+            # Reported at the severity of "not observed", which is what it is.
+            Status.MISSING,
+            f"{len(report.same_as_not_found)} navigation link(s) answered HTTP 200 with exactly "
+            f"the page this host serves for {probe.url}, which does not exist. That is what a "
+            "dead link looks like here — and also what a real page sharing the site's "
+            "\"nothing here\" template looks like, so it is recorded as unverified rather than "
+            f"broken and a human has to open one: {listed}",
+        )
+    if report.unverified:
+        listed = ", ".join(link.url for link in report.unverified[:5])
+        report.add(
+            # MISSING for the same reason truncation is: the condition was not
+            # observed. Not OK, because a 200 on a host that answers 200 for
+            # everything demonstrates nothing; not WARNING or FAIL, because
+            # nothing here was shown to be broken and inventing three failures
+            # out of a host quirk would print "abandoned" over a working site.
+            Status.MISSING,
+            f"{len(report.unverified)} navigation link(s) answered HTTP 200 but could not be "
+            f"shown to lead anywhere: {report.unverified_reason}. Counted as neither working "
+            f"nor broken: {listed}",
+        )
     if report.unresolved:
         listed = ", ".join(f"{link.url} ({link.reason})" for link in report.unresolved[:5])
         report.add(
@@ -1455,7 +1827,20 @@ def check_completeness(
             f"Home page mentions, in prose: {phrases} (review — may be about the topic)",
         )
 
-    report.trust = check_trust_pages(base, session=sess, timeout=timeout, home_page=home)
+    # What HTTP 200 is worth on this host, asked once and handed to both
+    # sub-checks. It used to be asked inside count_broken_nav_links, which runs
+    # second, so check_trust_pages printed [PASS] for /about in the very report
+    # whose navigation line said that page is what this host serves for a URL it
+    # does not have. Costs the same one or two requests wherever it is asked;
+    # asked here it is also spent on a site whose menu is empty, and the trust
+    # pages are requested on every site there is.
+    not_found = _probe_not_found(
+        as_base(home.final_url or home.url), session=sess, timeout=timeout
+    )
+
+    report.trust = check_trust_pages(
+        base, session=sess, timeout=timeout, home_page=home, not_found=not_found
+    )
     report.nav = count_broken_nav_links(base, limit=nav_link_limit, session=sess, timeout=timeout,
-                                        home_page=home)
+                                        home_page=home, not_found=not_found)
     return report

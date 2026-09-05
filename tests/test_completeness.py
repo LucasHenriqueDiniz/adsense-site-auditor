@@ -12,16 +12,19 @@ reproduziria a suposição errada em vez do protocolo.
 
 import check_completeness as check_completeness_cli
 import pytest
+import requests
 
 from adsense_checks.completeness import (
     _ABOUT_HINT,
     ABOUT_PATHS,
     BROKEN_NAV_FAIL_THRESHOLD,
     MIN_TRUST_PAGE_WORDS,
+    NOT_FOUND_PROBE_PATHS,
     NavLinkReport,
     Status,
     _candidates,
     _nav_targets,
+    _probe_not_found,
     check_completeness,
     check_trust_pages,
     count_broken_nav_links,
@@ -546,6 +549,559 @@ def test_links_relativos_respeitam_o_subdiretorio(server):
     relatorio = count_broken_nav_links(base + "/meusite/")
 
     assert (relatorio.checked, relatorio.count) == (1, 0)
+
+
+# ---------------------------------------------------------------------------
+# count_broken_nav_links — o que HTTP 200 vale neste host
+#
+# A checagem decidia só por `status_code >= 400`. Um CMS que serve o template
+# "página não encontrada" com HTTP 200 — o soft 404 — dava `broken 0` sobre um
+# menu inteiro que não leva a lugar nenhum, que é exatamente a condição que
+# ADS-COMPLETE-01 existe para pegar.
+#
+# A sonda que fecha esse buraco pergunta ao host o que ele responde para uma URL
+# que não pode existir. O que ela tem PERMISSÃO de decidir é a metade difícil, e
+# é o que esta seção fixa: num host que responde sucesso para uma URL que não
+# existe, nenhum 200 é evidência sobre a página atrás dele — nem a favor nem
+# contra —, então todo link desses sai como não verificado (MISSING) e nenhum
+# deles chega a BROKEN_NAV_FAIL_THRESHOLD. Reconhecer a página de erro na
+# resposta afia a FRASE do relatório; não vira reprovação.
+#
+# Reconhecer não vira reprovação por dois motivos medidos, cada um com teste
+# abaixo: "esta resposta é idêntica à página servida para nada" descreve um link
+# morto E várias rotas vivas (`content-none.php` do WordPress, o catch-all que
+# serve a home), e o próprio regime da sonda depende de duas amostras terem
+# coincidido — num host cuja página de erro tem relógio, o mesmo menu morto saía
+# OK, WARNING ou MISSING conforme a corrida.
+# ---------------------------------------------------------------------------
+
+ERRO_404 = pagina("Página não encontrada", corpo="Nada aqui. Volte para a home.")
+
+# Uma página de erro longa o bastante para NÃO ser um stub aos olhos de
+# _judge_page: é o que um template de erro real tem, com menu, rodapé e busca, e
+# é o que fazia check_trust_pages aprová-la como /sobre.
+ERRO_404_LONGO = pagina("Página não encontrada", corpo=PROSA)
+
+
+def menu_de(*caminhos):
+    itens = "".join(f"<a href='{c}'>{c}</a>" for c in caminhos)
+    return f"<nav>{itens}</nav>"
+
+
+def pagina_simples(texto):
+    """Um documento cujo texto visível é exatamente `texto`.
+
+    Existe para os testes de comparação: com um <h1> e um <title> no meio não dá
+    para dizer que um texto CONTÉM o outro sem depender de como o parser junta os
+    blocos, e é justamente containment o que esses testes precisam controlar.
+    """
+    return f"<html><head><title>x</title></head><body><p>{texto}</p></body></html>"
+
+
+def test_menu_que_devolve_200_com_a_pagina_de_erro_nao_e_aprovado_nem_reprovado(server):
+    """O buraco, e o limite do que a sonda pode concluir sobre ele.
+
+    Todo link do menu responde 200 servindo o template de erro do próprio site, e
+    `status_code >= 400` não via nenhum deles: o relatório saía `broken 0`,
+    status OK, exit 0, sobre um site abandonado.
+
+    O que substitui isso NÃO é FAIL. Servir a página de erro é o que um link
+    morto parece daqui e também o que parece uma rota viva que renderiza o mesmo
+    parcial "nada aqui" (ver os dois testes seguintes), e daqui os dois são
+    indistinguíveis. Então: MISSING, `count` zero, fora do exit 0 e com os três
+    endereços impressos para um humano abrir um.
+
+    O custo aceito está neste teste: um menu genuinamente 100% morto num host de
+    soft 404 sai como "não verificado" em vez de "reprovado". Continua fora do
+    exit 0, que é o que o portão precisa."""
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/a", "/b", "/c")))
+    # A rota curinga é o soft 404: qualquer caminho não registrado responde 200
+    # com a mesma página de erro, inclusive a URL que a sonda pede.
+    rotas.default = (200, {}, ERRO_404)
+
+    r = count_broken_nav_links(base + "/")
+
+    assert r.status is Status.MISSING
+    assert r.not_found_regime == "fingerprint"
+    assert [link.url for link in r.same_as_not_found] == [base + "/a", base + "/b", base + "/c"]
+    assert [link.status_code for link in r.same_as_not_found] == [200, 200, 200]
+    # Nada aqui foi OBSERVADO quebrado, então nada aqui conta para o limiar.
+    assert (r.count, r.broken) == (0, [])
+    assert r.passed is False
+    assert "unverified rather than broken" in frases(r)
+
+
+def test_categoria_vazia_do_wordpress_nao_reprova_o_menu(server):
+    """FAIL falso num WordPress comum, que é o preço de tratar semelhança como
+    prova.
+
+    `content-none.php` é incluído por 404.php, archive.php e search.php. Uma
+    categoria sem posts, uma tag sem posts e a página 7 de 6 são ROTAS REAIS que
+    renderizam esse parcial: HTML diferente, texto visível idêntico ao da página
+    de erro. `_SKIP_TAGS` inclui `title`, então o único campo que separa os
+    documentos é descartado antes da comparação.
+
+    São três links, exatamente BROKEN_NAV_FAIL_THRESHOLD, num site que funciona.
+    Com a inferência valendo reprovação isto saía `FAIL, count 3`."""
+    base, rotas = server
+    menu = menu_de("/categoria/ferramentas", "/tag/plaina", "/blog/page/7")
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu))
+
+    def conteudo_ausente(titulo):
+        return (
+            f"<html><head><title>{titulo}</title></head>"
+            "<body><p>Nada encontrado. Tente outra busca.</p></body></html>"
+        )
+
+    rotas["/categoria/ferramentas"] = (200, {}, conteudo_ausente("Categoria: Ferramentas"))
+    rotas["/tag/plaina"] = (200, {}, conteudo_ausente("Tag: plaina"))
+    rotas["/blog/page/7"] = (200, {}, conteudo_ausente("Blog — página 7"))
+    rotas.default = (200, {}, conteudo_ausente("Página não encontrada"))
+
+    # O que torna o caso o que ele é: só o <title> separa os documentos, e ele
+    # não entra no texto visível.
+    assert visible_text(conteudo_ausente("Categoria: Ferramentas")) == visible_text(
+        conteudo_ausente("Página não encontrada")
+    )
+
+    r = count_broken_nav_links(base + "/")
+
+    assert r.count == 0
+    assert Status.FAIL not in [f.status for f in r.findings]
+    assert r.status is Status.MISSING
+    assert len(r.same_as_not_found) == 3
+
+
+def test_catch_all_que_serve_a_home_nao_reprova_rotas_legitimas(server):
+    """O outro FAIL falso, e no host que esta checagem existe para pegar.
+
+    Num catch-all que responde a home para qualquer rota desconhecida — a SPA —
+    `/index.php`, `/pt/` e `/inicio` são endereços legítimos que servem a home
+    de propósito. São três, o limiar exato, e a inferência os condenava."""
+    base, rotas = server
+    casa = pagina("Casa", extra=menu_de("/index.php", "/pt/", "/inicio"))
+    rotas["/"] = (200, {}, casa)
+    rotas.default = (200, {}, casa)
+
+    r = count_broken_nav_links(base + "/")
+
+    assert r.count == 0
+    assert Status.FAIL not in [f.status for f in r.findings]
+    assert r.status is Status.MISSING
+    assert len(r.same_as_not_found) == 3
+
+
+def test_pagina_de_erro_que_muda_entre_as_respostas_nao_aprova_o_menu(server):
+    """O falso PASSE não determinístico, que é o defeito mais caro dos dois.
+
+    A sonda decide o regime com duas amostras consecutivas, e os links são
+    comparados com a impressão digital N requisições depois. "fingerprint"
+    significa "duas amostras coincidiram", não "o template é estável": num host
+    cuja página de erro carrega um relógio ou um id de requisição (o Ray ID do
+    Cloudflare), as duas sondas caem no mesmo segundo ou não, e os links depois
+    quase nunca caem.
+
+    Medido: mesmo host, mesmo menu 100% morto, 20 corridas —
+    `{'OK': 8, 'MISSING': 8, 'WARNING': 4}`. OK em oito de vinte sobre um menu
+    onde nada existe, e a primeira decisão deste pacote que muda entre corridas.
+
+    Aqui o segundo vira depois das duas sondas: regime "fingerprint", e nenhum
+    dos links casa com a impressão digital. Antes isso era OK."""
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/a", "/b", "/c")))
+    respostas = []
+
+    def erro_com_relogio(metodo, caminho):
+        respostas.append(caminho)
+        # As duas sondas caem no mesmo segundo; os links, no seguinte.
+        segundo = "00" if len(respostas) <= 2 else "01"
+        return (200, {}, pagina_simples(f"Nada aqui. Página gerada em 12:00:{segundo}."))
+
+    rotas.default = erro_com_relogio
+
+    r = count_broken_nav_links(base + "/")
+
+    # As duas sondas coincidiram — e isso não basta para decidir nada.
+    assert r.not_found_regime == "fingerprint"
+    assert r.status is Status.MISSING
+    assert [link.url for link in r.unverified] == [base + "/a", base + "/b", base + "/c"]
+    assert (r.count, r.same_as_not_found) == (0, [])
+
+
+def test_404_duro_continua_reprovando_em_host_de_soft_404(server):
+    """O que a regra NÃO enfraquece. Um 4xx veio do fio: foi observado, não
+    inferido, e continua contando para o limiar em qualquer host — inclusive num
+    que responde 200 para URLs que não tem."""
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/a", "/b", "/c")))
+    for caminho in ("/a", "/b", "/c"):
+        rotas[caminho] = (404, {}, "")
+    rotas.default = (200, {}, ERRO_404)
+
+    r = count_broken_nav_links(base + "/")
+
+    assert r.status is Status.FAIL
+    assert (r.count, len(r.broken)) == (3, 3)
+    assert r.not_found_regime == "fingerprint"
+
+
+def test_um_link_parecido_com_a_pagina_de_erro_nao_completa_o_limiar(server):
+    """O inverso do que a versão anterior fixava, e de propósito.
+
+    Antes, "dois 404 duros mais um link servindo a página de erro" somava três e
+    saía FAIL. Isso é um contador de coisas observadas somado a um contador de
+    coisas inferidas, e é assim que uma inferência atravessa o limiar sozinha
+    quando o menu tem três categorias vazias. Os dois 404 são um defeito
+    (WARNING); o terceiro link é reportado à parte, como não verificado."""
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/a", "/b", "/c")))
+    rotas["/a"] = (404, {}, "")
+    rotas["/b"] = (404, {}, "")
+    rotas.default = (200, {}, ERRO_404)
+
+    r = count_broken_nav_links(base + "/")
+
+    assert r.status is Status.WARNING
+    assert (r.count, len(r.broken), len(r.same_as_not_found)) == (2, 2, 1)
+    assert BROKEN_NAV_FAIL_THRESHOLD == 3
+
+
+def test_pagina_real_em_host_de_soft_404_tambem_fica_sem_verificacao(server):
+    """Num host que responde 200 para uma URL que não existe, um 200 não prova
+    página nenhuma — e isso vale para os links que NÃO parecem a página de erro
+    tanto quanto para os que parecem. É essa simetria que tira a decisão das
+    mãos da moeda: os dois desfechos da comparação pesam igual."""
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/sobre", "/blog", "/loja", "/sumiu")))
+    rotas["/sobre"] = (200, {}, pagina("Sobre"))
+    rotas["/blog"] = (200, {}, pagina("Blog"))
+    rotas["/loja"] = (200, {}, pagina("Loja"))
+    rotas.default = (200, {}, ERRO_404)
+
+    r = count_broken_nav_links(base + "/")
+
+    assert r.status is Status.MISSING
+    assert [link.url for link in r.same_as_not_found] == [base + "/sumiu"]
+    assert [link.url for link in r.unverified] == [base + "/sobre", base + "/blog", base + "/loja"]
+    assert (r.count, r.broken) == (0, [])
+
+
+def test_conter_o_texto_da_pagina_de_erro_nao_e_ser_a_pagina_de_erro(server):
+    """A igualdade é exata, e substring nos dois sentidos passa por ela.
+
+    Duas páginas reais que dividem a redação do template de erro — uma busca
+    vazia que repete a frase e uma página de ajuda que a repete e continua —
+    seriam reconhecidas como a página de erro se a comparação fosse `in`. `/c`
+    está aqui para o teste não passar por vazio: a igualdade exata continua
+    reconhecendo o que É a página de erro."""
+    base, rotas = server
+    erro = "Nada encontrado. Tente a busca ou volte para a home."
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/a", "/b", "/c")))
+    rotas["/a"] = (200, {}, pagina_simples(erro + " Ou escreva para o autor."))
+    rotas["/b"] = (200, {}, pagina_simples("Tente a busca ou volte para a home."))
+    rotas["/c"] = (200, {}, pagina_simples(erro))
+    rotas.default = (200, {}, pagina_simples(erro))
+
+    r = count_broken_nav_links(base + "/")
+
+    assert [link.url for link in r.same_as_not_found] == [base + "/c"]
+    assert [link.url for link in r.unverified] == [base + "/a", base + "/b"]
+
+
+def test_prefixo_igual_ao_da_pagina_de_erro_nao_e_ser_a_pagina_de_erro(server):
+    """Um artigo sobre páginas de erro abre com a mesma frase que a página de
+    erro do site. Comparado por prefixo ele VIRA a página de erro; comparado por
+    igualdade, não. `/c` prova que a igualdade continua reconhecendo o caso real.
+    """
+    base, rotas = server
+    erro = "Nada encontrado. Tente a busca ou volte para a home."
+    artigo = "Nada encontrado. Tenho visto esse aviso em muitos sites e resolvi escrever."
+    assert erro[:20] == artigo[:20]
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/a", "/c")))
+    rotas["/a"] = (200, {}, pagina_simples(artigo))
+    rotas["/c"] = (200, {}, pagina_simples(erro))
+    rotas.default = (200, {}, pagina_simples(erro))
+
+    r = count_broken_nav_links(base + "/")
+
+    assert [link.url for link in r.same_as_not_found] == [base + "/c"]
+    assert [link.url for link in r.unverified] == [base + "/a"]
+
+
+@pytest.mark.parametrize(
+    "com_sugestao", ["page", "9x7"], ids=["primeira_sonda_maior", "segunda_sonda_maior"]
+)
+def test_uma_pagina_de_erro_contida_na_outra_nao_vira_impressao_digital(server, com_sugestao):
+    """As duas sondas se comparam por igualdade, e substring passa por ela nos
+    dois sentidos.
+
+    Os dois caminhos de sonda diferem de forma de propósito (ver
+    NOT_FOUND_PROBE_PATHS). Um CMS que oferece "você quis dizer" para o caminho
+    que lembra uma página real e nada para o que não lembra devolve duas páginas
+    de erro em que uma É a outra mais uma frase. Comparadas por substring viram
+    uma só, e a impressão digital passa a ser um texto que este host serve para
+    UM caminho — de onde saem acusações contra os links que servem o outro."""
+    base, rotas = server
+    erro = "Nada encontrado neste endereço."
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/a", "/b")))
+
+    def erro_com_sugestao(metodo, caminho):
+        extra = " Você quis dizer /pagina-inicial?" if com_sugestao in caminho else ""
+        return (200, {}, pagina_simples(erro + extra))
+
+    rotas.default = erro_com_sugestao
+
+    r = count_broken_nav_links(base + "/")
+
+    assert r.not_found_regime == "opaque"
+    assert "different page for each such url" in frases(r)
+    assert r.same_as_not_found == []
+    assert [link.url for link in r.unverified] == [base + "/a", base + "/b"]
+
+
+def test_status_diferente_entre_as_sondas_nao_vira_impressao_digital(server):
+    """Mesmo arquivo de erro, status diferente — e isso não é uma impressão
+    digital, é um host cujo código de status não diz se a página está lá.
+
+    Real: o servidor web entrega o arquivo de erro com 404 para o que não chega
+    ao CMS, e o CMS entrega o MESMO html com 200 para o que chega. Comparando só
+    o texto, os dois viram "a página que este host serve para nada", e um link
+    que sirva esse html passa a ser acusado com base num par que nem sequer
+    concordou sobre o status.
+
+    As duas sondas são endereçadas pelo nome porque o caso É sobre elas
+    discordarem: sem escolher qual das duas recebe qual status não há como
+    chegar ao ramo de forma determinística."""
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/a", "/b")))
+    segunda_sonda = "/" + NOT_FOUND_PROBE_PATHS[1]
+
+    def rota_inconsistente(metodo, caminho):
+        return (404 if caminho == segunda_sonda else 200, {}, ERRO_404)
+
+    rotas.default = rota_inconsistente
+
+    r = count_broken_nav_links(base + "/")
+
+    assert r.not_found_regime == "opaque"
+    assert "status codes do not say whether a page is there" in frases(r)
+    assert r.same_as_not_found == []
+    assert [link.url for link in r.unverified] == [base + "/a", base + "/b"]
+
+
+def test_duas_paginas_reais_identicas_nao_viram_erro_em_host_honesto(server):
+    """Sem soft 404 no host não há impressão digital, e duas páginas com o mesmo
+    texto continuam sendo páginas. O sinal não é "duas respostas iguais"."""
+    base, rotas = server
+    igual = pagina("Serviços")
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/a", "/b")))
+    rotas["/a"] = (200, {}, igual)
+    rotas["/b"] = (200, {}, igual)
+
+    r = count_broken_nav_links(base + "/")
+
+    assert (r.count, r.same_as_not_found, r.unverified) == (0, [], [])
+    assert r.passed is True
+
+
+def test_template_de_erro_que_ecoa_a_url_nao_e_aprovado_nem_reprovado(server):
+    """O host responde 200 para uma URL que não existe — soft 404 provado — mas a
+    página de erro imprime o caminho pedido, então cada resposta é diferente e
+    não sobra impressão digital nenhuma para comparar.
+
+    Chutar "é erro" inventaria três falhas e cruzaria BROKEN_NAV_FAIL_THRESHOLD
+    sobre um site que funciona; chutar "é página" é exatamente o buraco de
+    origem. MISSING: observado, não decidido, `passed` falso, fora do exit 0 — e
+    a contagem de quebrados continua em zero em vez de absorver os três."""
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/a", "/b", "/c")))
+    rotas.default = lambda metodo, caminho: (
+        200,
+        {},
+        pagina("Não encontrado", corpo=f"Nada em {caminho}. Volte para a home."),
+    )
+
+    r = count_broken_nav_links(base + "/")
+
+    assert r.status is Status.MISSING
+    assert [link.url for link in r.unverified] == [base + "/a", base + "/b", base + "/c"]
+    assert (r.count, r.broken, r.same_as_not_found) == (0, [], [])
+    assert r.passed is False
+    # Nem reprovação: nada foi demonstrado quebrado, então isto não sozinho
+    # barra o veredito "pronto" como um FAIL barraria.
+    assert r.blocks_readiness is False
+    assert "neither working nor broken" in frases(r)
+
+
+def test_sonda_que_nao_responde_deixa_os_links_sem_verificacao(server):
+    """Se a sonda não chega, não se sabe o que este host responde para uma URL
+    que não existe, e aí um 200 não prova página nenhuma. Os links pedidos
+    responderam — quem falhou foi a requisição extra —, então não é ERROR; mas
+    aprovar seria afirmar o que não foi observado."""
+    base, rotas = server
+
+    def derruba_a_sonda(metodo, caminho):
+        raise ConnectionAbortedError("simula conexão cortada na sonda")
+
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/p")))
+    rotas["/p"] = (200, {}, pagina("P"))
+    rotas.default = derruba_a_sonda
+
+    r = count_broken_nav_links(base + "/")
+
+    assert r.status is Status.MISSING
+    assert [link.url for link in r.unverified] == [base + "/p"]
+    assert r.unresolved == []
+    assert "could not be fetched" in frases(r)
+
+
+def test_pagina_de_erro_em_branco_nao_serve_de_impressao_digital(server):
+    """Um documento sem texto casa com toda resposta sem texto — um PDF no menu,
+    uma página vazia — e viraria acusação sobre evidência nenhuma. Sem nada para
+    reconhecer, o desfecho é o terceiro, e a segunda sonda nem sai: seja lá o que
+    ela respondesse, página em branco não reconhece link nenhum."""
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/a")))
+    rotas["/a"] = (200, {}, pagina("A"))
+    rotas.default = (200, {}, "<html><body></body></html>")
+
+    rotas.received.clear()
+    r = count_broken_nav_links(base + "/")
+
+    assert r.status is Status.MISSING
+    assert [link.url for link in r.unverified] == [base + "/a"]
+    assert r.same_as_not_found == []
+    assert "no readable text" in frases(r)
+    # 1 home + 1 link + 1 sonda.
+    assert len(rotas.received) == 3
+
+
+def test_a_sonda_custa_uma_requisicao_no_host_honesto_e_duas_no_suspeito(server):
+    """Custo declarado, medido no fio. O host que gasta um 404 num caminho que
+    não existe se resolve na PRIMEIRA sonda; a segunda só sai contra host que já
+    se provou soft 404, e serve só para separar "template estável, dá para
+    reconhecer" de "template que ecoa a URL, não dá" — uma distinção que muda a
+    frase impressa, não o veredito."""
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/a", "/b", "/c")))
+    for caminho in ("/a", "/b", "/c"):
+        rotas[caminho] = (200, {}, pagina(caminho))
+
+    rotas.received.clear()
+    honesto = count_broken_nav_links(base + "/")
+    # 1 home + 3 links + 1 sonda.
+    assert len(rotas.received) == 5
+    assert honesto.passed is True
+
+    rotas.default = (200, {}, ERRO_404)
+    rotas.received.clear()
+    suspeito = count_broken_nav_links(base + "/")
+    # 1 home + 3 links + 2 sondas. O acréscimo não escala com o menu.
+    assert len(rotas.received) == 6
+    # As MESMAS três páginas reais, e agora sem verificação: o que mudou não foi
+    # o menu, foi o que um 200 vale neste host.
+    assert suspeito.passed is False
+    assert len(suspeito.unverified) == 3
+
+
+def test_menu_vazio_nao_gasta_sonda(server):
+    """Sem link nenhum para classificar não há o que perguntar ao host."""
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa"))
+
+    rotas.received.clear()
+    r = count_broken_nav_links(base + "/")
+
+    assert r.found == 0
+    assert len(rotas.received) == 1
+
+
+def test_sonda_recebida_de_fora_nao_e_pedida_de_novo(server):
+    """check_completeness pergunta uma vez e entrega a resposta às duas
+    sub-checagens. Se esta função pedisse de novo, a coerência entre as duas
+    linhas do relatório sairia de graça mas custaria duas requisições por
+    auditoria — e as duas respostas poderiam divergir."""
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/a")))
+    rotas["/a"] = (200, {}, pagina("A"))
+    rotas.default = (200, {}, ERRO_404)
+
+    sonda = _probe_not_found(as_base_publico(base + "/"), session=requests.Session(), timeout=5)
+    rotas.received.clear()
+    r = count_broken_nav_links(base + "/", not_found=sonda)
+
+    # 1 home + 1 link, e nenhuma sonda.
+    assert len(rotas.received) == 2
+    assert r.not_found_regime == "fingerprint"
+    assert [link.url for link in r.unverified] == [base + "/a"]
+
+
+# ---------------------------------------------------------------------------
+# check_trust_pages — a mesma pergunta, o mesmo host, o mesmo relatório
+# ---------------------------------------------------------------------------
+
+
+def test_pagina_de_confianca_que_e_a_pagina_de_erro_nao_e_aprovada(server):
+    """Um relatório não pode se contradizer sobre o mesmo host.
+
+    check_trust_pages roda ANTES e sem a sonda, então `/about` e `/contact`
+    saíam [PASS] — o template de erro tem texto de sobra para não ser stub — no
+    mesmo relatório cuja linha de navegação, quatro linhas abaixo, declarava que
+    aquela página é o que este host serve para uma URL que não existe.
+
+    A sonda passa a ser perguntada uma vez em check_completeness e entregue às
+    duas. Aqui ela é usada como EXCLUSÃO — não é esta página, continue
+    procurando —, que é o mesmo movimento que `_is_home_again` já fazia e o único
+    uso são desta igualdade."""
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa"))
+    rotas.default = (200, {}, ERRO_404_LONGO)
+
+    relatorio = check_completeness(base + "/")
+
+    assert relatorio.trust.pages["about"].status is Status.MISSING
+    assert relatorio.trust.pages["contact"].status is Status.MISSING
+    # E o relatório diz em que base as páginas foram julgadas, em vez de deixar
+    # as duas linhas se contradizerem em silêncio.
+    assert "judged on the content they served" in frases(relatorio.trust)
+
+
+def test_pagina_de_confianca_real_continua_aprovada_em_host_de_soft_404(server):
+    """A exclusão é estreita de propósito. Um host pode servir soft 404 e ainda
+    ter uma página /sobre de verdade, e ela não vira MISSING por causa do
+    vizinho: o que a descarta é ser IDÊNTICA à página servida para nada."""
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa"))
+    rotas["/about"] = (200, {}, pagina("Sobre"))
+    rotas.default = (200, {}, ERRO_404_LONGO)
+
+    relatorio = check_completeness(base + "/")
+
+    assert relatorio.trust.pages["about"].status is Status.OK
+    assert relatorio.trust.pages["about"].url == base + "/about"
+
+
+def test_pagina_de_confianca_sobrevive_a_um_host_sem_impressao_digital(server):
+    """O regime "opaque" não descarta nada, e é fácil escrever a exclusão como
+    se descartasse.
+
+    Aqui o template de erro ecoa o endereço pedido, então não há uma página para
+    reconhecer — e uma exclusão que valesse para todo host não honesto jogaria
+    fora um /about que existe e tem texto. A comparação é contra UMA página
+    conhecida ou contra nada."""
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa"))
+    rotas["/about"] = (200, {}, pagina("Sobre"))
+    rotas.default = lambda metodo, caminho: (
+        200, {}, pagina("Não encontrado", corpo=f"Nada em {caminho}. Volte para a home."),
+    )
+
+    relatorio = check_completeness(base + "/")
+
+    assert relatorio.nav.not_found_regime == "opaque"
+    assert relatorio.trust.pages["about"].status is Status.OK
+    assert relatorio.trust.pages["about"].url == base + "/about"
 
 
 # ---------------------------------------------------------------------------

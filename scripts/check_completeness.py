@@ -167,9 +167,27 @@ def main() -> int:
         lines.append(Line("navigation", Status.ERROR, [unread], requirement="ADS-COMPLETE-01"))
     else:
         evidence = [f"{link.url} -> HTTP {link.status_code}" for link in nav.broken]
+        # Printed per link and not as a group, unlike the line below, because
+        # what was compared differs from link to link and the reader is entitled
+        # to disbelieve "HTTP 200, and yet" without being shown the comparison.
+        # It says "unverified", never "broken": the same equality holds for a
+        # real page that renders the site's "nothing here" template.
+        evidence += [
+            f"{link.url} -> HTTP {link.status_code}, unverified: {link.reason}"
+            for link in nav.same_as_not_found
+        ]
         # Unresolved links raise the status to ERROR and used to contribute no
         # evidence, so the fallback fired and an [ERR] line read "none broken".
         evidence += [f"{link.url} -> unresolved ({link.reason})" for link in nav.unresolved]
+        if nav.unverified:
+            # One line for the group: the reason is a single observation about
+            # the host, not a fact about each link. Printing it per link would
+            # bury the URLs under the same sentence repeated.
+            evidence.append(
+                f"{len(nav.unverified)} link(s) answered HTTP 200 but were shown to be neither "
+                f"working nor broken — {nav.unverified_reason} — and are counted as neither: "
+                + ", ".join(link.url for link in nav.unverified[:5])
+            )
         if nav.truncated:
             # "25 links followed, none broken" over a 32-link menu with three
             # 404s past the limit. The count is a lower bound and has to say so
@@ -179,13 +197,36 @@ def main() -> int:
                 " the rest were not checked, so the broken count is a lower bound"
             )
         elif not evidence:
-            evidence = [f"all {nav.checked} navigation links followed, none broken"]
+            # A pass has to name what makes it a pass. "None broken" over a host
+            # that answers 200 for every URL it does not have is the soft-404
+            # hole, so the line states which of the two things was observed.
+            # "honest" is the only regime with an entry, and that is the point.
+            # It used to also claim, for "fingerprint", that "none of these
+            # links served the page it answers with" — a proof the code cannot
+            # give, since a host with two not-found templates (a CMS mounted at
+            # /blog/) matches neither and exits 0 under that sentence. On any
+            # host that answers 200 for a URL it does not have, every 200 is now
+            # recorded as unverified, so this branch is unreachable there:
+            # `evidence` is never empty. Nothing left to word carefully.
+            proof = {
+                "honest": "; this host answers 4xx for a URL that does not exist, so HTTP 200 "
+                          "means the page is there",
+            }.get(nav.not_found_regime, "")
+            evidence = [f"all {nav.checked} navigation links followed, none broken{proof}"]
         lines.append(
             Line(
                 "navigation",
                 nav.status,
                 evidence,
-                {"found": nav.found, "checked": nav.checked, "broken": len(nav.broken)},
+                # `lead_nowhere` used to sit here beside `http_4xx_5xx` carrying
+                # a different number, the difference being the links this check
+                # had merely inferred were dead. It no longer infers any, so the
+                # two would now be the same column printed twice.
+                {"found": nav.found, "checked": nav.checked,
+                 "http_4xx_5xx": nav.count,
+                 "same_as_not_found": len(nav.same_as_not_found),
+                 "unverified": len(nav.unverified),
+                 "not_found_regime": nav.not_found_regime or "not probed"},
                 # Counting links that 404 is ADS-COMPLETE-01's "site looks
                 # abandoned", which is what count_broken_nav_links' own docstring
                 # says. ADS-UX-01 is a `judgement` requirement about readability,
