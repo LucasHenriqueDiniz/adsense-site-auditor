@@ -153,6 +153,15 @@ class Fetch:
         return Status.OK
 
 
+# The longest wait this machine can represent. urllib3 hands a timeout to
+# `socket.settimeout`, and CPython converts seconds to a signed 64-bit nanosecond
+# count, so anything at or above 2**63 nanoseconds raises OverflowError rather
+# than waiting. `time.sleep` shares the ceiling, which is why the crawler's delay
+# is measured against it too. Bisected, not assumed: 9223372036.854774 is
+# accepted and 9223372036.854776 is not.
+MAX_WAIT_SECONDS = 2**63 / 1e9
+
+
 def _reject_invalid_timeout(timeout: object) -> None:
     """Raise on a `timeout` no HTTP client here can use. Silent when it is fine.
 
@@ -166,6 +175,10 @@ def _reject_invalid_timeout(timeout: object) -> None:
 
     It runs urllib3's own validator rather than a hand-rolled `<= 0`, on the same
     shapes requests accepts, so "usable here" cannot drift from "usable there".
+    urllib3 only refuses timeouts at or below zero, so the ceiling is checked
+    here as well: `float("inf")` passed its validator and then raised
+    OverflowError out of `socket.settimeout`, which is neither a ValueError this
+    function can be said to have allowed through nor an error about a URL.
     """
     if isinstance(timeout, Urllib3Timeout):
         return
@@ -178,8 +191,22 @@ def _reject_invalid_timeout(timeout: object) -> None:
                 "or a single float to set both timeouts to the same value."
             ) from None
         Urllib3Timeout(connect=connect, read=read)
+        _reject_unwaitable(connect)
+        _reject_unwaitable(read)
         return
     Urllib3Timeout(connect=timeout, read=timeout)
+    _reject_unwaitable(timeout)
+
+
+def _reject_unwaitable(seconds: object) -> None:
+    """Raise on a duration past what `socket.settimeout` can represent."""
+    if seconds is None:
+        return
+    if not isinstance(seconds, (int, float)) or seconds >= MAX_WAIT_SECONDS:
+        raise ValueError(
+            f"Attempted to set a timeout of {seconds!r} seconds, but the timeout "
+            f"cannot be set to a value at or above {MAX_WAIT_SECONDS}."
+        )
 
 
 def fetch(

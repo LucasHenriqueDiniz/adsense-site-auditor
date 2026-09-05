@@ -1,8 +1,9 @@
 """Testes da camada de fetch — cada um corresponde a um defeito reproduzido."""
 
+import math
 import time
 
-from adsense_checks.http import fetch
+from adsense_checks.http import MAX_WAIT_SECONDS, fetch
 from adsense_checks.status import Status
 
 
@@ -369,6 +370,10 @@ def test_timeout_zero_continua_levantando_em_vez_de_virar_erro_de_rede():
         (0, 5),
         (5, 0),
         (1, 2, 3),
+        float("inf"),
+        MAX_WAIT_SECONDS,
+        (MAX_WAIT_SECONDS, 5),
+        (5, MAX_WAIT_SECONDS),
     ],
 )
 def test_timeout_inutilizavel_levanta_antes_de_qualquer_requisicao(server, timeout):
@@ -387,3 +392,21 @@ def test_timeout_inutilizavel_levanta_antes_de_qualquer_requisicao(server, timeo
         fetch(base + "/", timeout=timeout)
 
     assert routes.received == []
+
+
+def test_o_maior_timeout_que_a_maquina_aguenta_continua_sendo_aceito(server):
+    """O contrapeso de `MAX_WAIT_SECONDS` na lista acima, fixado pelo valor.
+
+    Sem este teste o teto pode encolher à vontade — recusar `inf` continuaria
+    passando com um teto de um segundo. `socket.settimeout` converte segundos
+    para nanossegundos num inteiro de 64 bits com sinal, então o último valor
+    representável é o vizinho de baixo de 2**63 ns em float. Medido por bisseção,
+    não lido de manual: 9223372036.854774 passa, 9223372036.854776 não.
+    """
+    base, routes = server
+    routes["/"] = (200, {"Content-Type": "text/html"}, "<html>ok</html>")
+
+    r = fetch(base + "/", timeout=math.nextafter(MAX_WAIT_SECONDS, 0))
+
+    assert r.ok
+    assert routes.received != []

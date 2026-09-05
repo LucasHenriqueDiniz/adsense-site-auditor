@@ -13,7 +13,7 @@ from adsense_checks.crawl import (  # noqa: E402
     check_session_urls,
     crawl,
 )
-from adsense_checks.http import DEFAULT_TIMEOUT  # noqa: E402
+from adsense_checks.http import DEFAULT_TIMEOUT, MAX_WAIT_SECONDS  # noqa: E402
 from adsense_checks.report import Line, exit_code, render  # noqa: E402
 
 __doc__ = """Crawl a site and check reachability, redirects and URL stability.
@@ -22,16 +22,6 @@ Serves ADS-CRAWL-01, ADS-CRAWL-04 and ADS-CRAWL-05.
 
     python scripts/crawl_site.py https://example.com [--depth 2] [--max-pages 50] [-v]
 """
-
-# The first duration this process cannot wait out. CPython converts seconds to a
-# signed 64-bit count of nanoseconds before waiting on anything, so both waits
-# this script asks for share one ceiling: `time.sleep`, which `crawl` uses for
-# `--delay`, and `socket.settimeout`, where `--timeout` ends up by way of
-# urllib3, each accept 9223372036.854774 and raise "OverflowError: timestamp out
-# of range for platform time_t" from 2**63 nanoseconds up, `inf` included.
-# Bisected against both calls on this platform rather than read off a manual.
-MAX_WAIT_SECONDS = 2**63 / 1e9
-
 
 def _dump_pages(result) -> None:
     """Per-page evidence, under -v.

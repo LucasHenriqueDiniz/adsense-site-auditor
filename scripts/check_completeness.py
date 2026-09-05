@@ -13,7 +13,7 @@ from adsense_checks.completeness import (  # noqa: E402
     check_completeness,
     strong_placeholders,
 )
-from adsense_checks.http import DEFAULT_TIMEOUT  # noqa: E402
+from adsense_checks.http import DEFAULT_TIMEOUT, MAX_WAIT_SECONDS  # noqa: E402
 from adsense_checks.report import Line, exit_code, render  # noqa: E402
 from adsense_checks.status import Status, worst  # noqa: E402
 
@@ -28,15 +28,6 @@ navigation), ADS-UX-05 (the trust pages exist and are not stubs) and
 ADS-AUTHOR-02 (a contact channel exists in the HTML). ADS-AUTHOR-01 — a
 verifiable real name behind the site — is `judgement` and no script decides it.
 """
-
-# The first duration a socket timeout cannot hold. CPython converts seconds to a
-# signed 64-bit count of nanoseconds before waiting on anything, so
-# `socket.settimeout` — where `--timeout` ends up, by way of urllib3 — accepts
-# 9223372036.854774 and raises "OverflowError: timestamp out of range for
-# platform time_t" from 2**63 nanoseconds up, `inf` included. Bisected against
-# `socket.settimeout` on this platform rather than read off a manual.
-MAX_WAIT_SECONDS = 2**63 / 1e9
-
 
 def _all_findings(report: CompletenessReport) -> list[Finding]:
     """Every finding recorded anywhere in the report.

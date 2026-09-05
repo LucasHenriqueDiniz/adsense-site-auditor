@@ -27,7 +27,7 @@ a sample that never grew past the homepage is `MISSING`, not "all pages fine".
 ## Quick start
 
 ```bash
-uv pip install -e .          # only dependency is requests
+uv pip install -e .          # requests, and urllib3 that comes with it
 python scripts/check_completeness.py https://example.com
 ```
 

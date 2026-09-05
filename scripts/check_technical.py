@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from adsense_checks.http import (  # noqa: E402
     DEFAULT_TIMEOUT,
+    MAX_WAIT_SECONDS,
     Fetch,
     fetch,
     join_url,
@@ -44,15 +45,6 @@ from adsense_checks.status import Status, escalate  # noqa: E402
 # limit. Stated here rather than inlined so the reader of a WARNING can see what
 # it was measured against. `Fetch.elapsed_ms` covers the whole redirect chain.
 SLOW_RESPONSE_MS = 2500
-
-# The first duration a socket timeout cannot hold. CPython converts seconds to a
-# signed 64-bit count of nanoseconds before waiting on anything, so
-# `socket.settimeout` — where `--timeout` ends up, by way of urllib3 — accepts
-# 9223372036.854774 and raises "OverflowError: timestamp out of range for
-# platform time_t" from 2**63 nanoseconds up, `inf` included. Bisected against
-# `socket.settimeout` on this platform rather than read off a manual.
-MAX_WAIT_SECONDS = 2**63 / 1e9
-
 
 _REQ_ROBOTS = "ADS-CRAWL-02"
 
