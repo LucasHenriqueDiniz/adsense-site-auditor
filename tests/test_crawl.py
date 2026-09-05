@@ -1339,3 +1339,50 @@ def test_pagina_com_exatamente_400_nao_e_alcancavel(server):
         routes["/x"] = (codigo, HTML, "")
         r = crawl(base + "/", max_depth=1, delay=0, respect_robots=False)
         assert check_pages_reachable(r).status is esperado, codigo
+
+
+# --------------------------------------------------------------------------
+# Conteúdo das coleções de configuração. Cada uma leva DUAS asserções: uma
+# contagem literal, que pega a remoção de uma entrada, e uma iteração sobre as
+# entradas, que pega uma entrada que não funciona. Iterar sozinho seria
+# auto-referencial — sumindo a entrada, some o caso de teste junto.
+# --------------------------------------------------------------------------
+
+
+def test_todo_sufixo_de_asset_e_reconhecido_como_asset():
+    from adsense_checks.crawl import _ASSET_SUFFIXES, _looks_like_asset
+
+    assert len(_ASSET_SUFFIXES) == 50
+    for sufixo in _ASSET_SUFFIXES:
+        assert sufixo.startswith(".") and sufixo == sufixo.lower(), sufixo
+        assert _looks_like_asset(f"https://ex.com/arquivo{sufixo}"), sufixo
+        # E maiúsculas na URL não escapam do filtro.
+        assert _looks_like_asset(f"https://ex.com/A{sufixo.upper()}"), sufixo
+    # Uma página comum não é asset.
+    assert not _looks_like_asset("https://ex.com/sobre")
+
+
+def test_todo_sufixo_de_documento_faz_o_ultimo_segmento_ser_arquivo():
+    from adsense_checks.crawl import _DOCUMENT_SUFFIXES, looks_like_document
+
+    assert len(_DOCUMENT_SUFFIXES) == 27
+    for sufixo in _DOCUMENT_SUFFIXES:
+        assert "." not in sufixo, sufixo  # a lista guarda a extensão sem ponto
+        assert looks_like_document(f"/pasta/pagina.{sufixo}"), sufixo
+        assert looks_like_document(f"/pasta/PAGINA.{sufixo.upper()}"), sufixo
+    # E um diretório com ponto no nome continua sendo diretório.
+    assert not looks_like_document("/v1.0")
+    assert not looks_like_document("/blog.old")
+
+
+def test_toda_tag_nao_textual_tem_o_conteudo_excluido_da_contagem():
+    from adsense_checks.crawl import _NON_TEXT_TAGS, parse_html
+
+    assert len(_NON_TEXT_TAGS) == 7
+    for tag in _NON_TEXT_TAGS:
+        if tag == "head":  # o `<body>` zera o contador; testado à parte
+            continue
+        html = f"<html><body><p>visivel</p><{tag}>escondido</{tag}></body></html>"
+        p = parse_html(html)
+        assert "escondido" not in p.text, tag
+        assert "visivel" in p.text, tag

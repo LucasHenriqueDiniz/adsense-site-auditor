@@ -595,3 +595,85 @@ def test_o_rotulo_e_a_classificacao_concordam_na_fronteira():
     assert "borderline" in describe_depth(300, min_words=300)
     assert classify_depth(299, min_words=300) is Status.WARNING
     assert "below the configured threshold" in describe_depth(299, min_words=300)
+
+
+# --------------------------------------------------------------------------
+# Conteúdo das coleções: contagem literal (pega a remoção) mais iteração sobre
+# as entradas (pega a entrada que não funciona).
+# --------------------------------------------------------------------------
+
+
+def test_todo_elemento_void_nao_engole_o_resto_do_documento():
+    """Sem end tag, um elemento void empilhado nunca desempilha. O parser em
+    árvore tolera isso melhor que o contador que ele substituiu, mas a estrutura
+    muda: o irmão seguinte vira filho dele."""
+    from adsense_checks.text import VOID_ELEMENTS, _parse, extract_text
+
+    assert len(VOID_ELEMENTS) == 14
+    for tag in VOID_ELEMENTS:
+        html = f"<html><body><p>antes</p><{tag} x=1><p>depois</p></body></html>"
+        assert extract_text(html) == "antes depois", tag
+        # E nada fica aberto na pilha por conta dele.
+        doc = _parse(html)
+        assert [n.tag for n in doc.open] == ["#document"], tag
+
+
+def test_todo_elemento_descartado_some_da_extracao():
+    from adsense_checks.text import DROPPED_ELEMENTS, extract_text
+
+    assert len(DROPPED_ELEMENTS) == 8
+    for tag in DROPPED_ELEMENTS:
+        html = f"<html><body><p>visivel</p><{tag}>escondido</{tag}></body></html>"
+        assert "escondido" not in extract_text(html), tag
+        assert "visivel" in extract_text(html), tag
+
+
+def test_todo_elemento_inline_nao_parte_uma_palavra():
+    """"Hyper<em>text</em>" é uma palavra, não duas: um separador aqui inventa
+    uma palavra que não está na página."""
+    from adsense_checks.text import INLINE_ELEMENTS, extract_text, word_count
+
+    assert len(INLINE_ELEMENTS) == 34
+    for tag in INLINE_ELEMENTS:
+        html = f"<p>hyper<{tag}>texto</{tag}></p>"
+        assert extract_text(html) == "hypertexto", tag
+        assert word_count(extract_text(html)) == 1, tag
+
+
+def test_todo_container_de_conteudo_pode_vencer_a_pontuacao():
+    from adsense_checks.text import CONTENT_CONTAINERS, main_content_text
+
+    assert len(CONTENT_CONTAINERS) == 6
+    for tag in CONTENT_CONTAINERS:
+        if tag in ("body", "main"):  # atalhos próprios do heurístico
+            continue
+        html = (f"<html><body><nav><a href=/x>menu</a></nav>"
+                f"<{tag}><p>{' '.join(['conteudo'] * 40)}</p></{tag}></body></html>")
+        assert "menu" not in main_content_text(html), tag
+        assert main_content_text(html).count("conteudo") == 40, tag
+
+
+def test_todo_elemento_de_pagina_inteira_significa_nada_isolado():
+    """Vencer a pontuação com um destes é o heurístico dizendo que não separou
+    nada — e `measure_depth` reporta isso como ERROR em vez de medir o menu."""
+    from adsense_checks.text import WHOLE_PAGE_ELEMENTS, measure_depth
+
+    assert sorted(WHOLE_PAGE_ELEMENTS) == ["#document", "body", "html"]
+    html = "<html><body><p>" + " ".join(["palavra"] * 400) + "</p></body></html>"
+    d = measure_depth(html)
+    assert d.status is Status.ERROR
+    assert "main content not isolated" in d.reason
+
+
+def test_todo_id_de_mount_conhecido_identifica_uma_casca():
+    from adsense_checks.text import _MOUNT_IDS, looks_javascript_rendered
+
+    assert len(_MOUNT_IDS) == 6
+    for ident in _MOUNT_IDS:
+        html = ('<html><head><script src="/b.js"></script></head>'
+                f'<body><div id="{ident}"></div></body></html>')
+        assert looks_javascript_rendered(html) is True, ident
+    # Um id desconhecido não é casca só por estar vazio.
+    assert looks_javascript_rendered(
+        '<html><head><script src="/b.js"></script></head>'
+        '<body><div id="conteudo-principal"></div></body></html>') is False

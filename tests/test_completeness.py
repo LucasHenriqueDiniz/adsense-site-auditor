@@ -987,3 +987,75 @@ def test_toda_entrada_de_ABOUT_PATHS_e_CONTACT_PATHS_vira_candidato():
         cands = _candidates(home, doc, "http://ex.com/", paths, hint, 6)
         convencionais = [c.url for c in cands if not c.declared]
         assert convencionais == [f"http://ex.com/{p}" for p in esperado[chave]], chave
+
+
+# --------------------------------------------------------------------------
+# Conteúdo das coleções: contagem literal mais iteração comportamental.
+# --------------------------------------------------------------------------
+
+
+def test_todo_host_social_conhecido_conta_como_canal():
+    from adsense_checks.completeness import _SOCIAL_HOSTS, find_contact_channels
+
+    assert len(_SOCIAL_HOSTS) == 12
+    for host in _SOCIAL_HOSTS:
+        canais = find_contact_channels(f'<a href="https://{host}/eu">eu</a>')
+        assert canais.socials, host
+        assert canais.any_found, host
+        # E o subdomínio do mesmo serviço também.
+        assert find_contact_channels(f'<a href="https://www.{host}/eu">eu</a>').socials, host
+    # Substring não basta: era o defeito que `_is_social_host` existe para matar.
+    assert not find_contact_channels('<a href="https://netflix.com/eu">eu</a>').socials
+    assert not find_contact_channels('<a href="https://x.com.evil.test/eu">eu</a>').socials
+
+
+def test_toda_tag_pulada_some_do_texto_visivel():
+    from adsense_checks.completeness import _SKIP_TAGS, visible_text
+
+    assert len(_SKIP_TAGS) == 6
+    for tag in _SKIP_TAGS:
+        html = f"<body><p>visivel</p><{tag}>escondido</{tag}></body>"
+        assert "escondido" not in visible_text(html), tag
+        assert "visivel" in visible_text(html), tag
+
+
+def test_toda_tag_de_bloco_separa_o_texto_dos_vizinhos():
+    """Sem a separação, "fim" e "comeco" viram "fimcomeco" — uma palavra que não
+    está em página nenhuma."""
+    from adsense_checks.completeness import _BLOCK_TAGS, parse_document
+
+    assert len(_BLOCK_TAGS) == 37
+    for tag in _BLOCK_TAGS:
+        doc = parse_document(f"<body>fim<{tag}>comeco</{tag}></body>")
+        assert "fimcomeco" not in doc.text, tag
+
+
+def test_todo_heading_e_bloco_curto_por_natureza():
+    """Um heading domina o próprio bloco por ser heading, não por ser curto: é
+    o que faz "Coming soon" num `<h2>` longo continuar sendo marcador forte."""
+    from adsense_checks.completeness import _HEADING_TAGS, Block
+
+    assert len(_HEADING_TAGS) == 8
+    longo = " ".join(["palavra"] * 80)
+    for tag in _HEADING_TAGS:
+        assert Block(tag=tag, text=longo).is_short is True, tag
+    assert Block(tag="p", text=longo).is_short is False
+
+
+def test_toda_tag_de_regiao_pode_definir_a_regiao_de_um_link():
+    from adsense_checks.completeness import _REGION_TAGS, parse_document
+
+    assert len(_REGION_TAGS) == 9
+    # A TAG vence a classe: `<nav class="rodape">` é navegação, não rodapé.
+    por_tag = {"footer": "footer", "nav": "nav", "header": "nav"}
+    for tag in _REGION_TAGS:
+        doc = parse_document(f'<body><{tag} class="rodape"><a href="/x">x</a></{tag}></body>')
+        assert doc.links[0].region == por_tag.get(tag, "footer"), tag
+
+    # E as que não têm região própria pegam a da classe, nos dois idiomas.
+    for tag in _REGION_TAGS - set(por_tag):
+        for classe, esperado in (("rodape", "footer"), ("footer", "footer"),
+                                 ("menu", "nav"), ("nav", "nav")):
+            doc = parse_document(
+                f'<body><{tag} class="{classe}"><a href="/x">x</a></{tag}></body>')
+            assert doc.links[0].region == esperado, (tag, classe)
