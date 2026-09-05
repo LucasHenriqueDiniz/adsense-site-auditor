@@ -972,8 +972,18 @@ def test_toda_entrada_de_ABOUT_PATHS_e_CONTACT_PATHS_vira_candidato():
                  text=html, headers={"content-type": "text/html"})
     doc = parse_document(html)
 
-    for paths, hint in ((ABOUT_PATHS, _ABOUT_HINT), (CONTACT_PATHS, _CONTACT_HINT)):
+    # Os caminhos são listados aqui LITERALMENTE. `== len(paths)` seria
+    # auto-referencial: remover uma entrada da tupla derruba os dois lados e o
+    # teste passa — é a mesma armadilha que esta suíte já corrigiu em quatro
+    # outros testes, e escrevi mais uma sem perceber.
+    esperado = {
+        "about": ["about", "about/", "about-us", "about-me", "sobre", "sobre/",
+                  "sobre-mim", "quem-somos", "pages/about"],
+        "contact": ["contact", "contact/", "contact-us", "contato", "contato/",
+                    "contatos", "fale-conosco", "pages/contact"],
+    }
+    for chave, paths, hint in (("about", ABOUT_PATHS, _ABOUT_HINT),
+                               ("contact", CONTACT_PATHS, _CONTACT_HINT)):
         cands = _candidates(home, doc, "http://ex.com/", paths, hint, 6)
         convencionais = [c.url for c in cands if not c.declared]
-        assert len(convencionais) == len(paths), paths
-        assert len(set(convencionais)) == len(paths)  # e sem repetir nenhum
+        assert convencionais == [f"http://ex.com/{p}" for p in esperado[chave]], chave
