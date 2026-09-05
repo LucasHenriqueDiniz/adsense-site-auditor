@@ -1095,23 +1095,33 @@ def test_body_vence_a_pontuacao_e_isso_e_nada_isolado():
     assert "main content not isolated" in d.reason
 
 
-def test_article_e_main_no_conjunto_de_containers_nao_mudam_saida_nenhuma():
-    """Os dois membros de `CONTENT_CONTAINERS` que não consigo fixar, e por quê.
+def test_article_e_main_pertencem_ao_conjunto_de_containers_por_comportamento():
+    """Os dois membros que quase ficaram presos só por `assert <= CONTENT_CONTAINERS`.
 
     `_main_container` devolve o `<main>` ou o `<article>` mais rico ANTES de
     pontuar, então a pontuação só os alcança quando nenhum dos dois tem uma
-    única palavra — e um `<p>` que dá peso sem dar palavra precisa ser só
-    pontuação, tipo "!!! ???". Nesse documento a saída pública é idêntica com e
-    sem eles no conjunto: `measure_depth` responde
-    `FAIL / "no main content found (0 words)"` dos dois jeitos. Medido tirando
-    cada um do conjunto em tempo de execução.
+    única palavra. Isso parece torná-los inobserváveis pela pontuação — e é
+    falso, por uma assimetria da fonte: `_richest` mede em PALAVRAS e o peso em
+    `credit` mede em CARACTERES. Um `<p>` só de pontuação tem zero palavras, e
+    o atalho o recusa, mas tem peso alto e credita. Com um concorrente ao lado,
+    tirar `article` ou `main` do conjunto vira ERROR ("main content not
+    isolated", 3 palavras) onde deveria ser FAIL.
 
-    O que as duas tags DE FATO decidem é o atalho, e é isso que fica pinado
-    aqui: um `<main>` ou um `<article>` vence um `<div>` muito maior, e entre
-    os dois o `<main>` vem primeiro."""
+    O atalho, que é o que as duas tags decidem no caso comum, segue pinado
+    embaixo: um `<main>` ou um `<article>` vence um `<div>` muito maior."""
     from adsense_checks.text import CONTENT_CONTAINERS
 
     assert {"article", "main"} <= CONTENT_CONTAINERS
+
+    # Um <p> só de pontuação: zero palavras para o atalho, peso alto para a
+    # pontuação. É o único documento em que ser membro do conjunto decide algo.
+    for tag in ("main", "article"):
+        html = (f"<html><body><{tag}><p>{'!' * 400}</p></{tag}>"
+                '<div id="d"><p>palavra palavra palavra</p></div></body></html>')
+        r = measure_depth(html)
+        assert r.status is Status.FAIL, tag
+        assert r.words == 0, tag
+        assert "no main content found" in r.reason, tag
 
     for tag in ("main", "article"):
         html = (f"<html><body><{tag}><p>{_palavras(200)}</p></{tag}>"

@@ -290,6 +290,9 @@ def test_regressao_limiar_padrao_cobre_a_faixa_de_risco_da_rubrica():
     passava.
     """
     assert DEFAULT_SIMILARITY_THRESHOLD == OVERLAP_HIGH_RISK == 0.6
+    # O irmão, pelo valor também: a rubrica publica os dois, e sem isto
+    # `OVERLAP_MONITOR` só estaria preso pela faixa que ele decide.
+    assert OVERLAP_MONITOR == 0.4
 
     # Par com 65.5% de similaridade: risco alto pela rubrica.
     textos = {"/a": janela(1, 100), "/b": janela(21, 100)}
@@ -427,11 +430,18 @@ def test_overlap_usa_containment_quando_o_concorrente_e_mais_longo():
 
 
 def test_overlap_respeita_as_faixas_da_rubrica():
+    """Os valores são literais dos dois lados de propósito.
+
+    Escrito como `overlap_band(OVERLAP_MONITOR)`, todo argumento derivava da
+    constante que a asserção diz prender, e os dois lados se moviam juntos: das
+    dez perturbações das duas constantes, este teste matava zero. Quem matava
+    era sempre outro. A rubrica publica 40% e 60%; é isso que fica aqui.
+    """
     assert overlap_band(0.0) == "safe"
-    assert overlap_band(OVERLAP_MONITOR - 0.01) == "safe"
-    assert overlap_band(OVERLAP_MONITOR) == "monitor"
-    assert overlap_band(OVERLAP_HIGH_RISK - 0.01) == "monitor"
-    assert overlap_band(OVERLAP_HIGH_RISK) == "high-risk"
+    assert overlap_band(0.39) == "safe"
+    assert overlap_band(0.40) == "monitor"
+    assert overlap_band(0.59) == "monitor"
+    assert overlap_band(0.60) == "high-risk"
     assert overlap_band(1.0) == "high-risk"
 
 

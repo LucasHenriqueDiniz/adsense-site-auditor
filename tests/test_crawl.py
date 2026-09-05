@@ -1437,8 +1437,17 @@ def test_todo_sufixo_de_asset_e_reconhecido_como_asset():
     from adsense_checks.crawl import _ASSET_SUFFIXES, _looks_like_asset
 
     assert len(_ASSET_SUFFIXES) == 50
-    for sufixo in SUFIXOS_DE_ASSET:
+    # A forma é uma invariante de TODA entrada, então esta metade itera a FONTE:
+    # a propriedade não depende de quais entradas existem, e afirmá-la sobre o
+    # literal daqui seria afirmá-la sobre o próprio teste. Um `.png` guardado
+    # como `png` continua casando `arquivo.png` por sufixo, e passa a casar
+    # `/o-formato-png` também — uma página vira binário e o crawler para nela.
+    for sufixo in _ASSET_SUFFIXES:
         assert sufixo.startswith(".") and sufixo == sufixo.lower(), sufixo
+
+    # A pertinência é o contrário: itera o LITERAL, senão trocar uma entrada
+    # move o caso de teste junto com ela.
+    for sufixo in SUFIXOS_DE_ASSET:
         assert _looks_like_asset(f"https://ex.com/arquivo{sufixo}"), sufixo
         # E maiúsculas na URL não escapam do filtro.
         assert _looks_like_asset(f"https://ex.com/A{sufixo.upper()}"), sufixo
@@ -1460,8 +1469,11 @@ def test_todo_sufixo_de_documento_faz_o_ultimo_segmento_ser_arquivo():
     from adsense_checks.crawl import _DOCUMENT_SUFFIXES, looks_like_document
 
     assert len(_DOCUMENT_SUFFIXES) == 27
-    for sufixo in SUFIXOS_DE_DOCUMENTO:
+    # Invariante de toda entrada: itera a fonte, pelo mesmo motivo do teste acima.
+    for sufixo in _DOCUMENT_SUFFIXES:
         assert "." not in sufixo, sufixo  # a lista guarda a extensão sem ponto
+
+    for sufixo in SUFIXOS_DE_DOCUMENTO:
         assert looks_like_document(f"/pasta/pagina.{sufixo}"), sufixo
         assert looks_like_document(f"/pasta/PAGINA.{sufixo.upper()}"), sufixo
 

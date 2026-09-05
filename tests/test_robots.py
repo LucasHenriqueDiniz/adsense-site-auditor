@@ -526,10 +526,10 @@ def test_cap_de_500_kib_vale_pelo_valor_e_corta_linha_inteira():
     inteira são as duas asserções — e o corte em linha inteira é a alegação de
     segurança do módulo, porque metade de `Disallow: /caminho/longo` é uma regra
     MAIS LARGA do que o site escreveu."""
-    from adsense_checks.robots import _MAX_BYTES
-
     enchimento = "Disallow: /preenchimento\n" * 25_000
-    assert len(enchimento.encode()) > _MAX_BYTES  # tem de passar do cap de verdade
+    # Literal, não `> _MAX_BYTES`: derivada, a fixture encolhia junto com o cap
+    # e a asserção não podia falhar.
+    assert len(enchimento.encode()) == 625_000 > 500 * 1024
     texto = "User-agent: *\n" + enchimento + "Disallow: /depois-do-corte\n"
     r = parse_robots(texto)
 
