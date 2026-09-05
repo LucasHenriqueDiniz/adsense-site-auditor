@@ -315,3 +315,15 @@ def test_availability_nao_cronometra_uma_pagina_de_erro():
     linha = check_technical._availability(erro)
     assert linha.status is Status.MISSING
     assert any("no served page to time" in f for f in linha.findings)
+
+
+def test_a_fronteira_de_resposta_lenta_e_2500ms():
+    """SLOW_RESPONSE_MS pelo valor, nos dois lados. O teste vizinho passava
+    `SLOW_RESPONSE_MS + 1`, uma cota derivada da própria constante sob teste:
+    ela se movia junto com a mutação e o teste passava sempre."""
+    rapido = check_technical._availability(_home_fetch("https://x/", elapsed_ms=2499.0))
+    lento = check_technical._availability(_home_fetch("https://x/", elapsed_ms=2501.0))
+
+    assert rapido.status is Status.INFO  # só a lacuna de uptime
+    assert lento.status is Status.WARNING
+    assert any("over the" in f for f in lento.findings)

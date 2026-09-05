@@ -196,3 +196,16 @@ def test_head_recusado_com_400_tambem_cai_para_get(server):
     r = fetch(base + "/", method="HEAD")
     assert r.status_code == 200
     assert r.text == "<html>corpo</html>"
+
+
+def test_o_timeout_padrao_publicado_e_15_segundos():
+    """DEFAULT_TIMEOUT pelo valor. Aqui não dá para fixar por comportamento sem
+    a suíte esperar quinze segundos, então o que se prende é o default que a
+    assinatura publica e que `scripts/README.md` documenta — mudá-lo em silêncio
+    é o defeito, e isto o pega."""
+    import inspect
+
+    from adsense_checks.http import DEFAULT_TIMEOUT, fetch
+
+    assert DEFAULT_TIMEOUT == 15
+    assert inspect.signature(fetch).parameters["timeout"].default == 15

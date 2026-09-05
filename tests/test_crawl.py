@@ -12,7 +12,6 @@ from http.server import BaseHTTPRequestHandler
 
 from adsense_checks import crawl as crawl_mod
 from adsense_checks.crawl import (
-    DEFAULT_DELAY,
     CheckResult,
     CrawlResult,
     Page,
@@ -403,17 +402,17 @@ def test_delay_de_cortesia_e_o_padrao_e_e_respeitado(server):
     # Sem passar `delay`: o que está sob teste é o PADRÃO. A versão anterior
     # passava delay=0.05 explícito e só assertava DEFAULT_DELAY > 0, então
     # trocar o padrão por 0.0 não quebrava nada.
-    assert DEFAULT_DELAY > 0  # o crawler antigo disparava sem pausa nenhuma
+    # Pelo VALOR, não por `DEFAULT_DELAY`: a versão anterior derivava a cota da
+    # própria constante sob teste, então trocá-la movia a cota junto e o teste
+    # passava sempre.
     inicio = time.monotonic()
     r = crawl(base + "/")
     decorrido = time.monotonic() - inicio
     assert len(r.pages) == 3
-    # Três buscas, duas pausas entre elas.
-    minimo = DEFAULT_DELAY * 2 * 0.9
-    assert decorrido >= minimo, (
-        f"crawl levou {decorrido:.3f}s; com DEFAULT_DELAY={DEFAULT_DELAY} "
-        f"esperava ao menos {minimo:.3f}s"
-    )
+    # Três buscas, duas pausas entre elas: 1,0s com o padrão de 0,5s. O limite
+    # inferior é literal, e o superior existe para que aumentar o padrão também
+    # quebre — sem ele, 0,5 -> 8,5 passaria.
+    assert 0.9 <= decorrido <= 3.0, f"crawl levou {decorrido:.3f}s"
 
 
 def test_user_agent_padrao_identifica_o_crawler_do_adsense(server):
@@ -1284,3 +1283,32 @@ def test_comparacao_de_duas_sessoes_que_falha_e_ERROR(server):
     check = check_session_urls(r, verify_two_sessions=True, timeout=1)
     assert check.status is Status.ERROR
     assert any("re-request for canonical comparison failed" in f for f in check.findings)
+
+
+def test_a_profundidade_padrao_do_crawl_e_2(server):
+    """DEFAULT_MAX_DEPTH pelo valor: uma corrente de quatro níveis para no 2."""
+    base, routes = server
+    routes["/"] = (200, HTML, pagina("N0", '<a href="/n1">n1</a>'))
+    routes["/n1"] = (200, HTML, pagina("N1", '<a href="/n2">n2</a>'))
+    routes["/n2"] = (200, HTML, pagina("N2", '<a href="/n3">n3</a>'))
+    routes["/n3"] = (200, HTML, pagina("N3"))
+
+    r = crawl(base + "/", delay=0, respect_robots=False)
+
+    assert sorted(p.depth for p in r.pages) == [0, 1, 2]
+    assert [p.title for p in r.pages] == ["N0", "N1", "N2"]
+
+
+def test_o_teto_padrao_de_paginas_do_modulo_e_100(server):
+    """DEFAULT_MAX_PAGES pelo valor. O CLI passa 50 por conta própria; este é o
+    padrão da biblioteca, que ninguém observava."""
+    base, routes = server
+    links = "".join(f'<a href="/p{i}">p{i}</a>' for i in range(120))
+    routes["/"] = (200, HTML, pagina("Home", links))
+    for i in range(120):
+        routes[f"/p{i}"] = (200, HTML, pagina(f"P{i}"))
+
+    r = crawl(base + "/", delay=0, respect_robots=False)
+
+    assert len(r.pages) == 100
+    assert r.stopped_reason == "stopped at max_pages=100"

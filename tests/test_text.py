@@ -526,3 +526,33 @@ def test_conteudo_principal_nao_isolado_e_ERROR_na_medicao():
     assert d.words >= 500  # tem texto de sobra: não é o caso de página vazia
     assert d.status is Status.ERROR
     assert "main content not isolated" in d.reason
+
+
+def test_a_casca_de_spa_e_reconhecida_ate_25_palavras():
+    """JS_SHELL_MAX_WORDS, fixado pelo valor nos dois lados da fronteira. Acima
+    dela a página tem conteúdo servido e é uma página rasa de verdade, não uma
+    casca que este auditor não consegue ler."""
+    def casca(n):
+        return ('<html><head><script src="/b.js"></script></head><body>'
+                # Sem dígito no token: `palavra0` conta como DUAS palavras,
+                # porque o contador separa letras de dígitos.
+                f'<p>{" ".join(["palavra"] * n)}</p>'
+                '<div id="root"></div></body></html>')
+
+    assert looks_javascript_rendered(casca(24)) is True
+    assert looks_javascript_rendered(casca(26)) is False
+
+
+def test_o_charset_declarado_e_procurado_so_no_primeiro_kib():
+    """_DECLARATION_WINDOW. O HTML5 exige a declaração nos primeiros 1024 bytes,
+    e procurar além disso passa a casar prosa: um artigo SOBRE codificações diz
+    "charset=utf-8" no corpo sem declarar nada."""
+    from adsense_checks.text import _declared_charset
+
+    def documento(offset, valor="iso-8859-7"):
+        enchimento = "<!-- " + "x" * offset + " -->"
+        return f"<html><head>{enchimento}<meta charset='{valor}'>"
+
+    # Dentro da janela: encontrado. Fora: ignorado.
+    assert _declared_charset(documento(900)) == "iso-8859-7"
+    assert _declared_charset(documento(1100)) == ""

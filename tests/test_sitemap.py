@@ -858,3 +858,57 @@ def test_indice_que_so_referencia_outro_ja_visitado_e_WARNING(server):
     assert r.truncated is False
     assert r.status is Status.WARNING
     assert any("zero page URLs" in m for m in r.reasons)
+
+
+# --------------------------------------------------------------------------
+# Constantes fixadas PELO VALOR. Nenhuma asserção aqui pode citar a constante:
+# uma cota derivada dela se move junto com a mutação e o teste passa sempre.
+# --------------------------------------------------------------------------
+
+
+def test_indice_aninhado_para_de_ser_seguido_na_profundidade_2(server):
+    """MAX_INDEX_DEPTH. O documento de entrada é o nível 0, então índice ->
+    filhos -> netos e para. O quarto nível não é buscado e o resultado diz que
+    a contagem é parcial."""
+    base, rotas = server
+    rotas["/sitemap.xml"] = (200, XML, sitemapindex(f"{base}/n1.xml"))
+    rotas["/n1.xml"] = (200, XML, sitemapindex(f"{base}/n2.xml"))
+    rotas["/n2.xml"] = (200, XML, sitemapindex(f"{base}/n3.xml"))
+    rotas["/n3.xml"] = (200, XML, urlset(f"{base}/pagina"))
+
+    r = check_sitemap(base + "/")
+
+    pedidos = [c for _m, c, _h in rotas.received if c.endswith(".xml")]
+    assert "/n2.xml" in pedidos  # profundidade 2 é buscada
+    assert "/n3.xml" not in pedidos  # a 3 não
+    assert r.truncated is True
+    assert r.url_count == 0
+
+
+def test_no_maximo_20_sitemaps_filhos_sao_buscados(server):
+    """MAX_CHILD_SITEMAPS. Sites grandes publicam centenas; a auditoria para em
+    20 e marca a contagem como piso."""
+    base, rotas = server
+    filhos = [f"{base}/f{i}.xml" for i in range(25)]
+    rotas["/sitemap.xml"] = (200, XML, sitemapindex(*filhos))
+    for i in range(25):
+        rotas[f"/f{i}.xml"] = (200, XML, urlset(f"{base}/p{i}"))
+
+    r = check_sitemap(base + "/")
+
+    buscados = [c for _m, c, _h in rotas.received if c.startswith("/f")]
+    assert len(buscados) == 20
+    assert r.url_count == 20
+    assert r.truncated is True
+
+
+def test_a_amostra_guardada_para_no_quinquagesimo(server):
+    """MAX_SAMPLE_URLS. `url_count` é o total de verdade; `sample_urls` é a
+    evidência, e é ela que tem teto."""
+    base, rotas = server
+    rotas["/sitemap.xml"] = (200, XML, urlset(*[f"{base}/p{i}" for i in range(60)]))
+
+    r = check_sitemap(base + "/")
+
+    assert r.url_count == 60
+    assert len(r.sample_urls) == 50

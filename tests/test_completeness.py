@@ -793,3 +793,80 @@ def test_todo_candidato_a_pagina_de_confianca_inacessivel_e_ERROR(server):
     )
     assert desfecho.status is Status.ERROR
     assert "may well exist" in desfecho.reason
+
+
+def test_no_maximo_seis_candidatos_linkados_por_pagina_de_confianca(server):
+    """MAX_LINKED_CANDIDATES pelo valor. O teto vale só para os links que a home
+    oferece; os caminhos convencionais são sempre tentados por inteiro, senão
+    "nenhum candidato respondeu" seria dito sobre URL que ninguém pediu."""
+    from adsense_checks.completeness import _ABOUT_HINT, ABOUT_PATHS, _candidates
+    from adsense_checks.http import Fetch
+
+    links = "".join(f'<a href="/sobre-{i}">Sobre {i}</a>' for i in range(9))
+    html = f"<html><body><footer>{links}</footer></body></html>"
+    home = Fetch(url="http://ex.com/", final_url="http://ex.com/", status_code=200,
+                 text=html, headers={"content-type": "text/html"})
+
+    doc = parse_document(html)
+    # Com o teto explícito, para provar que os convencionais não são afetados:
+    # com um teto muito maior a quantidade deles é a mesma. (São menos que
+    # `ABOUT_PATHS` porque `about` e `about/` têm a mesma identidade e um dos
+    # dois é deduplicado — idem `sobre`.)
+    cands = _candidates(home, doc, "http://ex.com/", ABOUT_PATHS, _ABOUT_HINT, 6)
+    largo = _candidates(home, doc, "http://ex.com/", ABOUT_PATHS, _ABOUT_HINT, 100)
+    assert len([c for c in cands if c.declared]) == 6
+    assert len([c for c in largo if c.declared]) == 9
+    assert len([c for c in largo if not c.declared]) == len([c for c in cands if not c.declared])
+
+
+def test_o_limite_padrao_de_links_de_navegacao_e_25(server):
+    """DEFAULT_NAV_LINK_LIMIT pelo valor: 30 links no menu, 25 seguidos."""
+    base, routes = server
+    menu = "".join(f'<a href="/p{i}">p{i}</a>' for i in range(30))
+    routes["/"] = (200, {}, pagina("Casa", extra=f"<nav>{menu}</nav>"))
+    for i in range(30):
+        routes[f"/p{i}"] = (200, {}, pagina(f"P{i}"))
+
+    r = count_broken_nav_links(base + "/")
+
+    assert r.found == 30
+    assert r.checked == 25
+    assert r.truncated is True
+
+
+def test_tres_links_quebrados_reprovam_e_dois_apenas_avisam(server):
+    """BROKEN_NAV_FAIL_THRESHOLD pelo valor, nos dois lados. Um link quebrado no
+    menu é defeito; três lêem como site abandonado."""
+    base, routes = server
+    for quebrados, esperado in ((2, Status.WARNING), (3, Status.FAIL)):
+        links = "".join(f'<a href="/q{i}">q{i}</a>' for i in range(quebrados))
+        routes["/"] = (200, {}, pagina("Casa", extra=f"<nav>{links}</nav>"))
+        r = count_broken_nav_links(base + "/")
+        assert len(r.broken) == quebrados
+        assert r.status is esperado, quebrados
+
+
+def test_o_trecho_reportado_para_em_140_caracteres():
+    """_SNIPPET_CHARS pelo valor. O trecho existe para o leitor localizar o
+    marcador na página, não para reproduzi-la."""
+    longo = "Coming soon " + "x" * 400
+    achados = find_placeholders(f"<h1>{longo}</h1>")
+    assert achados
+    assert len(achados[0].snippet) == 140
+    assert achados[0].snippet.endswith("...")
+
+
+def test_o_teto_padrao_de_candidatos_linkados_e_6(server):
+    """MAX_LINKED_CANDIDATES pelo DEFAULT. O teste acima passa o teto explícito,
+    então contorna justamente a constante — é preciso ir pela porta que a usa."""
+    base, routes = server
+    links = "".join(f'<a href="/sobre-{i}">Sobre {i}</a>' for i in range(9))
+    routes["/"] = (200, {}, pagina("Casa", extra=f"<footer>{links}</footer>"))
+
+    check_trust_pages(base + "/")
+
+    # Só os linkados: `/sobre-mim` é um caminho convencional de `ABOUT_PATHS` e
+    # casaria um filtro mais frouxo, inflando a contagem para 7.
+    linkados = {f"/sobre-{i}" for i in range(9)}
+    pedidos = [c for _m, c, _h in routes.received if c in linkados]
+    assert len(pedidos) == 6
