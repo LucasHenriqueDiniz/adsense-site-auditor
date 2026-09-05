@@ -393,26 +393,78 @@ def test_max_pages_interrompe_o_crawl_e_registra_a_razao(server):
     assert "max_pages=2" in (r.stopped_reason or "")
 
 
-def test_delay_de_cortesia_e_o_padrao_e_e_respeitado(server):
+def test_delay_de_cortesia_e_o_padrao_e_vale_meio_segundo(server, monkeypatch):
+    """O padrão é 0,5s, e a pausa precede cada requisição tirada da fila.
+
+    A versão anterior media relógio: 1,02s de uma suíte de ~7s, o teste mais
+    lento dela, para afirmar `0.9 <= decorrido <= 3.0`. Uma janela de 3x não
+    prende valor nenhum: medido, `DEFAULT_DELAY 0.5 -> 0.46` sobrevivia, e
+    `-> 1.49` só morria porque 2 x 1,49 = 2,98s passava raspando do teto de
+    3,0s — o veredito ali era do relógio da máquina, não da constante.
+    Trocando `time.sleep` por um registrador, o valor exato vira asserção
+    literal e o teste custa zero. Que a pausa é espera de relógio de verdade
+    fica com `test_a_pausa_de_cortesia_e_espera_de_relogio_de_verdade`, abaixo.
+    """
+    base, routes = server
+    # Um log só, de requisições e de pausas, para que a ORDEM entre as duas
+    # coisas também fique assertada: contar pausas soltas não distingue "pausa
+    # antes de cada busca" de "duas pausas no fim do laço".
+    eventos = []
+
+    def rota(caminho, cabecalhos, corpo):
+        def _rota(_metodo):
+            eventos.append(("get", caminho))
+            return (200, cabecalhos, corpo)
+
+        return _rota
+
+    routes["/"] = rota("/", HTML, pagina("Home", '<a href="/a">a</a><a href="/b">b</a>'))
+    routes["/a"] = rota("/a", HTML, pagina("A"))
+    routes["/b"] = rota("/b", HTML, pagina("B"))
+    routes["/robots.txt"] = rota("/robots.txt", TEXTO, "User-agent: *\nAllow: /\n")
+
+    monkeypatch.setattr(crawl_mod.time, "sleep", lambda s: eventos.append(("pausa", s)))
+
+    # Sem passar `delay`: o que está sob teste é o PADRÃO. Uma versão anterior
+    # passava delay=0.05 explícito e só assertava DEFAULT_DELAY > 0, então
+    # trocar o padrão por 0.0 não quebrava nada.
+    r = crawl(base + "/")
+
+    assert len(r.pages) == 3
+    # 0,5 escrito por extenso, não `DEFAULT_DELAY`: derivar da constante sob
+    # teste move os dois lados junto e a asserção não pode falhar.
+    assert eventos == [
+        ("get", "/"),
+        ("get", "/robots.txt"),
+        ("pausa", 0.5),
+        ("get", "/a"),
+        ("pausa", 0.5),
+        ("get", "/b"),
+    ]
+
+
+def test_a_pausa_de_cortesia_e_espera_de_relogio_de_verdade(server):
+    """A prova grossa de que `crawl` de fato BLOQUEIA entre as requisições.
+
+    O teste acima troca `time.sleep` por um registrador, então sozinho ele
+    provaria apenas que o crawler anota a intenção de pausar — um `crawl` que
+    guardasse os atrasos numa lista e nunca esperasse passaria por ele. Este
+    aqui usa um delay explícito e pequeno, então não é ele que prende o valor do
+    padrão: é só o piso de tempo real, por 10% do custo do teste que substituiu.
+    """
     base, routes = server
     routes["/"] = (200, HTML, pagina("Home", '<a href="/a">a</a><a href="/b">b</a>'))
     routes["/a"] = (200, HTML, pagina("A"))
     routes["/b"] = (200, HTML, pagina("B"))
 
-    # Sem passar `delay`: o que está sob teste é o PADRÃO. A versão anterior
-    # passava delay=0.05 explícito e só assertava DEFAULT_DELAY > 0, então
-    # trocar o padrão por 0.0 não quebrava nada.
-    # Pelo VALOR, não por `DEFAULT_DELAY`: a versão anterior derivava a cota da
-    # própria constante sob teste, então trocá-la movia a cota junto e o teste
-    # passava sempre.
     inicio = time.monotonic()
-    r = crawl(base + "/")
+    r = crawl(base + "/", delay=0.05)
     decorrido = time.monotonic() - inicio
+
     assert len(r.pages) == 3
-    # Três buscas, duas pausas entre elas: 1,0s com o padrão de 0,5s. O limite
-    # inferior é literal, e o superior existe para que aumentar o padrão também
-    # quebre — sem ele, 0,5 -> 8,5 passaria.
-    assert 0.9 <= decorrido <= 3.0, f"crawl levou {decorrido:.3f}s"
+    # Três buscas, duas pausas entre elas: 0,10s. O piso é literal e existe só
+    # para separar "esperou" de "não esperou".
+    assert decorrido >= 0.09, f"crawl levou {decorrido:.3f}s — a pausa não bloqueou"
 
 
 def test_user_agent_padrao_identifica_o_crawler_do_adsense(server):

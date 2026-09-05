@@ -542,11 +542,44 @@ def test_cap_de_500_kib_vale_pelo_valor_e_corta_linha_inteira():
     assert is_allowed(parse_robots(curto), INDEX_CRAWLER, "/fim") is False
 
 
+def test_o_cap_de_500_kib_esta_preso_pelos_dois_lados():
+    """O cap só estava preso POR CIMA. As asserções que diziam medi-lo escreviam
+    `"a" * _MAX_BYTES` e conferiam `len(...) == _MAX_BYTES`: os dois lados se
+    moviam junto, então `500 * 1024 -> 100 * 1024` deixava a suíte inteira verde
+    (medido: 521 passed). Essa é a direção perigosa — um robots.txt real de
+    300 KiB seria cortado em silêncio e perderia as últimas regras `Disallow`,
+    que é exatamente o que o docstring de `_truncate` diz existir para evitar.
+
+    Os dois arquivos abaixo são medidos em bytes literais e diferem por UM:
+    com 512.000 bytes cravados a última regra chega ao parser e bloqueia; com
+    512.001 o corte volta até a quebra de linha anterior e ela some. Qualquer
+    cap diferente de 500 KiB quebra uma das duas asserções.
+    """
+    cabecalho = "User-agent: *\n"  # 14 bytes
+    enchimento = "Disallow: /enchimento\n"  # 22 bytes
+    enchimento_maior = "Disallow: /enchimentos\n"  # 23 bytes: uma letra a mais
+    ultima = "Disallow: /ultima-regra\n"  # 24 bytes
+
+    # 14 + 22*23271 + 24 = 512.000 bytes cravados.
+    no_cap = cabecalho + enchimento * 23271 + ultima
+    assert len(no_cap.encode()) == 500 * 1024
+    # O mesmo arquivo com uma letra a mais numa linha do meio: 512.001 bytes.
+    um_byte_a_mais = cabecalho + enchimento_maior + enchimento * 23270 + ultima
+    assert len(um_byte_a_mais.encode()) == 500 * 1024 + 1
+
+    # Exatamente no cap nada é cortado, e a última regra do arquivo bloqueia.
+    # Um cap menor derruba esta: com 511.999 a linha final já cai fora.
+    assert is_allowed(parse_robots(no_cap), INDEX_CRAWLER, "/ultima-regra") is False
+    # Um byte acima do cap a mesma regra tem de sumir. Um cap maior derruba
+    # esta: com 512.001 o arquivo inteiro passa e a regra volta a bloquear.
+    assert is_allowed(parse_robots(um_byte_a_mais), INDEX_CRAWLER, "/ultima-regra") is True
+
+
 def test_arquivo_grande_sem_newline_nenhum_nao_vira_liberar_tudo():
     """`rfind` devolvia -1 e `cut[:0]` esvaziava o arquivo inteiro, então
     qualquer arquivo grande sem newline — uma linha longa de qualquer coisa —
     virava allow-all, que é a direção que esconde um bloqueio real."""
-    from adsense_checks.robots import _MAX_BYTES, _truncate
+    from adsense_checks.robots import _truncate
 
     # SEM newline nenhum: a fixture anterior tinha um depois de `User-agent: *`,
     # então `rfind` achava a posição 13, nunca -1, e o ramo que este teste nomeia
@@ -554,8 +587,10 @@ def test_arquivo_grande_sem_newline_nenhum_nao_vira_liberar_tudo():
     # defeito — passava por ele.
     texto = "Disallow: /" + "a" * (520 * 1024)
     assert "\n" not in texto
-    assert len(texto.encode()) > _MAX_BYTES
-    assert len(_truncate(texto)) == _MAX_BYTES  # preserva, em vez de esvaziar
+    # Os dois números são literais. Escritos como `_MAX_BYTES` eles se moviam
+    # junto com o cap, e baixar o cap não quebrava nada.
+    assert len(texto.encode()) > 500 * 1024
+    assert len(_truncate(texto)) == 500 * 1024  # preserva, em vez de esvaziar
 
     # E pela porta da frente: o grupo sobrevive ao truncamento.
     r = parse_robots("User-agent: *\nDisallow: /" + "a" * (520 * 1024))
@@ -598,11 +633,14 @@ def test_curinga_no_primeiro_caractere_casa():
 
 
 def test_o_arquivo_exatamente_no_cap_sobrevive_inteiro():
-    """`len(raw) <= _MAX_BYTES`: no tamanho exato nada é cortado."""
-    from adsense_checks.robots import _MAX_BYTES, _truncate
+    """`len(raw) <= _MAX_BYTES`: no tamanho exato nada é cortado.
 
-    exato = "a" * _MAX_BYTES
-    assert len(_truncate(exato)) == _MAX_BYTES
+    O tamanho exato é escrito como literal: derivado da constante, os dois lados
+    se moviam junto e um cap menor passava."""
+    from adsense_checks.robots import _truncate
+
+    exato = "a" * (500 * 1024)
+    assert len(_truncate(exato)) == 500 * 1024
     assert len(_truncate(exato + "b")) < len(exato) + 1
 
 
@@ -622,11 +660,13 @@ def test_arquivo_exatamente_no_cap_com_newline_nao_perde_a_ultima_linha():
     """`len(raw) <= _MAX_BYTES`: no tamanho exato nada é cortado. Com `<`, o
     arquivo entra no ramo de truncamento e o corte de volta até a última quebra
     descarta a linha final — uma regra que o site escreveu."""
-    from adsense_checks.robots import _MAX_BYTES, _truncate
+    from adsense_checks.robots import _truncate
 
-    corpo = "Disallow: /a\n" * (_MAX_BYTES // 13)
-    corpo += "b" * (_MAX_BYTES - len(corpo.encode()))
-    assert len(corpo.encode()) == _MAX_BYTES
+    # 500 KiB literais: derivar o tamanho de `_MAX_BYTES` movia a fixture junto
+    # com o cap, e o teste passava com qualquer valor.
+    corpo = "Disallow: /a\n" * (500 * 1024 // 13)
+    corpo += "b" * (500 * 1024 - len(corpo.encode()))
+    assert len(corpo.encode()) == 500 * 1024
 
     assert _truncate(corpo) == corpo  # intacto
     assert len(_truncate(corpo + "c")) < len(corpo)  # um byte a mais e corta

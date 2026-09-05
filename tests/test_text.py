@@ -813,16 +813,44 @@ def test_a_casca_de_spa_e_reconhecida_ate_25_palavras():
 def test_o_charset_declarado_e_procurado_so_no_primeiro_kib():
     """_DECLARATION_WINDOW. O HTML5 exige a declaração nos primeiros 1024 bytes,
     e procurar além disso passa a casar prosa: um artigo SOBRE codificações diz
-    "charset=utf-8" no corpo sem declarar nada."""
+    "charset=utf-8" no corpo sem declarar nada.
+
+    Os offsets anteriores eram 900 e 1100, uma folga de 100 de cada lado: medido,
+    `_DECLARATION_WINDOW 1024 -> 1099` sobrevivia. Aqui a declaração é posicionada
+    no byte, e o par 1023/1024 prende a janela em qualquer direção.
+    """
     from adsense_checks.text import _declared_charset
 
-    def documento(offset, valor="iso-8859-7"):
-        enchimento = "<!-- " + "x" * offset + " -->"
-        return f"<html><head>{enchimento}<meta charset='{valor}'>"
+    declaracao = "<meta charset='iso-8859-7'>"
+    # O casamento de `_META_CHARSET` termina no último caractere do VALOR, então
+    # ele consome os 25 primeiros caracteres da declaração e o `-7` final tem de
+    # caber dentro da janela.
+    assert len("<meta charset='iso-8859-7") == 25
 
-    # Dentro da janela: encontrado. Fora: ignorado.
-    assert _declared_charset(documento(900)) == "iso-8859-7"
-    assert _declared_charset(documento(1100)) == ""
+    def documento(inicio):
+        """Um documento em que a `<meta>` começa exatamente no índice `inicio`."""
+        enchimento = "<!-- " + "x" * (inicio - 9) + " -->"
+        assert len(enchimento) == inicio
+        return enchimento + declaracao
+
+    # A declaração termina no índice 1023, o último byte da janela: encontrada.
+    # Uma janela menor derruba esta — com 1023 o valor volta cortado.
+    assert _declared_charset(documento(999)) == "iso-8859-7"
+
+    # Deslocada 10 bytes: `charset='` acaba em 1023 e o primeiro caractere do
+    # valor cai no índice 1024, fora da janela. Sem valor não há casamento.
+    # Uma janela maior derruba esta — com 1025 o valor volta como "i".
+    assert _declared_charset(documento(1009)) == ""
+
+    # E o motivo de a janela existir: um artigo SOBRE codificações mostra a tag
+    # como exemplo no meio do texto, sem declarar nada. Sem a janela, o exemplo
+    # de outra pessoa viraria a declaração desta página.
+    artigo = ("<html><head><title>Codificacoes</title></head><body>"
+              + "<p>x</p>" * 200
+              + "<pre>&lt;meta charset=\"shift_jis\"&gt;</pre>"
+              "<p><meta charset='shift_jis'> era o exemplo acima.</p>")
+    assert artigo.index("<meta charset=") > 1024
+    assert _declared_charset(artigo) == ""
 
 
 def test_exatamente_25_palavras_ja_nao_e_casca():

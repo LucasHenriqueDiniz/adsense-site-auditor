@@ -732,20 +732,30 @@ def test_uma_fonte_ilegivel_entre_fontes_boas_ainda_impede_o_pass():
 
 
 def test_a_razao_de_paginas_duplicadas_reprova_acima_de_30_por_cento():
-    """`ratio > page_ratio_threshold`: exatamente 30% avisa, acima reprova."""
+    """`ratio > DEFAULT_DUPLICATE_PAGE_RATIO`: exatamente 30% avisa, 31% reprova.
+
+    O corpus anterior era de 10 páginas, então a razão só podia ser 0,0, 0,1 …
+    1,0 e o limiar ficava preso apenas à dezena mais próxima: medido,
+    `DEFAULT_DUPLICATE_PAGE_RATIO 0.3 -> 0.35` e `-> 0.39` sobreviviam aos dois
+    lados. Com 100 páginas o passo é de 1 ponto percentual, e 30/100 contra
+    31/100 mata qualquer valor fora de (0,29, 0,31]."""
     def corpus(n_dup, n_total):
-        d = " ".join(f"igual{i}" for i in range(60))
-        t = {f"http://x/dup{i}": d for i in range(n_dup)}
-        t.update({f"http://x/u{i}": " ".join(f"unico{i}x{j}" for j in range(60))
-                  for j in range(n_total - n_dup) for i in [j]})
+        igual = " ".join(f"igual{i}" for i in range(60))
+        t = {f"http://x/dup{i:03d}": igual for i in range(n_dup)}
+        t.update({f"http://x/unico{i:03d}": " ".join(f"u{i}p{j}" for j in range(60))
+                  for i in range(n_total - n_dup)})
         return t
 
-    # 3 de 10 duplicadas = exatamente 0.30 -> WARNING, nao FAIL.
-    r30 = check_duplication(corpus(3, 10))
-    assert abs(r30.duplicate_ratio - 0.3) < 1e-9
+    # Sem passar `page_ratio_threshold`: o que está sob teste é o PADRÃO.
+    # 30 de 100 duplicadas = exatamente 0,30 -> WARNING, não FAIL.
+    r30 = check_duplication(corpus(30, 100))
+    assert len(r30.analyzed) == 100
+    assert r30.duplicate_ratio == 0.3  # 30/100 é exato em ponto flutuante
     assert r30.status is Status.WARNING
-    # 4 de 10 = 0.40 -> FAIL.
-    assert check_duplication(corpus(4, 10)).status is Status.FAIL
+    # 31 de 100 = 0,31, um ponto percentual acima -> FAIL.
+    r31 = check_duplication(corpus(31, 100))
+    assert r31.duplicate_ratio == 0.31
+    assert r31.status is Status.FAIL
 
 
 def test_um_par_exatamente_no_limiar_forma_grupo():
@@ -760,20 +770,31 @@ def test_um_par_exatamente_no_limiar_forma_grupo():
 def test_as_faixas_de_overlap_decidem_nos_valores_exatos():
     """`>= OVERLAP_HIGH_RISK` e `>= OVERLAP_MONITOR`: 60% já é alto risco e 40%
     já é monitorar. As faixas eram testadas em `overlap_band`, a função pura; o
-    status que `compare_against` deriva delas não ficava no valor."""
-    nosso = [f"p{i}" for i in range(10)]
+    status que `compare_against` deriva delas não ficava no valor.
+
+    O conjunto anterior tinha 10 shingles, então o containment só podia ser 0,0,
+    0,1 … 1,0 e as faixas ficavam presas à dezena: medido, `OVERLAP_MONITOR
+    0.4 -> 0.35` e `-> 0.31` sobreviviam. `OVERLAP_HIGH_RISK` escapava disso só
+    por acidente: quem o prende é o teste de regressão do limiar padrão, que
+    afirma `== 0.6` literal — por ESTE teste aqui, 0,55 também passaria. Com
+    100 shingles o passo é de 1 ponto percentual e cada limiar é medido no
+    valor e um ponto abaixo dele."""
+    nosso = [f"p{i}" for i in range(100)]
 
     def fonte(compartilhadas):
-        return " ".join(nosso[:compartilhadas] + [f"z{i}" for i in range(10)])
+        return " ".join(nosso[:compartilhadas] + [f"z{i}" for i in range(100)])
 
-    # containment = compartilhadas/10 sobre shingles de 1 palavra
-    alto = compare_against(" ".join(nosso), {"r": fonte(6)}, shingle_size=1,
-                           expected_sources=1)
-    monitor = compare_against(" ".join(nosso), {"r": fonte(4)}, shingle_size=1,
-                              expected_sources=1)
-    seguro = compare_against(" ".join(nosso), {"r": fonte(3)}, shingle_size=1,
-                             expected_sources=1)
+    def faixa(compartilhadas):
+        # containment = compartilhadas/100 sobre shingles de 1 palavra
+        r = compare_against(" ".join(nosso), {"r": fonte(compartilhadas)},
+                            shingle_size=1, expected_sources=1)
+        return (r.sources[0].overlap, r.band, r.status)
 
-    assert (alto.band, alto.status) == ("high-risk", Status.FAIL)
-    assert (monitor.band, monitor.status) == ("monitor", Status.WARNING)
-    assert (seguro.band, seguro.status) == ("safe", Status.OK)
+    # 60% é alto risco; 59% ainda não é. Mata qualquer OVERLAP_HIGH_RISK fora
+    # de (0,59, 0,60].
+    assert faixa(60) == (0.6, "high-risk", Status.FAIL)
+    assert faixa(59) == (0.59, "monitor", Status.WARNING)
+    # 40% é monitorar; 39% ainda é seguro. Mata qualquer OVERLAP_MONITOR fora
+    # de (0,39, 0,40].
+    assert faixa(40) == (0.4, "monitor", Status.WARNING)
+    assert faixa(39) == (0.39, "safe", Status.OK)
