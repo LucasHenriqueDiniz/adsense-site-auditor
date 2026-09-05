@@ -1342,47 +1342,103 @@ def test_pagina_com_exatamente_400_nao_e_alcancavel(server):
 
 
 # --------------------------------------------------------------------------
-# Conteúdo das coleções de configuração. Cada uma leva DUAS asserções: uma
-# contagem literal, que pega a remoção de uma entrada, e uma iteração sobre as
-# entradas, que pega uma entrada que não funciona. Iterar sozinho seria
-# auto-referencial — sumindo a entrada, some o caso de teste junto.
+# Conteúdo das coleções de configuração. Cada uma leva TRÊS asserções:
+#
+#   1. a contagem literal, que pega a remoção de uma entrada;
+#   2. a iteração sobre uma lista LITERAL, escrita aqui, que pega a troca de
+#      uma entrada por outra;
+#   3. a lista inversa, que pega o outro lado da troca e a entrada a mais.
+#
+# Iterar o próprio conjunto seria auto-referencial: `_looks_like_asset` É
+# `path.endswith(_ASSET_SUFFIXES)`, então `x in S for x in S` move o caso de
+# teste junto com a entrada trocada. Medido: trocar `.css` por `.html` aqui
+# faz `_looks_like_asset("http://e.test/a.html")` responder True — o crawler
+# classifica toda página estática como binário e para de rastrear o site — e
+# os 521 testes continuavam passando.
 # --------------------------------------------------------------------------
+
+# Os cinquenta sufixos que nunca são um documento HTML, na ordem em que o
+# módulo os agrupa: documentos de escritório, arquivos compactados, imagens,
+# mídia, recursos de página e fontes.
+SUFIXOS_DE_ASSET = (
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".csv",
+    ".zip", ".gz", ".tgz", ".tar", ".rar", ".7z", ".dmg", ".exe", ".apk", ".pkg",
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico", ".bmp", ".avif",
+    ".mp3", ".mp4", ".m4a", ".avi", ".mov", ".wmv", ".webm", ".ogg", ".wav",
+    ".css", ".js", ".mjs", ".json", ".xml", ".rss", ".atom", ".txt",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+)
+
+# As vinte e sete extensões que fazem do último segmento um arquivo, e não um
+# diretório. Guardadas sem ponto, ao contrário das de asset.
+SUFIXOS_DE_DOCUMENTO = (
+    "html", "htm", "xhtml", "shtml", "php", "php3", "php4", "php5", "phtml",
+    "asp", "aspx", "jsp", "jspx", "cgi", "pl", "py", "rb", "do", "action",
+    "cfm", "xml", "json", "txt", "md", "rss", "atom", "pdf",
+)
+
+# As sete tags cujo conteúdo não é texto de página.
+TAGS_NAO_TEXTUAIS = ("script", "style", "noscript", "template", "svg", "head", "title")
 
 
 def test_todo_sufixo_de_asset_e_reconhecido_como_asset():
     from adsense_checks.crawl import _ASSET_SUFFIXES, _looks_like_asset
 
     assert len(_ASSET_SUFFIXES) == 50
-    for sufixo in _ASSET_SUFFIXES:
+    for sufixo in SUFIXOS_DE_ASSET:
         assert sufixo.startswith(".") and sufixo == sufixo.lower(), sufixo
         assert _looks_like_asset(f"https://ex.com/arquivo{sufixo}"), sufixo
         # E maiúsculas na URL não escapam do filtro.
         assert _looks_like_asset(f"https://ex.com/A{sufixo.upper()}"), sufixo
-    # Uma página comum não é asset.
+
+    # O inverso, e é o lado que fecha o site inteiro quando erra: uma extensão
+    # de página HTML aqui faz o crawler tratar o site estático como um monte de
+    # binários e parar na home. Toda extensão que `looks_like_document` conhece
+    # e que não é asset tem de continuar não sendo.
+    paginas = ("html", "htm", "xhtml", "shtml", "php", "asp", "aspx", "jsp",
+               "cgi", "do", "action", "md")
+    for ext in paginas:
+        assert not _looks_like_asset(f"https://ex.com/pagina.{ext}"), ext
+    # E uma URL sem extensão nenhuma, que é a forma da maioria das páginas.
     assert not _looks_like_asset("https://ex.com/sobre")
+    assert not _looks_like_asset("https://ex.com/blog/como-escolher-racao")
 
 
 def test_todo_sufixo_de_documento_faz_o_ultimo_segmento_ser_arquivo():
     from adsense_checks.crawl import _DOCUMENT_SUFFIXES, looks_like_document
 
     assert len(_DOCUMENT_SUFFIXES) == 27
-    for sufixo in _DOCUMENT_SUFFIXES:
+    for sufixo in SUFIXOS_DE_DOCUMENTO:
         assert "." not in sufixo, sufixo  # a lista guarda a extensão sem ponto
         assert looks_like_document(f"/pasta/pagina.{sufixo}"), sufixo
         assert looks_like_document(f"/pasta/PAGINA.{sufixo.upper()}"), sufixo
+
+    # O inverso: chamar de documento o que é diretório encolhe a base auditada
+    # até a origem, e a instalação em subdiretório volta a ser julgada contra o
+    # sitemap do domínio inteiro. Uma extensão de imagem ou de recurso aqui faz
+    # exatamente isso com `/logo.png` e `/tema.css`.
+    for ext in ("png", "jpg", "css", "js", "woff2", "zip", "mp4", "old", "0"):
+        assert not looks_like_document(f"/pasta/arquivo.{ext}"), ext
     # E um diretório com ponto no nome continua sendo diretório.
     assert not looks_like_document("/v1.0")
     assert not looks_like_document("/blog.old")
 
 
 def test_toda_tag_nao_textual_tem_o_conteudo_excluido_da_contagem():
-    from adsense_checks.crawl import _NON_TEXT_TAGS, parse_html
+    from adsense_checks.crawl import _NON_TEXT_TAGS
 
     assert len(_NON_TEXT_TAGS) == 7
-    for tag in _NON_TEXT_TAGS:
-        if tag == "head":  # o `<body>` zera o contador; testado à parte
-            continue
+    for tag in TAGS_NAO_TEXTUAIS:
+        # `head` entra na lista como as outras: o reset em `<body>` já rodou
+        # quando um `<head>` aparece depois dele, então o contador funciona.
         html = f"<html><body><p>visivel</p><{tag}>escondido</{tag}></body></html>"
         p = parse_html(html)
         assert "escondido" not in p.text, tag
         assert "visivel" in p.text, tag
+
+    # O inverso: nada além destas é excluído. Uma tag de conteúdo aqui derruba
+    # a contagem de palavras da página e reporta como fina uma página cheia.
+    for tag in ("article", "aside", "div", "footer", "header", "main",
+                "nav", "p", "section", "td"):
+        html = f"<html><body><p>visivel</p><{tag}>presente</{tag}></body></html>"
+        assert "presente" in parse_html(html).text, tag

@@ -1166,22 +1166,66 @@ def test_toda_entrada_de_ABOUT_PATHS_e_CONTACT_PATHS_vira_candidato():
 
 
 # --------------------------------------------------------------------------
-# Conteúdo das coleções: contagem literal mais iteração comportamental.
+# Conteúdo das coleções.
+#
+# Cada teste leva TRÊS partes: a contagem literal, que pega a remoção de uma
+# entrada; a iteração sobre uma lista LITERAL, escrita aqui, que pega a troca
+# de uma entrada por outra; e a lista inversa, que pega o outro lado da troca
+# e a entrada a mais.
+#
+# Iterar o próprio conjunto seria auto-referencial — `visible_text` É
+# `tag in _SKIP_TAGS` —, então `x in S for x in S` move o caso de teste junto
+# com a entrada trocada e o teste segue verde. É a mesma armadilha que o
+# comentário de `test_toda_entrada_de_ABOUT_PATHS_e_CONTACT_PATHS_vira_candidato`
+# descreve; as catorze coleções do pacote estavam assim, e de catorze trocas
+# rodadas uma a uma contra a suíte inteira, nove não derrubavam teste nenhum.
 # --------------------------------------------------------------------------
+
+# Os doze hosts de perfil social conhecidos.
+HOSTS_SOCIAIS = (
+    "linkedin.com", "github.com", "twitter.com", "x.com", "instagram.com",
+    "facebook.com", "youtube.com", "bsky.app", "t.me", "wa.me",
+    "telegram.me", "threads.net",
+)
+
+# As seis tags cujo conteúdo não é texto visível. `head` NÃO está aqui, e é de
+# propósito: o comentário do módulo explica que este parser é um tokenizador
+# plano, e pular `head` apagaria o documento inteiro quando falta `</head>`.
+TAGS_PULADAS = ("script", "style", "noscript", "template", "title", "svg")
+
+# As trinta e sete tags de bloco, que separam o texto dos vizinhos.
+TAGS_DE_BLOCO = (
+    "address", "article", "aside", "blockquote", "br", "dd", "details", "div",
+    "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1",
+    "h2", "h3", "h4", "h5", "h6", "header", "hr", "legend", "li", "main",
+    "nav", "ol", "p", "pre", "section", "summary", "table", "td", "th", "tr", "ul",
+)
+
+# As oito tags de heading, curtas por natureza qualquer que seja o tamanho.
+TAGS_DE_HEADING = ("h1", "h2", "h3", "h4", "h5", "h6", "summary", "legend")
+
+# As nove tags que podem definir a região de um link.
+TAGS_DE_REGIAO = ("footer", "nav", "header", "div", "section", "aside", "main", "ul", "ol")
 
 
 def test_todo_host_social_conhecido_conta_como_canal():
     from adsense_checks.completeness import _SOCIAL_HOSTS, find_contact_channels
 
     assert len(_SOCIAL_HOSTS) == 12
-    for host in _SOCIAL_HOSTS:
+    for host in HOSTS_SOCIAIS:
         canais = find_contact_channels(f'<a href="https://{host}/eu">eu</a>')
         assert canais.socials, host
         assert canais.any_found, host
         # E o subdomínio do mesmo serviço também.
         assert find_contact_channels(f'<a href="https://www.{host}/eu">eu</a>').socials, host
+
+    # O inverso: um host que não é rede social não pode virar prova de canal de
+    # contato. Uma entrada errada aqui faz qualquer link de saída aprovar uma
+    # página de contato que não oferece jeito nenhum de falar com o publisher.
+    for host in ("medium.com", "netflix.com", "phoenix.com", "example.com",
+                 "mercadopago.com.br", "wordpress.com", "google.com"):
+        assert not find_contact_channels(f'<a href="https://{host}/eu">eu</a>').socials, host
     # Substring não basta: era o defeito que `_is_social_host` existe para matar.
-    assert not find_contact_channels('<a href="https://netflix.com/eu">eu</a>').socials
     assert not find_contact_channels('<a href="https://x.com.evil.test/eu">eu</a>').socials
 
 
@@ -1189,10 +1233,19 @@ def test_toda_tag_pulada_some_do_texto_visivel():
     from adsense_checks.completeness import _SKIP_TAGS, visible_text
 
     assert len(_SKIP_TAGS) == 6
-    for tag in _SKIP_TAGS:
+    for tag in TAGS_PULADAS:
         html = f"<body><p>visivel</p><{tag}>escondido</{tag}></body>"
         assert "escondido" not in visible_text(html), tag
         assert "visivel" in visible_text(html), tag
+
+    # O inverso: nada além destas é pulado, `head` em primeiro lugar — pular
+    # `head` num tokenizador plano suprime o documento a partir de um
+    # `</head>` que falta, que é o defeito original deste módulo.
+    for tag in ("head", "article", "aside", "div", "footer", "header",
+                "iframe", "main", "nav", "p", "section"):
+        html = f"<body><p>visivel</p><{tag}>presente</{tag}></body>"
+        assert "presente" in visible_text(html), tag
+    assert "presente" in visible_text("<html><head><p>presente</p><body>oi</body></html>")
 
 
 def test_toda_tag_de_bloco_separa_o_texto_dos_vizinhos():
@@ -1201,9 +1254,15 @@ def test_toda_tag_de_bloco_separa_o_texto_dos_vizinhos():
     from adsense_checks.completeness import _BLOCK_TAGS, parse_document
 
     assert len(_BLOCK_TAGS) == 37
-    for tag in _BLOCK_TAGS:
+    for tag in TAGS_DE_BLOCO:
         doc = parse_document(f"<body>fim<{tag}>comeco</{tag}></body>")
         assert "fimcomeco" not in doc.text, tag
+
+    # O inverso: marcação inline NÃO pode separar, senão "Hyper<em>text</em>"
+    # vira duas palavras e o bloco que o scanner de marcadores lê é outro.
+    for tag in ("a", "b", "code", "em", "i", "small", "span", "strong", "sub", "sup"):
+        doc = parse_document(f"<body>fim<{tag}>comeco</{tag}></body>")
+        assert "fimcomeco" in doc.text, tag
 
 
 def test_todo_heading_e_bloco_curto_por_natureza():
@@ -1213,25 +1272,38 @@ def test_todo_heading_e_bloco_curto_por_natureza():
 
     assert len(_HEADING_TAGS) == 8
     longo = " ".join(["palavra"] * 80)
-    for tag in _HEADING_TAGS:
+    for tag in TAGS_DE_HEADING:
         assert Block(tag=tag, text=longo).is_short is True, tag
-    assert Block(tag="p", text=longo).is_short is False
+
+    # O inverso: um bloco de prova longo não é curto. Uma tag de corpo aqui faz
+    # um artigo inteiro contar como marcador forte só por conter a frase.
+    for tag in ("p", "div", "li", "td", "section", "article", "span", "blockquote"):
+        assert Block(tag=tag, text=longo).is_short is False, tag
 
 
 def test_toda_tag_de_regiao_pode_definir_a_regiao_de_um_link():
     from adsense_checks.completeness import _REGION_TAGS, parse_document
 
+    def regiao(html: str) -> str:
+        return parse_document(html).links[0].region
+
     assert len(_REGION_TAGS) == 9
     # A TAG vence a classe: `<nav class="rodape">` é navegação, não rodapé.
     por_tag = {"footer": "footer", "nav": "nav", "header": "nav"}
-    for tag in _REGION_TAGS:
-        doc = parse_document(f'<body><{tag} class="rodape"><a href="/x">x</a></{tag}></body>')
-        assert doc.links[0].region == por_tag.get(tag, "footer"), tag
+    for tag in TAGS_DE_REGIAO:
+        html = f'<body><{tag} class="rodape"><a href="/x">x</a></{tag}></body>'
+        assert regiao(html) == por_tag.get(tag, "footer"), tag
 
     # E as que não têm região própria pegam a da classe, nos dois idiomas.
-    for tag in _REGION_TAGS - set(por_tag):
+    for tag in [t for t in TAGS_DE_REGIAO if t not in por_tag]:
         for classe, esperado in (("rodape", "footer"), ("footer", "footer"),
                                  ("menu", "nav"), ("nav", "nav")):
-            doc = parse_document(
-                f'<body><{tag} class="{classe}"><a href="/x">x</a></{tag}></body>')
-            assert doc.links[0].region == esperado, (tag, classe)
+            html = f'<body><{tag} class="{classe}"><a href="/x">x</a></{tag}></body>'
+            assert regiao(html) == esperado, (tag, classe)
+
+    # O inverso: uma tag fora da lista não abre região nenhuma, e o link fica
+    # no corpo. `_nav_targets` filtra por região, então uma entrada a mais aqui
+    # promove links de prosa a candidatos de menu.
+    for tag in ("span", "p", "article", "table", "form", "dl", "figure"):
+        html = f'<body><{tag} class="rodape"><a href="/x">x</a></{tag}></body>'
+        assert regiao(html) == "body", tag

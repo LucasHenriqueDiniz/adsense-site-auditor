@@ -889,85 +889,261 @@ def test_o_rotulo_e_a_classificacao_concordam_na_fronteira():
 
 
 # --------------------------------------------------------------------------
-# Conteúdo das coleções: contagem literal (pega a remoção) mais iteração sobre
-# as entradas (pega a entrada que não funciona).
+# Conteúdo das coleções.
+#
+# Cada teste abaixo leva TRÊS partes, e nenhuma delas basta sozinha:
+#
+#   1. a contagem literal, que pega a remoção de uma entrada;
+#   2. a iteração sobre uma lista LITERAL, escrita aqui, que pega a troca de
+#      uma entrada por outra;
+#   3. a lista inversa — entradas que têm de NÃO estar no conjunto — que pega
+#      o outro lado da troca, e a inclusão de uma entrada a mais.
+#
+# Iterar o próprio conjunto seria `x in S for x in S`: a função consumida é
+# definida como pertinência no conjunto iterado, então trocar uma entrada leva
+# o caso de teste junto e a suíte inteira continua verde. Medido: trocar `wbr`
+# por `marquee` em `VOID_ELEMENTS`, `a` por `div` em `INLINE_ELEMENTS` e
+# `.css` por `.html` em `_ASSET_SUFFIXES` — cada troca rodada sozinha contra a
+# suíte toda — não derrubava um único teste.
 # --------------------------------------------------------------------------
+
+# Os catorze elementos void do HTML5, escritos à mão.
+ELEMENTOS_VOID = (
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+)
+
+# Os oito elementos cujo conteúdo não é texto da página.
+ELEMENTOS_DESCARTADOS = (
+    "head", "iframe", "noscript", "script", "style", "svg", "template", "title",
+)
+
+# Os trinta e quatro elementos que não separam palavras.
+ELEMENTOS_INLINE = (
+    "a", "abbr", "b", "bdi", "bdo", "big", "cite", "code", "data", "del",
+    "dfn", "em", "font", "i", "ins", "kbd", "label", "mark", "q", "rp",
+    "rt", "ruby", "s", "samp", "small", "span", "strong", "sub", "sup",
+    "time", "tt", "u", "var", "wbr",
+)
+
+# Os seis containers que podem abrigar o corpo de um artigo.
+CONTAINERS_DE_CONTEUDO = ("article", "body", "div", "main", "section", "td")
+
+# Os três elementos que são a página inteira, e não uma parte dela.
+ELEMENTOS_DE_PAGINA_INTEIRA = ("#document", "body", "html")
+
+# Os seis ids de ponto de montagem que os frameworks deixam no HTML servido.
+IDS_DE_MOUNT = ("__next", "__nuxt", "___gatsby", "app", "main-app", "root")
+
+
+def _ruido(n: int) -> str:
+    """n palavras de chrome, distinguíveis das de `_palavras` na saída."""
+    return " ".join(["ruido"] * n)
+
+
+def _duas_divs(meio: str) -> str:
+    """Duas divs disputando a pontuação, com `meio` na frente do <p> da maior.
+
+    Um elemento void não empilha: o `<p>` de 200 palavras continua filho do
+    `div#a` e credita tudo a ele. Um elemento que empilha vira o pai do `<p>`,
+    não é container de conteúdo, e o `div#a` fica só com a metade que o
+    crédito de avô paga — perde para o `div#b`, que é menor.
+    """
+    return (
+        f'<html><body><div id="a"><{meio}><p>{_palavras(200)}</p></div>'
+        f'<div id="b"><p>{_ruido(150)}</p></div></body></html>'
+    )
+
+
+def _com_e_sem_container(tag: str) -> str:
+    """Um `<p>` longo dentro de `tag`, dentro de um `<div>` que também pontua.
+
+    Se `tag` é container de conteúdo, ela leva o crédito inteiro do parágrafo
+    e vence; se não é, o crédito de avô cai no `div#fora`, que já tem ruído
+    próprio, e é o `div#fora` que vence — trazendo o ruído junto.
+    """
+    return (
+        f'<html><body><div id="fora"><p>{_ruido(20)}</p>'
+        f'<{tag} id="dentro"><p>{_palavras(200)}</p></{tag}></div></body></html>'
+    )
 
 
 def test_todo_elemento_void_nao_engole_o_resto_do_documento():
     """Sem end tag, um elemento void empilhado nunca desempilha. O parser em
-    árvore tolera isso melhor que o contador que ele substituiu, mas a estrutura
-    muda: o irmão seguinte vira filho dele."""
-    from adsense_checks.text import VOID_ELEMENTS, _parse, extract_text
+    árvore tolera isso melhor que o contador que ele substituiu, e o texto
+    extraído sai igual — o comentário do módulo diz isso e está certo. O que
+    muda é a estrutura: o irmão seguinte vira filho dele, e a pontuação de
+    conteúdo principal credita o pai errado. É essa a consequência observável,
+    e é a terceira asserção de cada volta."""
+    from adsense_checks.text import VOID_ELEMENTS, _parse
 
     assert len(VOID_ELEMENTS) == 14
-    for tag in VOID_ELEMENTS:
+    for tag in ELEMENTOS_VOID:
         html = f"<html><body><p>antes</p><{tag} x=1><p>depois</p></body></html>"
         assert extract_text(html) == "antes depois", tag
         # E nada fica aberto na pilha por conta dele.
-        doc = _parse(html)
-        assert [n.tag for n in doc.open] == ["#document"], tag
+        assert [n.tag for n in _parse(html).open] == ["#document"], tag
+        # E o irmão seguinte continua sendo irmão, não filho.
+        assert main_content_text(_duas_divs(tag)).startswith("palavra"), tag
+
+    # O inverso: um elemento que NÃO é void empilha, e aí o div menor vence.
+    # É o que uma entrada a mais nesta lista quebraria.
+    for tag in ("blockquote", "b", "figure", "marquee", "span"):
+        assert main_content_text(_duas_divs(tag)).startswith("ruido"), tag
 
 
 def test_todo_elemento_descartado_some_da_extracao():
-    from adsense_checks.text import DROPPED_ELEMENTS, extract_text
+    from adsense_checks.text import DROPPED_ELEMENTS
 
     assert len(DROPPED_ELEMENTS) == 8
-    for tag in DROPPED_ELEMENTS:
+    for tag in ELEMENTOS_DESCARTADOS:
         html = f"<html><body><p>visivel</p><{tag}>escondido</{tag}></body></html>"
         assert "escondido" not in extract_text(html), tag
         assert "visivel" in extract_text(html), tag
+
+    # E nada além destes é descartado: marcar uma tag de conteúdo aqui apaga a
+    # prosa da página do relatório e reporta o autor como se não tivesse escrito.
+    for tag in ("article", "aside", "div", "footer", "header", "main",
+                "nav", "p", "section", "td"):
+        html = f"<html><body><p>visivel</p><{tag}>presente</{tag}></body></html>"
+        assert "presente" in extract_text(html), tag
 
 
 def test_todo_elemento_inline_nao_parte_uma_palavra():
     """"Hyper<em>text</em>" é uma palavra, não duas: um separador aqui inventa
     uma palavra que não está na página."""
-    from adsense_checks.text import INLINE_ELEMENTS, extract_text, word_count
+    from adsense_checks.text import INLINE_ELEMENTS
 
     assert len(INLINE_ELEMENTS) == 34
-    for tag in INLINE_ELEMENTS:
+    for tag in ELEMENTOS_INLINE:
         html = f"<p>hyper<{tag}>texto</{tag}></p>"
         assert extract_text(html) == "hypertexto", tag
         assert word_count(extract_text(html)) == 1, tag
 
+    # E o inverso, que é o outro lado de toda troca: uma tag de bloco tem de
+    # separar. `br`, `hr`, `img` e `input` estão fora da lista de propósito —
+    # o comentário do módulo os nomeia —, então soldá-los aqui é o defeito.
+    for tag in ("br", "div", "h1", "hr", "img", "input", "li", "p", "section", "td"):
+        html = f"<p>hyper<{tag}>texto</{tag}></p>"
+        assert extract_text(html) == "hyper texto", tag
+        assert word_count(extract_text(html)) == 2, tag
+
 
 def test_todo_container_de_conteudo_pode_vencer_a_pontuacao():
-    from adsense_checks.text import CONTENT_CONTAINERS, main_content_text
+    """`article` e `main` não passam por aqui: o atalho de `_main_container`
+    devolve os dois antes de a pontuação rodar, e a participação deles NESTE
+    conjunto não tem saída pública que a distinga — ver
+    `test_article_e_main_no_conjunto_de_containers_nao_mudam_saida_nenhuma`.
+    `body` tem forma própria, porque vencer com ele significa não ter isolado
+    nada — `test_body_vence_a_pontuacao_e_isso_e_nada_isolado`."""
+    from adsense_checks.text import CONTENT_CONTAINERS
 
     assert len(CONTENT_CONTAINERS) == 6
-    for tag in CONTENT_CONTAINERS:
-        if tag in ("body", "main"):  # atalhos próprios do heurístico
+    for tag in CONTAINERS_DE_CONTEUDO:
+        if tag in ("article", "body", "main"):
             continue
-        html = (f"<html><body><nav><a href=/x>menu</a></nav>"
-                f"<{tag}><p>{' '.join(['conteudo'] * 40)}</p></{tag}></body></html>")
-        assert "menu" not in main_content_text(html), tag
-        assert main_content_text(html).count("conteudo") == 40, tag
+        assert "ruido" not in main_content_text(_com_e_sem_container(tag)), tag
+        assert main_content_text(_com_e_sem_container(tag)).count("palavra") == 200, tag
+
+    # E o inverso: mobília nunca pode vencer a pontuação. Um `<nav>` aqui é o
+    # menu virando conteúdo principal — o defeito que a pontuação existe para
+    # não cometer.
+    for tag in ("aside", "footer", "form", "header", "li", "nav", "span", "ul"):
+        assert "ruido" in main_content_text(_com_e_sem_container(tag)), tag
+
+
+def test_body_vence_a_pontuacao_e_isso_e_nada_isolado():
+    """`body` é container de conteúdo porque uma página pode pendurar os
+    parágrafos direto nele — e um único `<p>` no rodapé basta, porque o crédito
+    de avô cai no body sempre que o pai (`<footer>`, `<nav>`) não é container.
+
+    Sem `body` no conjunto, o `<div>` menor venceria e a medição sairia como se
+    o rodapé tivesse sido separado do artigo. Com ele, `_main_container` diz
+    que não separou nada e `measure_depth` recusa a contagem."""
+    html = (f"<html><body><footer><p>{_ruido(150)}</p></footer>"
+            f'<div id="d"><p>{_palavras(100)}</p></div></body></html>')
+    d = measure_depth(html)
+    assert d.status is Status.ERROR
+    assert "main content not isolated" in d.reason
+
+
+def test_article_e_main_no_conjunto_de_containers_nao_mudam_saida_nenhuma():
+    """Os dois membros de `CONTENT_CONTAINERS` que não consigo fixar, e por quê.
+
+    `_main_container` devolve o `<main>` ou o `<article>` mais rico ANTES de
+    pontuar, então a pontuação só os alcança quando nenhum dos dois tem uma
+    única palavra — e um `<p>` que dá peso sem dar palavra precisa ser só
+    pontuação, tipo "!!! ???". Nesse documento a saída pública é idêntica com e
+    sem eles no conjunto: `measure_depth` responde
+    `FAIL / "no main content found (0 words)"` dos dois jeitos. Medido tirando
+    cada um do conjunto em tempo de execução.
+
+    O que as duas tags DE FATO decidem é o atalho, e é isso que fica pinado
+    aqui: um `<main>` ou um `<article>` vence um `<div>` muito maior, e entre
+    os dois o `<main>` vem primeiro."""
+    from adsense_checks.text import CONTENT_CONTAINERS
+
+    assert {"article", "main"} <= CONTENT_CONTAINERS
+
+    for tag in ("main", "article"):
+        html = (f"<html><body><{tag}><p>{_palavras(200)}</p></{tag}>"
+                f'<div id="maior"><p>{_ruido(400)}</p></div></body></html>')
+        assert "ruido" not in main_content_text(html), tag
+        assert main_content_text(html).count("palavra") == 200, tag
+
+    # A ordem do atalho: `<main>` antes de `<article>`.
+    html = (f"<html><body><main><p>{_palavras(50)}</p></main>"
+            f"<article><p>{_ruido(400)}</p></article></body></html>")
+    assert "ruido" not in main_content_text(html)
+
+    # E o documento em que o conjunto chega a ser consultado sobre eles: sem
+    # palavra nenhuma, a resposta é a mesma nos dois lados da troca.
+    for tag in ("main", "article"):
+        d = measure_depth(f"<html><body><{tag}><p>!!! ???</p></{tag}></body></html>")
+        assert d.words == 0, tag
+        assert "no main content found" in d.reason, tag
 
 
 def test_todo_elemento_de_pagina_inteira_significa_nada_isolado():
     """Vencer a pontuação com um destes é o heurístico dizendo que não separou
-    nada — e `measure_depth` reporta isso como ERROR em vez de medir o menu."""
-    from adsense_checks.text import WHOLE_PAGE_ELEMENTS, measure_depth
+    nada — e `measure_depth` reporta isso como ERROR em vez de medir o menu.
 
-    assert sorted(WHOLE_PAGE_ELEMENTS) == ["#document", "body", "html"]
-    html = "<html><body><p>" + " ".join(["palavra"] * 400) + "</p></body></html>"
+    Só `body` é alcançável, e a interseção abaixo é a prova: o vencedor da
+    pontuação sai de `credit`, que só aceita tag em `CONTENT_CONTAINERS`, e o
+    outro caminho de saída de `_main_container` devolve `False` fixo sem
+    consultar este conjunto. `html` e `#document` são guarda-corpo: nenhum
+    documento chega a fazer a pergunta `winner.tag not in WHOLE_PAGE_ELEMENTS`
+    sobre eles. Não consigo fixá-los com comportamento, e inventar uma
+    asserção que só reafirma o conjunto seria a mesma auto-referência que este
+    bloco existe para tirar."""
+    from adsense_checks.text import CONTENT_CONTAINERS, WHOLE_PAGE_ELEMENTS
+
+    assert sorted(WHOLE_PAGE_ELEMENTS) == sorted(ELEMENTOS_DE_PAGINA_INTEIRA)
+    alcancaveis = CONTENT_CONTAINERS & WHOLE_PAGE_ELEMENTS
+    assert alcancaveis == {"body"}
+
+    html = "<html><body><p>" + _palavras(400) + "</p></body></html>"
     d = measure_depth(html)
     assert d.status is Status.ERROR
     assert "main content not isolated" in d.reason
 
 
 def test_todo_id_de_mount_conhecido_identifica_uma_casca():
-    from adsense_checks.text import _MOUNT_IDS, looks_javascript_rendered
+    from adsense_checks.text import _MOUNT_IDS
+
+    def casca(ident: str) -> str:
+        return ('<html><head><script src="/b.js"></script></head>'
+                f'<body><div id="{ident}"></div></body></html>')
 
     assert len(_MOUNT_IDS) == 6
-    for ident in _MOUNT_IDS:
-        html = ('<html><head><script src="/b.js"></script></head>'
-                f'<body><div id="{ident}"></div></body></html>')
-        assert looks_javascript_rendered(html) is True, ident
-    # Um id desconhecido não é casca só por estar vazio.
-    assert looks_javascript_rendered(
-        '<html><head><script src="/b.js"></script></head>'
-        '<body><div id="conteudo-principal"></div></body></html>') is False
+    for ident in IDS_DE_MOUNT:
+        assert looks_javascript_rendered(casca(ident)) is True, ident
+
+    # E o inverso: um id desconhecido não é casca só por estar vazio. Um
+    # wrapper de tema vazio é uma página fina, não uma página renderizada no
+    # cliente, e as duas coisas viram recomendações diferentes.
+    for ident in ("conteudo-principal", "container", "page", "site", "wrapper", ""):
+        assert looks_javascript_rendered(casca(ident)) is False, ident
 
 
 def test_nenhum_elemento_void_esta_entre_os_descartados():
