@@ -295,3 +295,23 @@ def test_url_anunciada_pelo_sitemap_que_da_404_reprova_a_linha(server, monkeypat
     assert "[PASS] ADS-CRAWL-07 sitemap" not in saida
     assert "0 of 2 sampled URL(s) answered 200" in saida
     assert codigo == 1
+
+
+def test_availability_avisa_quando_o_site_nao_e_https():
+    """Só o downgrade https->http estava fixado. Um site servido em http puro
+    escalava para WARNING e nada observava: apagar a escalação deixava a linha
+    em INFO, que sai com exit 0."""
+    linha = check_technical._availability(_home_fetch("http://exemplo.com/"))
+    assert linha.status is Status.WARNING
+    assert any("not HTTPS" in f for f in linha.findings)
+
+
+def test_availability_nao_cronometra_uma_pagina_de_erro():
+    """A função roda no `else` de `home.error is None`, que é tão verdadeiro para
+    um 500 quanto para um 200. Sem a escalação ela respondia três quartos de
+    ADS-CRAWL-06 sobre uma resposta que o mesmo relatório estava reprovando."""
+    erro = _home_fetch("https://exemplo.com/")
+    erro.status_code = 500
+    linha = check_technical._availability(erro)
+    assert linha.status is Status.MISSING
+    assert any("no served page to time" in f for f in linha.findings)

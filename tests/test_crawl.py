@@ -1206,3 +1206,81 @@ def test_nenhuma_pagina_buscada_nao_aprova_nenhum_dos_tres_checks():
         assert check.status is Status.ERROR, check.requirement
         assert check.passed is False, check.requirement
         assert any("no pages were fetched" in f for f in check.findings), check.requirement
+
+
+def test_erro_de_transporte_numa_pagina_reprova_ADS_CRAWL_01(server):
+    """Uma página cujo GET não completou escalava para ERROR e nada olhava: sem
+    a escalação, um link que não resolve conta como página alcançável."""
+    base, routes = server
+    routes["/"] = (200, HTML, pagina("Home", '<a href="http://127.0.0.1:1/morto">x</a>'
+                                             '<a href="/ok">ok</a>'))
+    routes["/ok"] = (200, HTML, pagina("Ok"))
+
+    r = crawl(base + "/", max_depth=2, delay=0, respect_robots=False,
+              extra_seeds=[base + "/ok"])
+    r.pages.append(_pagina_com_erro(base))
+
+    check = check_pages_reachable(r)
+    assert check.status is Status.ERROR
+    assert any("request failed" in f for f in check.findings)
+
+
+def _pagina_com_erro(base):
+    return Page(requested_url=base + "/timeout", final_url=base + "/timeout",
+                depth=1, error="ReadTimeout: simulado")
+
+
+def test_reconferencia_sem_cookies_que_falha_e_ERROR(server):
+    """`verify_stateless` re-pede a página com sessão nova; se esse pedido falha
+    a comparação não aconteceu. Sem a escalação, o check aprova sem ter
+    comparado nada."""
+    base, routes = server
+    routes["/"] = (200, HTML, pagina("Home", '<a href="/a">a</a>'))
+    routes["/a"] = (301, {**HTML, "Location": base + "/b"}, "")
+    routes["/b"] = (200, HTML, pagina("B"))
+
+    r = crawl(base + "/", max_depth=1, delay=0, respect_robots=False)
+    # A página que redirecionou passa a apontar para um host morto: a
+    # reconferência sem cookies vai falhar no transporte.
+    for p in r.pages:
+        if p.redirect_hops:
+            p.requested_url = "http://127.0.0.1:1/a"
+
+    check = check_redirect_chain(r, verify_stateless=True, timeout=1)
+    assert check.status is Status.ERROR
+    assert any("cookie-less re-request failed" in f for f in check.findings)
+
+
+def test_canonical_que_aponta_para_outro_lugar_e_registrado_como_INFO(server):
+    """Não é reprovação — canonical apontando para outro lugar é normal em URL
+    filtrada — mas é observação registrada, e sem a escalação ela some do status
+    da linha e o relatório fica indistinguível de um site sem nada a notar."""
+    base, routes = server
+    corpo = (f'<html><head><link rel="canonical" href="{base}/outro"></head>'
+             "<body><p>conteudo</p></body></html>")
+    routes["/"] = (200, HTML, corpo)
+
+    r = crawl(base + "/", max_depth=1, delay=0, respect_robots=False)
+    check = check_session_urls(r, verify_two_sessions=True, timeout=2)
+
+    assert any("canonical points to" in f for f in check.findings)
+    assert check.status is not Status.OK
+
+
+def test_comparacao_de_duas_sessoes_que_falha_e_ERROR(server):
+    """A comparação de canonical entre duas visitas independentes: se o re-pedido
+    não completa, comparação nenhuma aconteceu. Sem a escalação o check aprova
+    sobre uma verificação que não rodou."""
+    base, routes = server
+    corpo = (f'<html><head><link rel="canonical" href="{base}/"></head>'
+             "<body><p>conteudo</p></body></html>")
+    routes["/"] = (200, HTML, corpo)
+
+    r = crawl(base + "/", max_depth=1, delay=0, respect_robots=False)
+    # A página existe e declara canonical; o re-pedido vai para um host morto.
+    for p in r.pages:
+        p.final_url = "http://127.0.0.1:1/"
+
+    check = check_session_urls(r, verify_two_sessions=True, timeout=1)
+    assert check.status is Status.ERROR
+    assert any("re-request for canonical comparison failed" in f for f in check.findings)

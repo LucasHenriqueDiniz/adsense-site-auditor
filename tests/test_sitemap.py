@@ -822,3 +822,39 @@ def test_timeout_do_verify_sample_urls_chega_na_wire(server):
 
     assert amostra.ok_count == 0
     assert amostra.status is Status.ERROR
+
+
+def test_indice_que_resolve_para_zero_urls_e_WARNING(server):
+    """Um `<sitemapindex>` cujos filhos existem e não listam URL nenhuma: sem a
+    escalação, o site aparece anunciando um sitemap saudável que não anuncia
+    página alguma."""
+    base, rotas = server
+    rotas["/sitemap.xml"] = (200, XML, sitemapindex(f"{base}/s1.xml"))
+    rotas["/s1.xml"] = (200, XML, urlset())
+
+    r = check_sitemap(base + "/")
+
+    assert r.found is True
+    assert r.url_count == 0
+    assert r.status is Status.WARNING
+    assert any("zero page URLs" in m or "zero URLs" in m for m in r.reasons)
+
+
+def test_indice_que_so_referencia_outro_ja_visitado_e_WARNING(server):
+    """Isolado: um filho que é `<urlset>` vazio, ou um índice sem filhos, já
+    carrega WARNING no próprio `doc.status` e mascara esta escalação. Aqui os
+    dois documentos são índices válidos e bem formados — o segundo aponta de
+    volta para o primeiro, que já foi visitado — então nada além desta linha
+    pode dizer que o sitemap não resolveu para página alguma."""
+    base, rotas = server
+    rotas["/sitemap.xml"] = (200, XML, sitemapindex(f"{base}/s1.xml"))
+    rotas["/s1.xml"] = (200, XML, sitemapindex(f"{base}/sitemap.xml"))
+
+    r = check_sitemap(base + "/")
+
+    assert r.found is True
+    assert r.kind == "sitemapindex"
+    assert r.url_count == 0
+    assert r.truncated is False
+    assert r.status is Status.WARNING
+    assert any("zero page URLs" in m for m in r.reasons)

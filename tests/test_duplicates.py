@@ -690,3 +690,42 @@ def test_paginas_identicas_servidas_de_verdade_sao_detectadas(server):
     assert resultado.duplicate_page_count == 10
     assert resultado.duplicate_ratio == 1.0
     assert resultado.status is Status.FAIL
+
+
+def test_fonte_de_comparacao_sem_texto_impede_a_aprovacao():
+    """Uma fonte ilegível era registrada no motivo e não movia o status: sem a
+    escalação, um concorrente que não pôde ser lido conta como comparado."""
+    r = compare_against("texto original sobre marcenaria e bancadas", {"rival": "   "})
+    assert r.status is Status.MISSING
+    assert any("has no text" in m for m in r.reasons)
+
+
+def test_overlap_na_faixa_de_monitoramento_e_WARNING():
+    """As faixas de `overlap_band` eram testadas na função pura; o status que
+    `compare_against` deriva delas não era. Sem a escalação, 40-60% de overlap
+    — a faixa que a rubrica manda vigiar — volta como OK."""
+    base = " ".join(f"p{i}" for i in range(100))
+    nosso = base + " " + " ".join(f"x{i}" for i in range(100))
+    rival = base + " " + " ".join(f"y{i}" for i in range(100))
+
+    r = compare_against(nosso, {f"r{i}": rival for i in range(SERP_SAMPLE_SIZE)})
+
+    assert r.band == "monitor", r.overlap
+    assert r.status is Status.WARNING
+
+
+def test_uma_fonte_ilegivel_entre_fontes_boas_ainda_impede_o_pass():
+    """Isolado de propósito: com nenhuma fonte medida, o ramo "não veio fonte
+    nenhuma" escala igual, e com menos fontes que o esperado o ramo do déficit
+    também. Uma boa e uma vazia, com `expected_sources` batendo no que foi
+    medido, deixa só a fonte ilegível podendo mover o status."""
+    nosso = " ".join(f"p{i}" for i in range(80))
+    # A fonte boa nao pode ter sobreposicao: 100% de overlap escala para FAIL e
+    # mascara de novo. Sem sobreposicao ela cai na faixa "safe", que nao escala.
+    alheia = " ".join(f"z{i}" for i in range(80))
+    r = compare_against(nosso, {"boa": alheia, "vazia": "   "}, expected_sources=1)
+
+    assert len(r.sources) == 1  # a boa foi medida
+    assert r.band == "safe"  # e nada nela move o status
+    assert any("has no text" in m for m in r.reasons)
+    assert r.status is Status.MISSING

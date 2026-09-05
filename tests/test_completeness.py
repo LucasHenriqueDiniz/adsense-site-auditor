@@ -766,3 +766,30 @@ def test_pagina_de_confianca_ausente_e_reportada_como_MISSING(server):
     # O status do relatório vem SÓ desse achado, então ele é o que a asserção vê.
     assert r.status is Status.MISSING
     assert r.passed is False
+
+
+def test_todo_candidato_a_pagina_de_confianca_inacessivel_e_ERROR(server):
+    """Um candidato que não resolve escalava `access` para ERROR, e sem isso o
+    desfecho vira MISSING: "não achei" no lugar de "não consegui olhar". A
+    diferença é a que este pacote existe para manter."""
+    base, routes = server
+    # A home responde; nenhum candidato a About/Contact responde, e o servidor
+    # corta a conexão em vez de devolver 404 — erro de transporte, não ausência.
+    routes["/"] = (200, {}, pagina("Casa", extra=MAILTO))
+
+    import requests
+
+    from adsense_checks.completeness import _Candidate, _resolve_trust_page
+    from adsense_checks.http import fetch as _fetch
+
+    morto = "http://127.0.0.1:1/"
+    desfecho = _resolve_trust_page(
+        kind="about",
+        candidates=[_Candidate(url=morto + "sobre", declared=True)],
+        home=_fetch(base + "/"),
+        home_text="casa",
+        session=requests.Session(),
+        timeout=1,
+    )
+    assert desfecho.status is Status.ERROR
+    assert "may well exist" in desfecho.reason

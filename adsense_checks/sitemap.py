@@ -498,6 +498,14 @@ def check_sitemap(
         # so a 500 or a malformed body is not summarised as a plain absence.
         for _url, status, _reason in result.attempts:
             result.status = escalate(result.status, status)
+        # A floor that nothing can currently reach, kept on purpose. `attempts`
+        # is never empty here — discovery always yields at least the five
+        # conventional paths — and every document that failed to be a sitemap
+        # carries MISSING or worse, so the loop above has already raised the
+        # status past this line. It stays because the invariant is not local: a
+        # future `_fetch_doc` path returning an OK non-sitemap would otherwise
+        # let "no sitemap found" come back as a pass. A mutation report will list
+        # it as a survivor; it is unreachable, not untested.
         result.status = escalate(result.status, Status.MISSING)
         result.note(f"no sitemap found; tried {len(result.candidates)} candidate URLs")
 

@@ -514,3 +514,15 @@ def test_pagina_ascii_sem_charset_nao_e_alterada(server):
     routes["/en"] = (200, {"Content-Type": "text/html"}, html)
     medido = measure_url(base + "/en")
     assert medido.words == word_count(main_content_text(html))
+
+
+def test_conteudo_principal_nao_isolado_e_ERROR_na_medicao():
+    """`main_content_text` devolvendo o body inteiro já era testado; o que não
+    era é que `measure_depth` escala isso para ERROR. Sem a escalação, uma
+    contagem sobre o menu e o rodapé volta como medição boa — e o
+    `analyze_text_depth` sai com 0."""
+    html = "<html><body><p>" + "palavra " * 500 + "</p></body></html>"
+    d = measure_depth(html)
+    assert d.words >= 500  # tem texto de sobra: não é o caso de página vazia
+    assert d.status is Status.ERROR
+    assert "main content not isolated" in d.reason
