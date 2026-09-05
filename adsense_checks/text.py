@@ -62,7 +62,21 @@ import requests
 from adsense_checks.http import DEFAULT_TIMEOUT, Fetch, fetch
 from adsense_checks.status import Status, escalate
 
-# No end tag exists for these, so nothing may ever be pushed on their behalf.
+# No end tag exists for these, so nothing is pushed on their behalf.
+#
+# What that buys, measured: the stack comes back empty after any document
+# containing one, and the tree keeps the shape the markup describes. What it does
+# NOT buy is the text — remove any of the fourteen and `extract_text` returns the
+# same string, because `_collect` walks the whole tree and an element left open
+# only becomes the parent of its following siblings, whose text is gathered
+# either way. The old counter-based extractor is where an unclosed element was
+# fatal, and this list outlived it.
+#
+# It stays for two reasons. The set must remain disjoint from `DROPPED_ELEMENTS`,
+# and that IS load-bearing: a void element marked dropped would push a node that
+# never pops and take the rest of the document with it. And a parser whose stack
+# is honest is one whose next reader can reason about it — a guarantee is worth
+# keeping before it is worth being observable in the output.
 VOID_ELEMENTS = frozenset(
     {
         "area",
@@ -229,8 +243,10 @@ class _Parser(HTMLParser):
         if tag == "script" and any(k.lower() == "src" for k, _ in attrs):
             self.has_external_script = True
         if tag in VOID_ELEMENTS:
-            # The whole point: return before touching the stack. A <br> or <hr>
-            # still separates words, so it leaves a separator behind.
+            # Return before touching the stack, so nothing is left open for an
+            # element that has no end tag. The separator is the part that shows
+            # in the output: a <br> or <hr> breaks a word boundary, and the
+            # elements listed as inline — `wbr` alone, today — must not.
             if tag not in INLINE_ELEMENTS:
                 self._current.content.append(_SEPARATOR)
             return

@@ -677,3 +677,19 @@ def test_todo_id_de_mount_conhecido_identifica_uma_casca():
     assert looks_javascript_rendered(
         '<html><head><script src="/b.js"></script></head>'
         '<body><div id="conteudo-principal"></div></body></html>') is False
+
+
+def test_nenhum_elemento_void_esta_entre_os_descartados():
+    """A parte de `VOID_ELEMENTS` que de fato carrega o resultado, e a única que
+    o docstring do módulo chama de fatal: um elemento sem end tag marcado como
+    descartado empilharia um nó que nunca desempilha e levaria o resto do
+    documento junto. Era o defeito original — `meta` e `link` na lista de
+    descarte zeravam a extração de qualquer página real."""
+    from adsense_checks.text import DROPPED_ELEMENTS, VOID_ELEMENTS, extract_text
+
+    assert not (VOID_ELEMENTS & DROPPED_ELEMENTS)
+
+    # E a consequência, para o caso de a interseção deixar de ser vazia um dia.
+    for tag in ("meta", "link", "img"):
+        html = f"<html><body><p>antes</p><{tag} x=1><p>depois</p></body></html>"
+        assert extract_text(html) == "antes depois", tag
