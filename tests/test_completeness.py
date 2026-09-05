@@ -21,6 +21,7 @@ from adsense_checks.completeness import (
     NavLinkReport,
     Status,
     _candidates,
+    _nav_targets,
     check_completeness,
     check_trust_pages,
     count_broken_nav_links,
@@ -30,7 +31,8 @@ from adsense_checks.completeness import (
     visible_text,
 )
 from adsense_checks.completeness import as_base as as_base_publico
-from adsense_checks.http import Fetch
+from adsense_checks.crawl import crawl, parse_html, resolve_base
+from adsense_checks.http import Fetch, fetch
 
 # 66 palavras de prosa real, acima do mínimo de uma página de confiança.
 PROSA = "Escrevo sobre marcenaria desde 2015 e mantenho este site sozinho. " * 6
@@ -1047,6 +1049,407 @@ def test_as_duas_metades_nao_pedem_o_mesmo_endereco_duas_vezes():
     urls = [c.url for c in cands]
     assert len(urls) == len(set(urls))
     assert [c.declared for c in cands if c.url == "http://ex.com/about"] == [True]
+
+
+# --------------------------------------------------------------------------
+# <base href>
+#
+# O crawler respeita `<base href>` desde sempre; este módulo lia o MESMO
+# documento e não. Cada teste daqui é um dos casos que `crawl.resolve_base`
+# trata, conferido contra o comportamento do crawler em vez de contra uma
+# segunda opinião escrita aqui.
+# --------------------------------------------------------------------------
+
+
+def home_com_base(base_href, corpo):
+    """Uma home que declara `<base href>`, com prosa suficiente para ser lida."""
+    return (
+        f'<html><head><base href="{base_href}"><title>Casa</title></head>'
+        f"<body><h1>Casa</h1><p>{PROSA}</p>{corpo}</body></html>"
+    )
+
+
+def caminhos_pedidos(rotas):
+    """Os caminhos que chegaram no fio, na ordem, sem repetição."""
+    return list(dict.fromkeys(caminho for _, caminho, _ in rotas.received))
+
+
+def autenticadas(rotas):
+    """Os caminhos que chegaram no fio COM Authorization.
+
+    `requests` transforma o `user:pass@` de uma URL em Basic auth sozinho, então
+    é aqui que se vê a credencial raspada da página voltando para o servidor.
+    """
+    return [
+        caminho
+        for _, caminho, cabecalhos in rotas.received
+        if "authorization" in {k.lower() for k in cabecalhos}
+    ]
+
+
+def test_os_dois_parsers_leem_o_mesmo_base_href_em_todo_caso_de_borda():
+    """A garantia é de PARIDADE: o crawler e este módulo têm tokenizadores
+    diferentes lendo o mesmo documento, e foi divergirem que produziu o FAIL
+    falso. Cada caso abaixo é uma forma de `<base>` aparecer.
+
+    Comparar só um parser com o outro deixaria os dois errados juntos passarem,
+    então cada caso também traz a base resolvida esperada, escrita aqui.
+    """
+    url_do_doc = "http://ex.com/dir/page.html"
+    casos = [
+        ("", "http://ex.com/dir/page.html"),
+        ('<base href="/app/">', "http://ex.com/app/"),
+        # A própria base é relativa: resolve contra o diretório do documento.
+        ('<base href="app/">', "http://ex.com/dir/app/"),
+        # Não parseia: `join_url` devolve "" e a URL do documento é o fallback.
+        ('<base href="http://[abc/">', "http://ex.com/dir/page.html"),
+        # Fora do site é honrado; quem decide não seguir é o filtro de mesmo-site.
+        ('<base href="https://outro.invalid/">', "https://outro.invalid/"),
+        ('<base href="//outro.invalid/">', "http://outro.invalid/"),
+        # O primeiro vence — e um href vazio ou em branco não é um primeiro.
+        ('<base href="/app/"><base href="/v2/">', "http://ex.com/app/"),
+        ('<base href=""><base href="/app/">', "http://ex.com/app/"),
+        ('<base href="   ">', "http://ex.com/dir/page.html"),
+        ('<base href="   "><base href="/app/">', "http://ex.com/app/"),
+        # Dois `href` na MESMA tag. A spec manda o primeiro valer; os dois
+        # tokenizadores ficam com o último, e o que este caso fixa é que ficam
+        # com o MESMO. Divergir aqui não apareceria em relatório nenhum: os dois
+        # módulos simplesmente pediriam endereços diferentes do mesmo documento.
+        ('<base href="/a/" href="/b/">', "http://ex.com/b/"),
+        # Credencial não é honrada em base nenhuma. Uma base contamina TODO href
+        # relativo do documento de uma vez, então é aqui que ela não entra.
+        ('<base href="http://admin:s3cr3t@ex.com/app/">', "http://ex.com/app/"),
+        ("<base target='_blank'>", "http://ex.com/dir/page.html"),
+        # Dentro de uma subárvore que ESTE parser pula e o do crawler não. A
+        # spec diria que não vale; o que não pode é um valer e o outro não, que
+        # é a divergência invisível — nenhum relatório mostraria a causa.
+        ('<template><base href="/tpl/"></template>', "http://ex.com/tpl/"),
+        # E dentro de <script>, onde o conteúdo é texto cru para os dois
+        # tokenizadores e `<base>` nunca chega a ser uma tag.
+        ('<script><base href="/js/"></script>', "http://ex.com/dir/page.html"),
+    ]
+    for cabeca, esperado in casos:
+        html = f"<html><head>{cabeca}</head><body><a href='s'>s</a></body></html>"
+        do_crawler = parse_html(html).base_href
+        do_modulo = parse_document(html).base_href
+        assert do_modulo == do_crawler, cabeca
+        assert resolve_base(url_do_doc, do_modulo) == esperado, cabeca
+
+
+def test_base_href_muda_o_alvo_dos_links_de_navegacao(server):
+    """BLOCKER reproduzido: `_nav_targets` juntava cada href contra a URL da home
+    e ignorava o `<base href>` que `crawl` já respeitava.
+
+    Uma home com `<base href="/app/">` e três links de menu servidos e vivos em
+    `/app/` era reportada como "3 navigation link(s) return 4xx/5xx" — e três é
+    exatamente `BROKEN_NAV_FAIL_THRESHOLD`, então o veredito de manchete virava
+    FAIL ("o site parece abandonado") num site inteiro. `<base href>` é
+    incomum, mas é HTML comum, e um FAIL falso é o pior erro deste pacote
+    depois de um PASS falso.
+    """
+    base, rotas = server
+    menu = "<nav>" + "".join(
+        f"<a href='{p}'>{p}</a>" for p in ("sobre", "contato", "blog")
+    ) + "</nav>"
+    rotas["/"] = (200, {}, home_com_base("/app/", menu))
+    for p in ("sobre", "contato", "blog"):
+        rotas[f"/app/{p}"] = (200, {}, pagina(p))
+
+    relatorio = count_broken_nav_links(base + "/")
+
+    assert (relatorio.found, relatorio.checked, relatorio.count) == (3, 3, 0)
+    assert relatorio.status is not Status.FAIL
+    # E o que saiu no fio, não só o veredito: era `/sobre` que estava sendo
+    # pedido, e é sobre o endereço pedido que o relatório mentia.
+    pedidos = caminhos_pedidos(rotas)
+    assert "/app/sobre" in pedidos
+    assert "/sobre" not in pedidos
+
+
+def test_crawl_e_completeness_resolvem_o_mesmo_documento_do_mesmo_jeito(server):
+    """Os dois módulos leem a mesma home com tokenizadores diferentes. Discordar
+    sobre para onde os links dela apontam não é detalhe de cada um: é o defeito.
+    O teste compara os endereços resolvidos, não o veredito de nenhum dos dois.
+    """
+    base, rotas = server
+    menu = "<nav><a href='sobre'>Sobre</a><a href='blog/'>Blog</a></nav>"
+    rotas["/"] = (200, {}, home_com_base("/app/", menu))
+    rotas["/app/sobre"] = (200, {}, pagina("Sobre"))
+    rotas["/app/blog/"] = (200, {}, pagina("Blog"))
+
+    do_crawler = crawl(base + "/", delay=0).pages[0].links
+
+    resposta = fetch(base + "/")
+    doc = parse_document(resposta.text)
+    do_completeness = [u for u, _ in _nav_targets(doc, resposta.final_url or resposta.url)]
+
+    assert sorted(do_completeness) == sorted(do_crawler)
+    assert do_completeness == [f"{base}/app/sobre", f"{base}/app/blog/"]
+
+
+def test_base_href_relativo_e_resolvido_contra_a_url_do_documento(server):
+    """`<base href="app/">` não começa com barra: ele mesmo é relativo, e a base
+    do documento é a URL do documento. Resolver "app/" contra nada devolveria a
+    string crua e o link sumiria no filtro de esquema."""
+    base, rotas = server
+    rotas["/"] = (200, {}, home_com_base("app/", "<nav><a href='sobre'>s</a></nav>"))
+    rotas["/app/sobre"] = (200, {}, pagina("Sobre"))
+
+    relatorio = count_broken_nav_links(base + "/")
+
+    assert (relatorio.checked, relatorio.count) == (1, 0)
+
+
+def test_base_href_que_nao_parseia_cai_de_volta_na_url_do_documento(server):
+    """`join_url` devolve "" para um host entre colchetes quebrado, e "" como base
+    faz `urljoin` devolver todo href relativo intocado — que depois morre no
+    filtro de esquema, transformando uma página com links bons em "0 links". É o
+    caso que o crawler fecha com `or page.final_url`, e esta era a segunda cópia
+    da regra que não podia divergir."""
+    base, rotas = server
+    rotas["/"] = (200, {}, home_com_base("http://[abc/", "<nav><a href='sobre'>s</a></nav>"))
+    rotas["/sobre"] = (200, {}, pagina("Sobre"))
+
+    relatorio = count_broken_nav_links(base + "/")
+
+    assert (relatorio.found, relatorio.checked, relatorio.count) == (1, 1, 0)
+    assert "/sobre" in caminhos_pedidos(rotas)
+
+
+def test_o_primeiro_base_href_do_documento_e_o_que_vale(server):
+    """A spec diz que o primeiro `<base href>` vence, e é o que o parser do
+    crawler faz. Um segundo `<base>` mandando o menu para `/v2/` não pode mudar
+    endereço nenhum — as duas rotas existem aqui justamente para que o teste
+    prove qual delas foi pedida em vez de provar que alguma respondeu."""
+    base, rotas = server
+    rotas["/"] = (
+        200,
+        {},
+        '<html><head><base href="/app/"><base href="/v2/"></head>'
+        f"<body><h1>Casa</h1><p>{PROSA}</p><nav><a href='sobre'>s</a></nav></body></html>",
+    )
+    rotas["/app/sobre"] = (200, {}, pagina("Sobre"))
+    rotas["/v2/sobre"] = (200, {}, pagina("Sobre v2"))
+
+    count_broken_nav_links(base + "/")
+
+    pedidos = caminhos_pedidos(rotas)
+    assert "/app/sobre" in pedidos
+    assert "/v2/sobre" not in pedidos
+
+
+def test_base_href_vazio_nao_gasta_a_vez_do_proximo(server):
+    """`<base href="">` não declara base nenhuma. Contá-lo como "o primeiro"
+    faria o `<base href="/app/">` seguinte ser ignorado — e o parser do crawler
+    já exige href não vazio para fixar a base."""
+    base, rotas = server
+    rotas["/"] = (
+        200,
+        {},
+        '<html><head><base href=""><base href="/app/"></head>'
+        f"<body><h1>Casa</h1><p>{PROSA}</p><nav><a href='sobre'>s</a></nav></body></html>",
+    )
+    rotas["/app/sobre"] = (200, {}, pagina("Sobre"))
+
+    relatorio = count_broken_nav_links(base + "/")
+
+    assert (relatorio.checked, relatorio.count) == (1, 0)
+
+
+def test_base_href_para_fora_do_site_nao_cobra_uptime_de_terceiro(server):
+    """Um `<base href>` para outro host manda todo link relativo para fora, e
+    link de fora é uptime de terceiro. O crawler honra a base e deixa o filtro
+    de mesmo-site decidir não seguir; contar esses links como quebrados apenas
+    trocaria um FAIL falso por outro."""
+    base, rotas = server
+    rotas["/"] = (
+        200,
+        {},
+        home_com_base("https://outro-site.invalid/", "<nav><a href='sobre'>s</a></nav>"),
+    )
+
+    relatorio = count_broken_nav_links(base + "/")
+
+    assert (relatorio.found, relatorio.checked, relatorio.count) == (0, 0, 0)
+    assert relatorio.passed is True
+    # E o crawler chega ao mesmo endereço, pela mesma base, sem visitá-lo.
+    assert crawl(base + "/", delay=0).off_site == ["https://outro-site.invalid/sobre"]
+
+
+def test_base_href_muda_o_candidato_declarado_de_pagina_de_confianca(server):
+    """`_candidates` juntava o href do rodapé contra a URL da home pelo mesmo
+    motivo, então a página Sobre que o site declara nunca era pedida onde ela
+    está: o relatório dizia "No About page found", que é a afirmação que o
+    docstring de `check_trust_pages` proíbe — dita sobre uma URL que ninguém
+    pediu."""
+    base, rotas = server
+    rodape = f"<footer><a href='sobre'>Sobre</a>{MAILTO}</footer>"
+    rotas["/"] = (200, {}, home_com_base("/app/", rodape))
+    rotas["/app/sobre"] = (200, {}, pagina("Sobre"))
+
+    relatorio = check_trust_pages(base + "/")
+
+    assert relatorio.pages["about"].status is Status.OK
+    assert relatorio.pages["about"].url == f"{base}/app/sobre"
+
+
+def test_base_href_so_com_espacos_nao_gasta_a_vez_do_proximo(server):
+    """`<base href="   ">` não declara base nenhuma, exatamente como `href=""`
+    não declara: o valor é aparado ANTES de contar. Aceitar os espaços como "o
+    primeiro" faz o `<base href="/app/">` seguinte ser ignorado e o menu voltar
+    a ser pedido na raiz — o FAIL falso que este código existe para impedir,
+    reintroduzido por um `.strip()` a menos."""
+    base, rotas = server
+    rotas["/"] = (
+        200,
+        {},
+        '<html><head><base href="   "><base href="/app/"></head>'
+        f"<body><h1>Casa</h1><p>{PROSA}</p><nav><a href='sobre'>s</a></nav></body></html>",
+    )
+    rotas["/app/sobre"] = (200, {}, pagina("Sobre"))
+
+    relatorio = count_broken_nav_links(base + "/")
+
+    assert (relatorio.checked, relatorio.count) == (1, 0)
+    assert "/app/sobre" in caminhos_pedidos(rotas)
+
+
+def test_link_de_volta_para_a_home_nao_e_pedido_de_novo_sob_um_base():
+    """`seen` começa com a identidade da HOME, não com a da base. Quem já
+    respondeu é a home, e é outra grafia DELA que não ensina nada.
+
+    Começar pela base faz duas coisas de uma vez: a home vira link de menu e é
+    pedida de novo, e o link que aponta para a própria base (`/app/`) some da
+    lista sem nunca ter sido verificado — um link quebrado ali passaria batido.
+    """
+    menu = "<nav><a href='/'>Início</a><a href='./'>App</a></nav>"
+    doc = parse_document(home_com_base("/app/", menu))
+
+    alvos = [u for u, _ in _nav_targets(doc, "http://ex.com/")]
+
+    assert alvos == ["http://ex.com/app/"]
+
+
+def test_base_href_de_outro_site_nao_faz_o_audit_pedir_pagina_de_terceiro(
+    server, outro_servidor
+):
+    """Honrar a base é de propósito, e `resolve_base` diz no docstring que NÃO
+    seguir para fora é trabalho do filtro de mesmo-site de cada chamador — este
+    é o chamador que de fato busca. Sem o filtro, `check_trust_pages` pede
+    `/sobre` no host do terceiro e reporta "about OK" apontando para lá: o audit
+    responderia sobre o site auditado com a página de outra pessoa."""
+    base, rotas = server
+    terceiro, rotas_terceiro = outro_servidor
+    rodape = f"<footer><a href='sobre'>Sobre</a>{MAILTO}</footer>"
+    rotas["/"] = (200, {}, home_com_base(terceiro + "/", rodape))
+    rotas_terceiro["/sobre"] = (200, {}, pagina("Sobre do terceiro"))
+
+    relatorio = check_trust_pages(base + "/")
+
+    assert rotas_terceiro.received == []
+    assert relatorio.pages["about"].status is Status.MISSING
+    assert terceiro not in (relatorio.pages["about"].url or "")
+
+
+def test_base_href_com_esquema_que_o_cliente_nao_fala_nao_vira_candidato(server):
+    """`<base href="ftp://…">` manda todo href relativo para um transporte que
+    este cliente não fala. `_nav_targets` sempre filtrou por esquema e
+    `_candidates` não: a página Sobre declarada virava um `fetch` de `ftp://`,
+    voltava ERROR ("No connection adapters were found") e o relatório culpava o
+    site por uma URL que ele nunca poderia servir por HTTP. Antes de a base ser
+    honrada só um `<a href="ftp:…">` explícito chegava aqui; agora todo href
+    relativo do documento chega, então o filtro passa a valer nos dois."""
+    base, rotas = server
+    porta = base.rsplit(":", 1)[1]
+    rodape = f"<footer><a href='sobre'>Sobre</a>{MAILTO}</footer>"
+    # Mesmo host e mesma porta: é o esquema, e só ele, que este teste isola.
+    rotas["/"] = (200, {}, home_com_base(f"ftp://127.0.0.1:{porta}/", rodape))
+
+    relatorio = check_trust_pages(base + "/")
+
+    assert relatorio.pages["about"].status is Status.MISSING
+    assert "ftp://" not in " | ".join(relatorio.issues)
+
+
+def test_base_href_com_esquema_que_o_cliente_nao_fala_nao_vira_link_de_menu():
+    """A outra metade da mesma guarda. `_nav_targets` sempre teve o filtro de
+    esquema e nada o fixava: sem ele o menu inteiro vira `ftp://…`, cada link
+    volta como "could not be resolved" e o relatório atribui ao site um defeito
+    que é só um transporte que este cliente não fala."""
+    doc = parse_document(home_com_base("ftp://ex.com/", "<nav><a href='sobre'>s</a></nav>"))
+
+    assert _nav_targets(doc, "http://ex.com/") == []
+
+
+def test_a_home_continua_sendo_a_home_quando_o_documento_declara_um_base():
+    """`casa` é a identidade da HOME, não a da base — o mesmo motivo do `seen`
+    em `_nav_targets`, na outra metade da checagem. A home já respondeu, então
+    pedi-la de novo como candidata a Sobre não ensina nada; e é pior que inútil,
+    porque a home tem prosa de sobra e voltaria OK, dando à página Sobre o
+    endereço da própria home. Trocar pela base ainda descarta o candidato que
+    aponta para a base — este, que é o que o site de fato declara."""
+    rodape = "<footer><a href='/'>Sobre nós</a><a href='./'>Sobre o app</a></footer>"
+    doc = parse_document(home_com_base("/app/", rodape))
+    home = Fetch(url="http://ex.com/", final_url="http://ex.com/", status_code=200)
+
+    cands = _candidates(home, doc, "http://ex.com/", (), _ABOUT_HINT, 6)
+
+    assert [c.url for c in cands] == ["http://ex.com/app/"]
+
+
+def test_credencial_no_base_href_nao_viaja_nem_entra_no_relatorio(server):
+    """Um `<base href>` com `user:pass@` põe a credencial na frente de TODO href
+    relativo do documento de uma vez — e passou a pôr no dia em que este módulo
+    começou a honrar a tag. `crawl` tira o userinfo de todo link que resolve
+    desde que ADS-CRAWL-01 foi escrito; aqui não se tirava de nenhum.
+
+    Três asserts porque são três danos distintos: a credencial ia no fio (as
+    páginas eram lidas AUTENTICADAS e reportadas OK, e o 401 que provaria "não é
+    legível publicamente" nunca acontecia), ficava na URL resolvida, e era
+    impressa no relatório que o operador cola num ticket.
+    """
+    base, rotas = server
+    porta = base.rsplit(":", 1)[1]
+    com_credencial = f"http://admin:s3cr3t@127.0.0.1:{porta}/app/"
+    menu = "<nav><a href='sobre'>Sobre</a><a href='quebrado'>Quebrado</a></nav>"
+    rodape = f"<footer><a href='sobre'>Sobre</a>{MAILTO}</footer>"
+    rotas["/"] = (200, {}, home_com_base(com_credencial, menu + rodape))
+    rotas["/app/sobre"] = (200, {}, pagina("Sobre"))
+    rotas["/app/quebrado"] = (404, {}, "")
+
+    relatorio = check_completeness(base + "/")
+
+    # 1. Nada de Authorization no fio: `requests` transforma o `user:pass@` da
+    #    URL em Basic auth sozinho, então a credencial raspada da página seria
+    #    devolvida ao servidor que a publicou, sem ninguém ter pedido.
+    assert autenticadas(rotas) == []
+    # 2. Nenhuma URL resolvida a carrega — nem a que deu certo, nem a que quebrou.
+    urls = [p.url for p in relatorio.trust.pages.values() if p.url]
+    urls += [link.url for link in relatorio.nav.broken + relatorio.nav.unresolved]
+    assert f"{base}/app/quebrado" in urls  # a lista não está vazia por acidente
+    assert [u for u in urls if "s3cr3t" in u] == []
+    # 3. Nem o texto do relatório, que é onde a linha "1 navigation link(s)
+    #    return 4xx/5xx: <url> (404)" estampava o segredo.
+    assert "s3cr3t" not in " | ".join(relatorio.issues)
+    # E a base continua valendo: é o caminho que ela move, não a credencial.
+    assert relatorio.trust.pages["about"].url == f"{base}/app/sobre"
+
+
+def test_credencial_escrita_no_proprio_href_tambem_nao_viaja(server):
+    """Sem `<base>`: o href absoluto traz a credencial sozinho. É um link por
+    vez em vez do documento inteiro, e o dano é o mesmo — o crawler tira o
+    userinfo de todo link que resolve, e este módulo lê o MESMO documento."""
+    base, rotas = server
+    porta = base.rsplit(":", 1)[1]
+    quebrado = f"http://admin:s3cr3t@127.0.0.1:{porta}/quebrado"
+    rotas["/"] = (200, {}, pagina("Casa", extra=f"<nav><a href='{quebrado}'>q</a></nav>"))
+    rotas["/quebrado"] = (404, {}, "")
+
+    relatorio = count_broken_nav_links(base + "/")
+
+    assert [link.url for link in relatorio.broken] == [f"{base}/quebrado"]
+    assert autenticadas(rotas) == []
+    assert "s3cr3t" not in " | ".join(relatorio.issues)
 
 
 # --------------------------------------------------------------------------

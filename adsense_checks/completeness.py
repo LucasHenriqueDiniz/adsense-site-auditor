@@ -47,7 +47,14 @@ from urllib.parse import urlunsplit
 
 import requests
 
-from adsense_checks.crawl import looks_like_document, normalize_url, same_site
+from adsense_checks.crawl import (
+    keep_first_base_href,
+    looks_like_document,
+    normalize_url,
+    resolve_base,
+    same_site,
+    strip_userinfo,
+)
 from adsense_checks.http import (
     DEFAULT_TIMEOUT,
     Fetch,
@@ -225,6 +232,11 @@ class Document:
     blocks: list[Block] = field(default_factory=list)
     links: list[Link] = field(default_factory=list)
     forms: list[Form] = field(default_factory=list)
+    # As written in the markup, unresolved. Every href above is relative to it,
+    # and `crawl.resolve_base` is the one place that turns the pair into a base:
+    # storing an already-resolved base here would need the document's URL, which
+    # `parse_document` does not have and `find_placeholders` never will.
+    base_href: str | None = None
     # Set when parsing raised. Callers must degrade rather than report a pass on
     # a document they only half read.
     parse_error: str | None = None
@@ -253,6 +265,7 @@ class _DocumentParser(HTMLParser):
         self.blocks: list[Block] = []
         self.links: list[Link] = []
         self.forms: list[Form] = []
+        self.base_href: str | None = None
         self._skip = 0
         self._buffer: list[str] = []
         self._tag = "body"
@@ -304,6 +317,17 @@ class _DocumentParser(HTMLParser):
     # -- HTMLParser hooks -------------------------------------------------
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "base":
+            # Ahead of the skip counter, and taken even inside a skipped subtree,
+            # because `crawl.PageParser` reads it that way: this module already
+            # disagreed with the crawler about one document's links once, and
+            # skipping a `<base>` the crawler keeps would be that same defect
+            # rebuilt out of a difference nobody would think to look for. Which
+            # `<base>` wins is `keep_first_base_href`'s call, not a second
+            # opinion written here.
+            href = {k.lower(): (v or "") for k, v in attrs}.get("href", "")
+            self.base_href = keep_first_base_href(self.base_href, href)
+            return
         if tag in _SKIP_TAGS:
             self._skip += 1
             return
@@ -397,6 +421,7 @@ def parse_document(html: str) -> Document:
         blocks=list(parser.blocks),
         links=list(parser.links),
         forms=list(parser.forms),
+        base_href=parser.base_href,
         parse_error=error,
     )
 
@@ -847,6 +872,22 @@ def _join(base: str, path: str) -> str:
     return join_url(base, path.lstrip("/"))
 
 
+def _resolve_target(base: str, href: str) -> str:
+    """The absolute URL a href points at, with any `user:pass@` taken off it.
+
+    Both loops that turn a home-page href into a request go through here, so the
+    two cannot drift from each other, and the stripping itself is
+    `crawl.strip_userinfo` so neither can drift from the crawler. `crawl` has
+    dropped userinfo from every link it resolves since ADS-CRAWL-01 was written:
+    credentials scraped off the page and sent back to it mean the 401 never
+    happens and "readable publicly, without authentication" passes on a page no
+    anonymous visitor can open. This module reads the SAME document and asks the
+    same question of the same pages — and it also PRINTS the URL, so a link with
+    credentials on it ends up in the report the operator pastes into a ticket.
+    """
+    return strip_userinfo(join_url(base, href))
+
+
 def _canonical(url: str) -> str:
     """The identity of a URL, shared with the crawler so the two cannot disagree.
 
@@ -978,6 +1019,12 @@ def _candidates(
     the conventions themselves mid-tuple.
     """
     home_url = home.final_url or home.url
+    # The same base `_nav_targets` and the crawler resolve against. A home
+    # carrying `<base href="/app/">` declares its About page at `/app/sobre`;
+    # joining against `home_url` alone requested `/sobre`, got a 404, and the
+    # report then said "No About page found" — the one claim this check's
+    # docstring forbids, made about a URL nobody ever asked for.
+    link_base = resolve_base(home_url, home_doc.base_href)
     by_region: dict[str, list[str]] = {"footer": [], "nav": [], "body": []}
     for link in home_doc.links:
         href = link.href.strip()
@@ -985,7 +1032,16 @@ def _candidates(
             continue
         if fold(href).startswith(("mailto:", "tel:", "javascript:")):
             continue
-        target = join_url(home_url, href)
+        target = _resolve_target(link_base, href)
+        if split_url(target).scheme not in ("http", "https"):
+            # The guard `_nav_targets` has always had and this loop had not. A
+            # scheme this client cannot speak is not a missing page: `<base
+            # href="ftp://ex.com/">` handed `fetch` an `ftp://` URL, which came
+            # back ERROR ("no connection adapters") and the About page was
+            # reported as a fault of the site. Before the base was honoured only
+            # an explicit `<a href="ftp:…">` could reach here; now every relative
+            # href in the document can, so the two loops agree about it.
+            continue
         if not _same_site(target, home_url):
             continue
         # Either the visible label or the path may carry the word; a footer link
@@ -1290,6 +1346,14 @@ def _nav_targets(
     home_url: str,
     regions: tuple[str, ...] | None = ("nav", "footer"),
 ) -> list[tuple[str, str]]:
+    # Relative hrefs point wherever `<base href>` says, which is why this is not
+    # `home_url`: a menu of three live links under `<base href="/app/">` was
+    # requested at the document root instead, 404ed three times, and three broken
+    # nav links is the FAIL threshold. `home_url` stays the yardstick for the two
+    # questions that are about the DOCUMENT rather than its links — which target
+    # is the home page again, and which targets are off-site — because a `<base>`
+    # elsewhere does not move the page that declared it.
+    base = resolve_base(home_url, doc.base_href)
     out: list[tuple[str, str]] = []
     seen = {_canonical(home_url)}
     for link in doc.links:
@@ -1300,7 +1364,7 @@ def _nav_targets(
             continue
         if fold(href).startswith(("mailto:", "tel:", "javascript:", "data:")):
             continue
-        target = join_url(home_url, href)
+        target = _resolve_target(base, href)
         if split_url(target).scheme not in ("http", "https"):
             continue
         if not _same_site(target, home_url):

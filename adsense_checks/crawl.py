@@ -225,20 +225,80 @@ def same_site(a: str, b: str) -> bool:
     return bool(host_a) and host_a == site_host(b)
 
 
-def _strip_userinfo(url: str) -> str:
-    """Drop `user:pass@` from a URL before it is requested.
+def strip_userinfo(url: str) -> str:
+    """Drop `user:pass@` from a URL before it is requested, printed or stored.
 
     ADS-CRAWL-01 asks whether a page is readable PUBLICLY, without credentials.
     A page publishing `http://user:pass@host/private` had those credentials
     scraped and sent, the 401 never happened, and the requirement passed on a
     page no anonymous visitor can open. The identity dropped the userinfo too, so
     which spelling survived deduplication depended on link order in the HTML.
+
+    Public, and named beside `resolve_base`, because `completeness` resolves the
+    same document's links and reported the same pages: it fetched a candidate
+    with the credentials still on it, called it OK, and then wrote the secret
+    into the report an operator pastes into a ticket. One rule, both readers —
+    the crawler stripping and the other module not is the same divergence
+    `resolve_base` exists to close, wearing a worse cost.
     """
     parsed = split_url(url)
     if "@" not in parsed.netloc:
         return url
     host = parsed.netloc.rpartition("@")[2]
     return urlunsplit((parsed.scheme, host, parsed.path, parsed.query, ""))
+
+
+def keep_first_base_href(seen: str | None, href: str) -> str | None:
+    """The `<base href>` in force after one more `<base>` tag goes by.
+
+    The first one wins, which is what the HTML spec says, and the two tokenizers
+    in this package — `PageParser` here and `completeness._DocumentParser` — both
+    call this rather than each keeping their own copy of the rule. They are
+    already two different readings of one document; the pair of them deciding
+    differently WHICH `<base>` counts is the shape of the defect `resolve_base`
+    below was written to close.
+
+    `href=""` declares nothing, so it does not spend the first slot: a real
+    `<base>` after it still wins.
+    """
+    if seen is not None:
+        return seen
+    return href.strip() or None
+
+
+def resolve_base(document_url: str, base_href: str | None) -> str:
+    """Where a document's relative hrefs point: its `<base href>`, or itself.
+
+    Lives here, beside `same_site` and `normalize_url`, because `completeness`
+    reads the SAME home page with its own tokenizer and the two disagreeing
+    about where one document's links point is not a difference of opinion, it is
+    the defect. `completeness` joined every navigation href against the home URL
+    and never looked for `<base href>`, so a home carrying `<base href="/app/">`
+    and three links alive under `/app/` was reported as three links returning
+    4xx — and three is `BROKEN_NAV_FAIL_THRESHOLD`, so the headline verdict came
+    out FAIL, "the site looks abandoned", on a site that is whole. Writing the
+    rule a second time over there would have been the same defect one module
+    over, so there is one rule and both callers use it.
+
+    A `<base href>` that will not join leaves "" here, and "" as a base makes
+    urljoin return every relative href unchanged, which then fails the scheme
+    guard and vanishes: a page publishing two working links reported "links
+    found: 0". The document's own URL is the fallback, which is also what a
+    document declaring no base uses.
+
+    An off-site `<base href>` is honoured rather than refused. The links it
+    produces really do point off-site, and deciding not to follow them is the
+    same-site filter's job at each caller — not this function's.
+
+    Credentials are NOT honoured, and they come off here rather than at each
+    caller because a base multiplies them: `<base href="http://u:p@ex.com/app/">`
+    puts `u:p@` in front of every relative href in the document at once, where an
+    `<a href>` carrying userinfo leaks one URL at a time. The base that both
+    modules resolve against is the one place a credential can enter both at once,
+    so it is the place it cannot enter at all.
+    """
+    resolved = join_url(document_url, base_href) if base_href else ""
+    return strip_userinfo(resolved or document_url)
 
 
 def _origin(url: str) -> str:
@@ -344,8 +404,7 @@ class PageParser(HTMLParser):
         elif tag == "h1":
             self._h1_buf = []
         elif tag == "base":
-            if self.base_href is None and attr.get("href", "").strip():
-                self.base_href = attr["href"].strip()
+            self.base_href = keep_first_base_href(self.base_href, attr.get("href", ""))
         elif tag == "meta":
             name = attr.get("name", "").lower()
             content = attr.get("content", "").strip()
@@ -576,13 +635,7 @@ def _record(result: CrawlResult, response: Fetch, depth: int) -> Page:
             page.h1 = parsed.h1
             page.h1_count = len(parsed.h1s)
             page.word_count = parsed.word_count
-            base = page.final_url
-            if parsed.base_href:
-                # A `<base href>` that will not join leaves "" here, and "" as a
-                # base makes urljoin return every relative href unchanged, which
-                # then fails the scheme guard and vanishes: a page publishing two
-                # working links reported "links found: 0".
-                base = join_url(page.final_url, parsed.base_href) or page.final_url
+            base = resolve_base(page.final_url, parsed.base_href)
             # `or None`: an unparseable canonical used to be stored as "", which
             # reads downstream as a page that declares one, so ADS-CRAWL-05
             # reported "no page declares <link rel=canonical>" for pages that do.
@@ -628,7 +681,7 @@ def _resolve_links(base: str, hrefs: Sequence[str], non_http: list[str]) -> list
             if href not in non_http:
                 non_http.append(href)
             continue
-        absolute = _strip_userinfo(absolute)
+        absolute = strip_userinfo(absolute)
         identity = normalize_url(absolute)
         if identity not in seen:
             seen.add(identity)
