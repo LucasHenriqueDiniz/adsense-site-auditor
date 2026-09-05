@@ -974,20 +974,29 @@ def _candidates(
         if hint.search(fold(link.text)) or hint.search(fold(split_url(target).path)):
             by_region[link.region].append(target)
     linked = by_region["footer"] + by_region["nav"] + by_region["body"]
-    seen = {_canonical(home_url)}
+    # Deduplicated by the URL as written, not by its identity. `_canonical`
+    # folds the trailing slash — that is what makes it an identity — and folding
+    # it here silently dropped `/about/`, so a host that serves only that form
+    # and answers 404 to `/about` was reported as having no About page. The
+    # candidate list is a list of ADDRESSES to request, and on the wire the two
+    # are different addresses; the docstring above already promises every
+    # conventional path is tried.
+    #
+    # The home page is the one comparison where identity is the right notion: it
+    # answered already, and asking for another spelling of it learns nothing.
+    casa = _canonical(home_url)
+    seen: set[str] = set()
     out: list[_Candidate] = []
     for url in linked:
-        key = _canonical(url)
-        if key in seen or len(out) >= max_linked:
+        if url in seen or _canonical(url) == casa or len(out) >= max_linked:
             continue
-        seen.add(key)
+        seen.add(url)
         out.append(_Candidate(url=url, declared=True))
     for path in paths:
         url = _join(base, path)
-        key = _canonical(url)
-        if key in seen:
+        if url in seen or _canonical(url) == casa:
             continue
-        seen.add(key)
+        seen.add(url)
         out.append(_Candidate(url=url, declared=False))
     return out
 

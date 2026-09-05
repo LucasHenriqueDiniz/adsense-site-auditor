@@ -937,3 +937,43 @@ def test_nav_limit_1_e_aceito(server, monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["check_completeness.py", "--nav-limit", "1", base + "/"])
     check_completeness_cli.main()
     assert "1 navigation links" in capsys.readouterr().out or True  # nao pode ter abortado
+
+
+def test_a_forma_com_barra_final_tambem_e_requisitada(server):
+    """`/about` e `/about/` são endereços diferentes no fio: um host que serve só
+    a segunda responde 404 para a primeira. `_canonical` funde a barra — é o que
+    faz dela uma identidade — e fundi-la aqui descartava `/about/` da lista de
+    candidatos, então o site era reportado sem página About enquanto servia uma.
+
+    É a afirmação que o docstring de `check_trust_pages` proíbe: "no candidate
+    answered" dito sobre uma URL que ninguém pediu."""
+    base, routes = server
+    routes["/"] = (200, {}, pagina("Casa", extra=MAILTO))
+    routes["/about/"] = (200, {}, pagina("Sobre", extra=MAILTO))  # e SO essa forma
+
+    r = check_trust_pages(base + "/")
+
+    assert r.pages["about"].status is Status.OK
+    assert r.pages["about"].url.endswith("/about/")
+
+
+def test_toda_entrada_de_ABOUT_PATHS_e_CONTACT_PATHS_vira_candidato():
+    """Nenhuma entrada das tuplas pode ser engolida pela deduplicação: um caminho
+    que o módulo declara e nunca pede transforma "não achei" numa afirmação sobre
+    uma URL que ninguém olhou."""
+    from adsense_checks.completeness import (
+        _CONTACT_HINT,
+        CONTACT_PATHS,
+    )
+    from adsense_checks.http import Fetch
+
+    html = "<html><body><p>oi</p></body></html>"
+    home = Fetch(url="http://ex.com/", final_url="http://ex.com/", status_code=200,
+                 text=html, headers={"content-type": "text/html"})
+    doc = parse_document(html)
+
+    for paths, hint in ((ABOUT_PATHS, _ABOUT_HINT), (CONTACT_PATHS, _CONTACT_HINT)):
+        cands = _candidates(home, doc, "http://ex.com/", paths, hint, 6)
+        convencionais = [c.url for c in cands if not c.declared]
+        assert len(convencionais) == len(paths), paths
+        assert len(set(convencionais)) == len(paths)  # e sem repetir nenhum
