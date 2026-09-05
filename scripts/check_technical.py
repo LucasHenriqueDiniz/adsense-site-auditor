@@ -45,6 +45,14 @@ from adsense_checks.status import Status, escalate  # noqa: E402
 # it was measured against. `Fetch.elapsed_ms` covers the whole redirect chain.
 SLOW_RESPONSE_MS = 2500
 
+# The first duration a socket timeout cannot hold. CPython converts seconds to a
+# signed 64-bit count of nanoseconds before waiting on anything, so
+# `socket.settimeout` — where `--timeout` ends up, by way of urllib3 — accepts
+# 9223372036.854774 and raises "OverflowError: timestamp out of range for
+# platform time_t" from 2**63 nanoseconds up, `inf` included. Bisected against
+# `socket.settimeout` on this platform rather than read off a manual.
+MAX_WAIT_SECONDS = 2**63 / 1e9
+
 
 _REQ_ROBOTS = "ADS-CRAWL-02"
 
@@ -184,6 +192,20 @@ def main() -> int:
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     args = parser.parse_args()
+    if not 0 < args.timeout < MAX_WAIT_SECONDS:
+        # Both ends crashed the run with a bare traceback out of the socket
+        # layer. `--timeout 0` came back as urllib3's ValueError; `--timeout
+        # inf` — the plausible spelling of "no timeout", and what `Infinity` and
+        # `1e400` also become under `type=float` — came back as OverflowError
+        # from `socket.settimeout`. `fetch` forwards both on purpose (see
+        # adsense_checks/http.py) because they report a caller's bug and not an
+        # unreachable site, so the CLI is the layer that has to refuse them.
+        # Neither bound is rounded off: the floor is exclusive zero because a
+        # fraction of a second is a legitimate ask against a fast host, and the
+        # ceiling is the exact value the socket stops accepting. One chained
+        # comparison covers `--timeout nan` as well, which satisfies no
+        # comparison at all and so fails this one.
+        parser.error(f"--timeout must be greater than 0 and less than {MAX_WAIT_SECONDS}")
 
     home = fetch(args.url, timeout=args.timeout)
     lines: list[Line] = []

@@ -30,11 +30,29 @@ def main() -> int:
     parser.add_argument("--threshold", type=float, default=0.6)
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
+    if not 0 < args.threshold <= 1:
+        # The grouping test is `jaccard(...) >= threshold`, and jaccard is in
+        # [0, 1] by construction. Outside that range the comparison stops being a
+        # measurement and becomes a constant: `--threshold 5` can never be met,
+        # so the report printed "no near-duplicate groups" over any input at all,
+        # and `--threshold 0` or below is met by every pair, so two pages sharing
+        # no words were reported as "2 pages at similarity >= 0.00" and failed
+        # the run. Both ends fabricate a verdict, which is why 0 is excluded
+        # while 1 — "group only byte-identical extractions" — is kept.
+        parser.error("--threshold must be greater than 0 and at most 1")
 
     result = check_urls(args.urls, threshold=args.threshold)
     findings = list(result.reasons)
     for group in result.groups:
-        findings.append(f"{len(group.urls)} pages at similarity >= {args.threshold:.2f}:")
+        # The threshold as typed, not a rounding of it. `:.2f` printed every
+        # legal threshold below 0.005 as "similarity >= 0.00" — the exact string
+        # the guard above cites as the symptom of a threshold that grouped
+        # everything — so the evidence line for a real verdict could not be told
+        # apart from the fabricated one. There is no arithmetic between argparse
+        # and here: the value is `float(what the operator typed)`, and the
+        # default `str` of a float is the shortest text that reads back as the
+        # same float, so it cannot print a threshold other than the one applied.
+        findings.append(f"{len(group.urls)} pages at similarity >= {args.threshold}:")
         findings.extend(f"    {u}" for u in group.urls)
 
     lines = [

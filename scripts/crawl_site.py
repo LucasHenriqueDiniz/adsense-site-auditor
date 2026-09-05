@@ -23,6 +23,15 @@ Serves ADS-CRAWL-01, ADS-CRAWL-04 and ADS-CRAWL-05.
     python scripts/crawl_site.py https://example.com [--depth 2] [--max-pages 50] [-v]
 """
 
+# The first duration this process cannot wait out. CPython converts seconds to a
+# signed 64-bit count of nanoseconds before waiting on anything, so both waits
+# this script asks for share one ceiling: `time.sleep`, which `crawl` uses for
+# `--delay`, and `socket.settimeout`, where `--timeout` ends up by way of
+# urllib3, each accept 9223372036.854774 and raise "OverflowError: timestamp out
+# of range for platform time_t" from 2**63 nanoseconds up, `inf` included.
+# Bisected against both calls on this platform rather than read off a manual.
+MAX_WAIT_SECONDS = 2**63 / 1e9
+
 
 def _dump_pages(result) -> None:
     """Per-page evidence, under -v.
@@ -119,6 +128,49 @@ def main() -> int:
     )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
+    if args.depth < 0:
+        # 0 is a real request — `_queue_links` stops at `page.depth >=
+        # max_depth`, so depth 0 crawls the seed and follows nothing — and that
+        # is why the floor is 0 and not 1. A negative hits the same guard and
+        # behaves exactly like 0, so `--depth -1` was silently reinterpreted
+        # rather than refused.
+        parser.error("--depth must be 0 or more")
+    if args.max_pages < 1:
+        # The seed is fetched before the budget is consulted, so `--max-pages 0`
+        # reported "1 pages fetched ... stopped at max_pages=0" — a budget of
+        # zero the crawl cannot honour, printed as though it had. One page is the
+        # smallest crawl that exists.
+        parser.error("--max-pages must be at least 1")
+    if not 0 <= args.delay < MAX_WAIT_SECONDS:
+        # This is the argument that reaches outside, so it is the one where a
+        # bad value costs somebody else. Below zero `crawl` skips the sleep
+        # altogether — its guard is `delay > 0` — so `--delay -1`, a plausible
+        # slip for `--delay 1`, crawled flat out against a stranger's host while
+        # appearing to ask for the opposite. `--delay nan` does the same thing
+        # for the same reason, and reads even more like a request for courtesy.
+        # At the other end `--delay inf` does not fail early either: `crawl`
+        # fetches the seed and robots.txt before the first sleep, so the
+        # OverflowError out of `time.sleep` landed after two requests had
+        # already gone out. All three fall out of one chained comparison —
+        # `nan` satisfies neither side of it. 0 stays valid: it is what the test
+        # suite passes to skip the courtesy wait. The two int arguments above
+        # need no such care, because `type=int` refuses "nan" and "inf" before
+        # the value gets here.
+        parser.error(f"--delay must be 0 or more and less than {MAX_WAIT_SECONDS}")
+    if not 0 < args.timeout < MAX_WAIT_SECONDS:
+        # Both ends crashed the run with a bare traceback out of the socket
+        # layer. `--timeout 0` came back as urllib3's ValueError; `--timeout
+        # inf` — the plausible spelling of "no timeout", and what `Infinity` and
+        # `1e400` also become under `type=float` — came back as OverflowError
+        # from `socket.settimeout`. `fetch` forwards both on purpose (see
+        # adsense_checks/http.py) because they report a caller's bug and not an
+        # unreachable site, so the CLI is the layer that has to refuse them.
+        # Neither bound is rounded off: the floor is exclusive zero because a
+        # fraction of a second is a legitimate ask against a fast host, and the
+        # ceiling is the exact value the socket stops accepting. One chained
+        # comparison covers `--timeout nan` as well, which satisfies no
+        # comparison at all and so fails this one.
+        parser.error(f"--timeout must be greater than 0 and less than {MAX_WAIT_SECONDS}")
 
     result = crawl(
         args.url,

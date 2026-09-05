@@ -7,11 +7,15 @@ duas constantes entre si.
 """
 
 import check_technical
+import pytest
 
 from adsense_checks.http import Fetch
 from adsense_checks.status import Status
 
 BLOQUEIA_TUDO = "User-agent: *\nDisallow: /\n"
+# Conexão recusada, na hora. Um argumento recusado não pode chegar à rede, e
+# este endereço prova isso sem fazer a suíte esperar.
+INALCANCAVEL = "http://127.0.0.1:1/"
 
 
 def _caminhos(routes):
@@ -354,3 +358,45 @@ def test_exatamente_2500ms_ainda_nao_e_lento():
     """`elapsed_ms > SLOW_RESPONSE_MS`: no valor exato não avisa."""
     igual = check_technical._availability(_home_fetch("https://x/", elapsed_ms=2500.0))
     assert igual.status is Status.INFO
+
+
+def test_timeout_fora_da_faixa_do_socket_e_recusado_na_linha_de_comando(monkeypatch, capsys):
+    """As duas pontas terminavam em traceback cru vindo da camada de socket.
+
+    `--timeout 0` chegava à urllib3 e voltava como ValueError. `--timeout inf` —
+    a grafia plausível de "sem timeout", e no que `Infinity` e `1e400` também se
+    transformam sob `type=float` — passava por uma guarda escrita `not ... > 0`
+    e voltava como "OverflowError: timestamp out of range for platform time_t"
+    de dentro de `socket.settimeout`. `fetch` repassa as duas de propósito, então
+    é a CLI que tem de recusá-las: saída 2 e a razão no stderr. Nenhum dos
+    valores abaixo pode virar requisição.
+    """
+    for valor in ("inf", "Infinity", "1e400", "nan", "0", "-5", "9223372036.854776"):
+        monkeypatch.setattr(
+            "sys.argv", ["check_technical.py", "--timeout", valor, INALCANCAVEL]
+        )
+        with pytest.raises(SystemExit) as saida:
+            check_technical.main()
+
+        assert saida.value.code == 2, valor
+        erro = capsys.readouterr().err
+        assert "--timeout must be greater than 0 and less than" in erro, valor
+
+
+def test_o_maior_timeout_que_o_socket_aceita_nao_e_recusado(server, monkeypatch, capsys):
+    """O teto é o do mecanismo e nem um float abaixo dele.
+
+    9223372036.854774 é o último valor que `socket.settimeout` segura — o
+    seguinte, 9223372036.854776, é 2**63 nanossegundos e estoura. Uma guarda com
+    um teto redondo qualquer recusaria entrada que funciona; esta deixa passar, e
+    a requisição sai.
+    """
+    base, routes = server
+    routes["/"] = (200, {"Content-Type": "text/html"}, "<html><body>oi</body></html>")
+
+    monkeypatch.setattr(
+        "sys.argv", ["check_technical.py", "--timeout", "9223372036.854774", base + "/"]
+    )
+    check_technical.main()
+
+    assert "/" in [caminho for _metodo, caminho, _headers in routes.received]

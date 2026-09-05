@@ -8,6 +8,7 @@ ponta — a comparação é entre páginas buscadas, e mock nenhum prova isso.
 """
 
 import check_duplicates
+import pytest
 
 HTML = {"Content-Type": "text/html; charset=utf-8"}
 
@@ -51,7 +52,7 @@ def test_paginas_quase_identicas_reprovam_e_o_grupo_e_listado(server, monkeypatc
     saida = capsys.readouterr().out
 
     assert "[FAIL] ADS-CONTENT-02 (part) 2 URLs" in saida
-    assert "2 pages at similarity >= 0.60:" in saida
+    assert "2 pages at similarity >= 0.6:" in saida
     assert f"    {base}/a" in saida
     assert f"    {base}/b" in saida
     assert "no near-duplicate groups" not in saida
@@ -76,7 +77,7 @@ def test_threshold_da_linha_de_comando_decide_o_agrupamento(server, monkeypatch,
     saida = capsys.readouterr().out
 
     assert "[FAIL] ADS-CONTENT-02 (part)" in saida
-    assert "2 pages at similarity >= 0.30:" in saida
+    assert "2 pages at similarity >= 0.3:" in saida
     assert "2 of 2 analyzed pages (100%) are involved in duplication" in saida
     assert codigo == 1
 
@@ -134,3 +135,85 @@ def test_pagina_ilegivel_impede_a_aprovacao(server, monkeypatch, capsys):
     assert "analyzed: 1" in saida
     assert "unanalyzable: 1" in saida
     assert codigo == 1
+
+
+def test_threshold_fora_da_faixa_da_similaridade_e_recusado(monkeypatch, capsys):
+    """Jaccard vive em [0, 1], então um limiar fora dessa faixa transforma
+    `score >= threshold` numa constante e o veredito numa invenção.
+
+    As duas pontas eram alcançáveis pela linha de comando. `--threshold 5` não
+    pode ser satisfeito por par nenhum, então o relatório imprimia "no
+    near-duplicate groups" sobre qualquer entrada — um PASS que nada poderia
+    quebrar. `--threshold 0` e abaixo são satisfeitos por todo par, então duas
+    páginas sem uma palavra em comum voltavam agrupadas e reprovavam a rodada.
+    Nenhum dos dois mediu coisa alguma. `inf` e `nan` caem na mesma comparação
+    encadeada: nenhum satisfaz os dois lados dela.
+    """
+    for valor in ("inf", "nan", "5", "1.5", "0", "-1"):
+        monkeypatch.setattr(
+            "sys.argv",
+            ["check_duplicates.py", "--threshold", valor, "http://127.0.0.1:1/a"],
+        )
+        with pytest.raises(SystemExit) as saida:
+            check_duplicates.main()
+
+        assert saida.value.code == 2, valor
+        erro = capsys.readouterr().err
+        assert "--threshold must be greater than 0 and at most 1" in erro, valor
+
+
+def test_threshold_1_e_aceito_e_agrupa_so_o_que_e_identico(server, monkeypatch, capsys):
+    """O teto é inclusivo de propósito: `>= 1.0` continua sendo um teste de
+    verdade — conjuntos de shingles idênticos passam e diferentes não —, então
+    "agrupe só páginas cuja extração é a mesma" é uma pergunta que a ferramenta
+    pode legitimamente receber. Uma guarda escrita `< 1` a recusaria."""
+    base, routes = server
+    routes["/a"] = (200, HTML, pagina(AFIACAO + SECAGEM))
+    routes["/b"] = (200, HTML, pagina(AFIACAO + SECAGEM))
+    routes["/c"] = (200, HTML, pagina(ACABAMENTO))
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["check_duplicates.py", "--threshold", "1", f"{base}/a", f"{base}/b", f"{base}/c"],
+    )
+    codigo = check_duplicates.main()
+    saida = capsys.readouterr().out
+
+    assert "2 pages at similarity >= 1.0:" in saida
+    assert f"    {base}/a" in saida
+    assert f"    {base}/b" in saida
+    assert f"    {base}/c" not in saida
+    assert codigo == 1
+
+
+def test_limiar_minusculo_sai_impresso_inteiro_e_nao_arredondado_a_zero(
+    server, monkeypatch, capsys
+):
+    """A linha de evidência tem de imprimir o limiar aplicado, não zero.
+
+    Um limiar entre 0 e 0.005 é legal — a guarda só exclui o próprio 0 — mas o
+    `:.2f` de antes o imprimia como "similarity >= 0.00", que é exatamente a
+    string que a guarda cita como sintoma do limiar que agrupa tudo. O veredito
+    embaixo era real e a evidência em cima era indistinguível do defeito
+    fechado. Aqui as duas páginas compartilham ~34% do texto, então o grupo é
+    honesto; o que se pede é que o número impresso seja o número aplicado.
+
+    O segundo valor cobra a razão de o formato ser o `str` do float e não `:g`:
+    `str` é o texto mais curto que relê como o mesmo float, então não existe
+    limiar que ele imprima diferente do que decidiu o agrupamento. `:g` para em
+    6 dígitos significativos e transformaria 0.1234567 em 0.123457.
+    """
+    base, routes = server
+    routes["/a"] = (200, HTML, pagina(AFIACAO + SECAGEM))
+    routes["/b"] = (200, HTML, pagina(AFIACAO + ACABAMENTO))
+
+    for valor in ("0.004", "0.1234567"):
+        monkeypatch.setattr(
+            "sys.argv",
+            ["check_duplicates.py", "--threshold", valor, f"{base}/a", f"{base}/b"],
+        )
+        codigo = check_duplicates.main()
+        saida = capsys.readouterr().out
+
+        assert f"2 pages at similarity >= {valor}:" in saida, valor
+        assert codigo == 1, valor

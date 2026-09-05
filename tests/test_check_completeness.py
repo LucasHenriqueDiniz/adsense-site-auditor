@@ -6,12 +6,16 @@ o que permite rodar `main()` de ponta a ponta.
 """
 
 import check_completeness
+import pytest
 
 from adsense_checks.completeness import check_completeness as checar
 from adsense_checks.status import Status
 
 PROSA = "Escrevo sobre marcenaria desde 2015 e mantenho este site sozinho. " * 6
 HTML = {"Content-Type": "text/html; charset=utf-8"}
+# Conexão recusada, na hora. Um argumento recusado não pode chegar à rede, e
+# este endereço prova isso sem fazer a suíte esperar.
+INALCANCAVEL = "http://127.0.0.1:1/"
 
 
 def _home(corpo=PROSA):
@@ -149,3 +153,45 @@ def test_cli_com_home_ilegivel_reporta_em_vez_de_estourar(server, monkeypatch, c
     assert saida.count("not checked: the home page could not be read") >= 4
     assert "[ERR ] ADS-COMPLETE-01 home page is finished" in saida
     assert "[ERR ] ADS-AUTHOR-02 contact channel" in saida
+
+
+def test_timeout_fora_da_faixa_do_socket_e_recusado_na_linha_de_comando(monkeypatch, capsys):
+    """Este script já recusava `--nav-limit 0` e ainda quebrava no `--timeout`.
+
+    Em zero, com o ValueError que a urllib3 levanta; em `inf` — a grafia
+    plausível de "sem timeout", e no que `Infinity` e `1e400` também se
+    transformam sob `type=float` — com o OverflowError de `socket.settimeout`,
+    porque `not ... > 0` é falso para o infinito. `fetch` repassa as duas de
+    propósito, então a checagem de fronteira mora aqui, ao lado da outra: saída
+    2 e a razão no stderr, sem nenhuma requisição no meio.
+    """
+    for valor in ("inf", "Infinity", "1e400", "nan", "0", "-5", "9223372036.854776"):
+        monkeypatch.setattr(
+            "sys.argv", ["check_completeness.py", "--timeout", valor, INALCANCAVEL]
+        )
+        with pytest.raises(SystemExit) as saida:
+            check_completeness.main()
+
+        assert saida.value.code == 2, valor
+        erro = capsys.readouterr().err
+        assert "--timeout must be greater than 0 and less than" in erro, valor
+
+
+def test_o_maior_timeout_que_o_socket_aceita_nao_e_recusado(server, monkeypatch, capsys):
+    """O teto é o do mecanismo e nem um float abaixo dele.
+
+    9223372036.854774 é o último valor que `socket.settimeout` segura; o
+    seguinte, 9223372036.854776, é 2**63 nanossegundos e estoura. Cada cópia da
+    constante precisa da sua própria prova: sem esta, baixar o teto deste
+    arquivo pela metade não quebrava nada, e a guarda passaria a recusar entrada
+    que a máquina honraria.
+    """
+    base, routes = server
+    routes["/"] = (200, HTML, _home())
+
+    monkeypatch.setattr(
+        "sys.argv", ["check_completeness.py", "--timeout", "9223372036.854774", base + "/"]
+    )
+    check_completeness.main()
+
+    assert "/" in [caminho for _metodo, caminho, _headers in routes.received]
