@@ -68,24 +68,38 @@ template served with HTTP 200: where the host answers 4xx, a 200 means the page
 is there; where it does not, no 200 from it is evidence either way and the
 links are reported as unverified rather than as broken.
 
-The probe is asked at the same base every other URL of the run is asked at —
-the navigation links, the About/Contact pages the home page links to, and the
-conventional About/Contact paths this script guesses. That base is the home
-page's own `<base href>` when it declares one, and the URL that answered
-otherwise, so on a site declaring `<base href="/app/">` all of it happens
-inside `/app/`. The answer is a fact about a directory and not about a host, so
-splitting it — probing one place and requesting another — reports a site as
-whole over dead links, which is what it used to do.
+The answer is a fact about ONE DIRECTORY, not about the host. The probe is asked
+in the directory this script invents URLs in — its own probe paths and the
+conventional About/Contact paths it guesses. That directory is the home page's
+`<base href>` when it declares a usable one and the URL that answered otherwise,
+rounded to the directory containing it.
+
+That is deliberately **not** where every URL of the run is asked, and the script
+no longer pretends otherwise. A navigation link the page wrote goes where a
+browser would put it, which for a `<base href>` without a trailing slash is a
+different directory; an absolute link goes where it says, under neither. So each
+200 is checked against the directory the probe measured before the probe's
+answer is allowed to classify it, and a 200 that came from anywhere else is
+reported `MISSING` — unverified, neither working nor broken. On a site declaring
+`<base href="/app/">` the whole run does happen inside `/app/`; on one declaring
+`<base href="/app">` the guessed paths go to `/app/` while the relative links go
+to the root, and those links are reported as unverified rather than judged by a
+probe that never asked about their directory.
 
 That base never leaves the site you named. An off-site or non-HTTP
 `<base href>` is honoured for the links the page actually wrote — they do point
 elsewhere, and they are skipped as off-site — but the probe and the guessed
 paths fall back to the audited host, the way `crawl_site.py` refuses a seed
-that is not on the site under audit.
+that is not on the site under audit. When that happens the report says so,
+naming both the base it refused and the links it dropped because of it.
 
-Only the FIRST probe path can appear in a 404 log. The second is sent only to a
-host that already answered below 400 to the first, so it never 404s; and on a
-host that soft-404s, neither path appears in the log at all.
+Either probe path can appear in a 404 log. The second is sent only to a host
+that already answered below 400 to the first, which usually means it answers
+below 400 to everything too — but not always: a catch-all matching only
+alphabetic slugs lets the second path through to a real 404, because that one
+carries digits. The script has a branch for exactly that answer and prints it,
+since two different status codes for two URLs that both do not exist is itself
+the finding.
 
 The crawler identifies itself as `Mediapartners-Google`, because the question
 this audit asks is what the AdSense crawler is served — sites do serve it

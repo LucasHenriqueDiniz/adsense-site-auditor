@@ -136,17 +136,24 @@ DEFAULT_NAV_LINK_LIMIT = 25
 # page 7 of 6 into "abandoned".
 BROKEN_NAV_FAIL_THRESHOLD = 3
 
-# The paths the soft-404 probe asks for, joined onto `_request_base` — the same
-# base every other URL this audit requests is joined onto, so a subdirectory
+# The paths the soft-404 probe asks for, joined onto `_invented_base` — the
+# directory the other URLs this audit MAKES UP are joined onto, so a subdirectory
 # install is probed inside its own install rather than at the apex, whether the
-# subdirectory came from the typed URL or from the document's `<base href>`.
+# subdirectory came from the typed URL or from the document's `<base href>`. It
+# is not where every URL of the run lands: a link the document wrote goes where
+# `urljoin` puts it and an absolute one goes where it says, which is why
+# `_probe_covers` gates the answer per request instead of assuming one base.
 # Fixed rather than random, so the operator can curl the same URL and check the
 # claim the report makes about their host. They differ in length and in shape on
 # purpose: a not-found template that echoes the requested address answers them
 # with different text, and telling those two hosts apart is the whole job of
-# `_probe_not_found`. The second is requested only against a host whose answer
-# to the first already proved it serves 200 for pages it does not have — so only
-# the FIRST can ever reach a 404 log, and on a soft-404 host neither does.
+# `_probe_not_found`. The second is requested only against a host whose answer to
+# the first already proved it serves 200 for pages it does not have — which
+# USUALLY means neither reaches a 404 log, but not always, and the docs used to
+# claim always: a catch-all routing only alphabetic slugs answers the first and
+# 404s the second, because that one carries digits. `_probe_not_found` has the
+# branch for it and the report prints the pair, so the claim to make is that the
+# second is never sent to a host that 404s the first.
 NOT_FOUND_PROBE_PATHS = (
     "adsense-auditor-probe-no-such-page",
     "adsense-auditor-probe-nn-9x7",
@@ -837,6 +844,11 @@ class NavLinkReport(_Verdict):
     # Links that answered HTTP 200 on a host where 200 was not shown to mean
     # anything. Neither working nor broken, and never folded into either.
     unverified: list[NavLink] = field(default_factory=list)
+    # Links that answered HTTP 200 from OUTSIDE the directory the probe measured.
+    # Their own third list because the fact is about the request and not about
+    # the host: the probe may well have found this host honest, and that answer
+    # simply does not reach where these landed. Same weight as the two above.
+    outside_probe: list[NavLink] = field(default_factory=list)
     unresolved: list[NavLink] = field(default_factory=list)
     used_all_links: bool = False
     # What the host does with a URL that does not exist: "honest", "fingerprint",
@@ -863,11 +875,11 @@ class NavLinkReport(_Verdict):
     def unclassified(self) -> list[NavLink]:
         """Every 200 that could not be read as a page, whichever way it looked.
 
-        Two lists because the sentences differ, one property because the weight
+        Three lists because the sentences differ, one property because the weight
         does not: nothing in here was observed to work and nothing in here was
         observed to be broken.
         """
-        return self.same_as_not_found + self.unverified
+        return self.same_as_not_found + self.unverified + self.outside_probe
 
     @property
     def unverified_reason(self) -> str:
@@ -955,34 +967,59 @@ def _join(base: str, path: str) -> str:
     return join_url(base, path.lstrip("/"))
 
 
-def _request_base(document_url: str, base_href: str | None) -> str:
-    """The one base every URL this audit INVENTS is joined onto.
+@dataclass(frozen=True)
+class _InventedBase:
+    """Where this audit puts the URLs it makes up, and the base it would not use."""
+
+    url: str
+    # The `<base href>` the document declared and this audit declined to invent
+    # URLs under, verbatim. Empty when the document declared none or when the
+    # declared one was usable. Carried rather than recomputed because the
+    # refusal is silent otherwise, and a silent refusal is how a report came out
+    # `[PASS] all 0 navigation links followed, none broken` over a menu of three.
+    refused: str = ""
+
+
+def _invented_base(document_url: str, base_href: str | None) -> _InventedBase:
+    """The DIRECTORY the URLs this audit makes up are joined onto.
 
     Invented URLs are the not-found probe and the conventional trust paths
-    (`ABOUT_PATHS`, `CONTACT_PATHS`); a URL the document actually wrote is
-    resolved by `_resolve_target` against `resolve_base` instead, and the two
-    agree wherever the base is on-site.
+    (`ABOUT_PATHS`, `CONTACT_PATHS`). A URL the document actually WROTE is not
+    one of them: it is resolved by `_resolve_target` against `resolve_base`, and
+    the two questions have different answers that no single expression covers.
 
-    ONE base, because the probe's answer is only true of the directory it was
-    measured in. With the probe at `resolve_base` and the 17 conventional paths
-    still at the typed URL, one directory's answer judged another directory's
-    responses: on a home declaring `<base href="/app/">` whose root soft-404s
-    and whose `/app/` is honest, the probe went to `/app/`, said "this host
-    spends a 404 on a missing page", and `/about` and `/contact` — served by the
-    root's error template under HTTP 200 — were reported OK at exit 0. Probing
-    twice, once per base, does not close it: `_candidates` already resolves its
-    LINKED candidates against `<base href>` while its conventional ones stay at
-    the typed base, so one trust report holds both bases and a typed-base probe
-    still judges `/app/` responses — measured, the mirror site (honest root,
-    soft-404 `/app/`) reports About OK at `/app/sobre`, which does not exist.
-    A list with two bases needs one base, not a second probe.
+        as_base(url)                 which DIRECTORY the install lives in
+        resolve_base(url, base_href) what urljoin resolves a RELATIVE href against
 
-    `resolve_base` is used UNWRAPPED. It already returns the base `urljoin` will
-    use for the links, and `as_base` on top of it applies `looks_like_document`,
-    which `urljoin` does not, so the two parted company on every base without a
-    trailing slash: `<base href="/app">` sent the links to `/sobre` and the probe
-    to `/app/…`, which is both original defects back at once, one in each
-    direction. Same for `/a/b/c`, `/v1.0` and `app`.
+    At `final_url = http://h/app` those are `http://h/app/` and `http://h/`,
+    because `urljoin` treats `/app` as a file and replaces it. Three commits ran
+    aground on the belief that one of them is right for everything:
+
+      * `as_base(resolve_base(...))` is right here and wrong for the links. It
+        put `<base href="/app">`'s links at `/sobre` and its probe at `/app/…`,
+        and then let the probe's answer classify the links anyway.
+      * `resolve_base(...)` unwrapped is right for the links and wrong here. A
+        Next.js `trailingSlash:false` install at `/app` — `/app/` 308s to `/app`,
+        `/app/` soft-404s, the root answers honestly — put the probe at the root,
+        which said "this host spends a 404 on a missing page", and three dead
+        absolute links under `/app/` came back `[PASS]`, exit 0.
+
+    Neither is a fix, because the conflation is not an off-by-one in the
+    expression: the probe's answer is a fact about ONE directory, and the audit
+    requests URLs in more than one. So this function answers only the question it
+    is named for — where do the INVENTED URLs go — and `_probe_covers` decides,
+    per request, whether the probe measured the place that request landed in.
+    Everything it did not measure is MISSING, which is what this package already
+    does with a condition it could not observe.
+
+    The cost of `as_base` here is stated rather than hidden: on a base with no
+    trailing slash the guesses go one segment deeper than a browser resolves a
+    relative href — `<base href="/a/b/c">` guesses `/a/b/c/about` where a link
+    `about` lands at `/a/b/about`. That direction is deliberate. It is what puts
+    the probe inside the install in the `/app` shape above, and the links that
+    land outside it are then reported MISSING instead of being waved through: a
+    false MISSING asks a human to look, a false OK is the defect this module
+    exists to make impossible.
 
     Clamped to the audited site, which `resolve_base` deliberately does not do —
     an off-site `<base href>` is a TRUE statement about where the links point,
@@ -993,7 +1030,9 @@ def _request_base(document_url: str, base_href: str | None) -> str:
     a staging host whose template still carries `<base href="https://www.example
     .com/">` sent every probe to the production host and let a third party's
     regime decide staging's verdict, with zero probes reaching the host under
-    audit. And a base with no host at all is worse than off-site: `as_base`
+    audit.
+
+    The clamp runs BEFORE `as_base`, and that order is load-bearing. `as_base`
     prefixes `https://` to anything without `://`, so `<base
     href="mailto:contato@127.0.0.1:61081">` became a live connection to
     `https://mailto:contato@127.0.0.1:61081/` — an address assembled out of the
@@ -1009,10 +1048,86 @@ def _request_base(document_url: str, base_href: str | None) -> str:
     """
     resolved = resolve_base(document_url, base_href)
     if split_url(resolved).scheme in ("http", "https") and same_site(resolved, document_url):
-        return resolved
+        return _InventedBase(as_base(resolved))
     # `resolve_base` with no href is the document's own URL, credentials off —
     # the same fallback a document declaring no base gets.
-    return resolve_base(document_url, None)
+    return _InventedBase(
+        as_base(resolve_base(document_url, None)), refused=(base_href or "").strip()
+    )
+
+
+def _probe_covers(probe: _NotFoundProbe, url: str) -> bool:
+    """Whether the probe's answer describes the response that came back from `url`.
+
+    The probe asked ONE path in ONE directory, so what it learned is a fact about
+    that directory's router and not about the host. Letting it classify a
+    response from anywhere else is the conflation `_invented_base` describes,
+    and it is what no choice of a single base can fix: an ABSOLUTE link lands
+    where it says, under neither base, and a directory the probe never touched
+    can soft-404 while the probed one is honest. That shape reported `[PASS]`
+    over dead links at every commit before this one.
+
+    Containment, not equality, because a directory's router normally answers for
+    its whole subtree and requiring an exact match would make every `/blog/post`
+    on an ordinary site unverified. What survives is the limitation
+    `count_broken_nav_links` already states: a CMS mounted under `/blog/` that
+    soft-404s beneath an honest root is still read as honest. This narrows that
+    hole to the probe's own subtree; it does not close it.
+
+    `url` must be where the response CAME FROM — `final_url`, not what was asked
+    — because a link that redirects out of the probed directory was answered by
+    a router the probe never asked.
+    """
+    if not probe.base:
+        return False
+    if not same_site(url, probe.base):
+        return False
+    directory = split_url(probe.base).path or "/"
+    path = split_url(url).path
+    # The directory itself counts, spelled without its trailing slash: `/app` is
+    # the address `/app/` redirects to on a `trailingSlash:false` install, and
+    # it is the same resource. `startswith` alone would call it uncovered and
+    # report the install's own front door as unverified. The slash in the prefix
+    # is what keeps `/application` out.
+    return path.startswith(directory) or path == directory.rstrip("/")
+
+
+def _record_refused_base(
+    report: _Verdict, invented: _InventedBase, moved_by_base: list[str]
+) -> None:
+    """Say that a declared `<base href>` was not used, and what it cost.
+
+    Without this the refusal is invisible. A home declaring
+    `<base href="https://www.example.com/">` over a menu of three relative links
+    printed `[PASS] … all 0 navigation links followed, none broken`: the base
+    carried all three off-site, the same-site filter dropped them, the guessed
+    paths quietly went somewhere else, and the report named none of it. A reader
+    cannot tell that from a page with no menu at all, which is the difference
+    between "nothing to check" and "everything was skipped".
+
+    The severity follows what was actually lost rather than being fixed, because
+    the same refusal costs the two callers different things. Links the base
+    moved out of reach were declared and never followed — a condition this run
+    did not observe, which is MISSING. With no such links there is nothing
+    unobserved and the refusal is only worth printing, which is INFO.
+    """
+    if not invented.refused:
+        return
+    if moved_by_base:
+        report.add(
+            Status.MISSING,
+            f'The home page declares <base href="{invented.refused}">, which is not an '
+            f"http(s) address on the audited site. {len(moved_by_base)} relative link(s) "
+            f"resolve through it and were not followed ({', '.join(moved_by_base[:5])}); the "
+            f"paths this check guesses were asked at {invented.url} instead",
+        )
+        return
+    report.add(
+        Status.INFO,
+        f'The home page declares <base href="{invented.refused}">, which is not an http(s) '
+        f"address on the audited site, so the paths this check guesses were asked at "
+        f"{invented.url} instead",
+    )
 
 
 def _resolve_target(base: str, href: str) -> str:
@@ -1087,7 +1202,7 @@ def check_trust_pages(
     Candidates come from the home page's own footer and navigation links first —
     a site that links to /pages/quem-eu-sou has an About page, and only reading
     its links can find it — then from the conventional paths, joined onto
-    `_request_base` so a subdirectory install is not silently swapped for the
+    `_invented_base` so a subdirectory install is not silently swapped for the
     domain root. Only the linked candidates are capped; every conventional path
     is tried, so "no candidate answered" is never said about a URL that was never
     requested.
@@ -1122,8 +1237,11 @@ def check_trust_pages(
         report.add(Status.ERROR, f"Home page HTML could not be parsed: {home_doc.parse_error}")
     home_text = home_doc.text
 
+    moved_by_base: list[str] = []
     for kind, (label, paths, hint) in _TRUST_KINDS.items():
-        candidates = _candidates(home, home_doc, paths, hint, max_linked_candidates)
+        candidates = _candidates(
+            home, home_doc, paths, hint, max_linked_candidates, moved_by_base
+        )
         outcome = _resolve_trust_page(
             kind=kind,
             candidates=candidates,
@@ -1135,6 +1253,30 @@ def check_trust_pages(
         )
         report.pages[kind] = outcome
         _record_page(report, label, outcome, home_doc)
+
+    _record_refused_base(
+        report,
+        _invented_base(home.final_url or home.url, home_doc.base_href),
+        _dedupe(moved_by_base),
+    )
+
+    for kind, outcome in report.pages.items():
+        if outcome.url is None or not_found is None:
+            continue
+        if _probe_covers(not_found, outcome.url):
+            continue
+        # A page found outside the directory the probe measured was judged on
+        # its words alone, exactly as it would be on a host that answers 200 for
+        # everything — and for the same reason, so it gets the same sentence.
+        # The hole is real: with the probe honest at `/app/` a linked candidate
+        # at an absolute `/loja/sobre` served by a soft-404 template is long
+        # enough to read as prose and came back [PASS].
+        report.add(
+            Status.INFO,
+            f"{_TRUST_KINDS[kind][0]} page was found at {outcome.url}, outside "
+            f"{not_found.base} — the only directory this run measured, with {not_found.url} "
+            "— so it was judged on the content it served and not on its status code",
+        )
 
     if not_found is not None and not not_found.trustworthy:
         # One line for the whole check, not one per page: it is a single fact
@@ -1175,6 +1317,7 @@ def _candidates(
     paths: tuple[str, ...],
     hint: re.Pattern[str],
     max_linked: int,
+    moved_by_base: list[str] | None = None,
 ) -> list[_Candidate]:
     """Linked candidates first (footer, then nav, then body), conventions after.
 
@@ -1182,11 +1325,14 @@ def _candidates(
     matching footer links push the conventions out of the list entirely, and cut
     the conventions themselves mid-tuple.
 
-    Both halves are joined onto ONE base. They used not to be — the linked half
-    followed `<base href>` and the conventional half stayed at the URL the
-    operator typed — and the not-found probe, which judges every response in
-    this list, can only have been measured in one directory. See `_request_base`
-    for the two `[PASS] exit 0` reports that came out of the split.
+    The two halves are joined onto DIFFERENT bases, and that is the point rather
+    than an oversight: a linked candidate is an address the document wrote, so
+    `urljoin` decides where it lands, while a conventional path is one this
+    module made up, so it goes in the install's directory. Making them agree by
+    picking one expression for both is what broke three commits in a row — see
+    `_invented_base`. What makes the difference safe is that neither half is
+    judged by the probe unless `_probe_covers` says the probe measured where it
+    landed.
     """
     home_url = home.final_url or home.url
     # The same base `_nav_targets` and the crawler resolve against. A home
@@ -1203,7 +1349,7 @@ def _candidates(
     link_base = resolve_base(home_url, home_doc.base_href)
     # The conventional paths are guesses this module writes, not links the
     # document wrote, so they go where every other invented URL goes.
-    guess_base = _request_base(home_url, home_doc.base_href)
+    guess_base = _invented_base(home_url, home_doc.base_href).url
     by_region: dict[str, list[str]] = {"footer": [], "nav": [], "body": []}
     for link in home_doc.links:
         href = link.href.strip()
@@ -1212,6 +1358,7 @@ def _candidates(
         if fold(href).startswith(("mailto:", "tel:", "javascript:")):
             continue
         target = _resolve_target(link_base, href)
+        relative = not split_url(href).scheme and not href.startswith("//")
         if split_url(target).scheme not in ("http", "https"):
             # The guard `_nav_targets` has always had and this loop had not. A
             # scheme this client cannot speak is not a missing page: `<base
@@ -1220,8 +1367,15 @@ def _candidates(
             # reported as a fault of the site. Before the base was honoured only
             # an explicit `<a href="ftp:…">` could reach here; now every relative
             # href in the document can, so the two loops agree about it.
+            if moved_by_base is not None and relative:
+                moved_by_base.append(href)
             continue
         if not _same_site(target, home_url):
+            # Relative only, for the reason `_nav_targets.dropped` states: a
+            # link written out in full to another host is off-site whatever the
+            # base says, and only the base can carry a relative one off-site.
+            if moved_by_base is not None and relative:
+                moved_by_base.append(href)
             continue
         # Either the visible label or the path may carry the word; a footer link
         # reading "Sobre" pointing at /pages/quem-eu-sou is found by the label.
@@ -1482,6 +1636,13 @@ class _NotFoundProbe:
     # every content-free response, which is evidence of nothing.
     fingerprint: str = ""
     url: str = ""
+    # The directory this answer was measured in, and the only place it describes.
+    # Carried on the probe rather than recomputed by each consumer because the
+    # probe travels: `check_completeness` measures it once and hands the same
+    # object to both sub-checks, and a consumer deriving the base a second time
+    # is how the two halves of this module came to disagree about one document
+    # in the first place. Empty on a probe nobody sent, which covers nothing.
+    base: str = ""
     # Why a 200 from this host says nothing about the page behind it. Set in
     # BOTH non-honest regimes, because in both of them that is the fact the
     # report has to print: "fingerprint" narrows down what the not-found page
@@ -1547,7 +1708,7 @@ def _probe_not_found(
     first_url = _join(base, NOT_FOUND_PROBE_PATHS[0])
 
     def opaque(reason: str) -> _NotFoundProbe:
-        return _NotFoundProbe("opaque", url=first_url, reason=reason)
+        return _NotFoundProbe("opaque", url=first_url, reason=reason, base=base)
 
     first = fetch(first_url, session=session, timeout=timeout)
     if first.error is not None:
@@ -1558,7 +1719,7 @@ def _probe_not_found(
     if first.status_code is None:
         return opaque(f"{first_url} answered without a status code")
     if first.status_code >= 400:
-        return _NotFoundProbe("honest", url=first_url)
+        return _NotFoundProbe("honest", url=first_url, base=base)
 
     # Past here the host is a proven soft-404 host: it answered a success code
     # for a path nothing routes.
@@ -1601,6 +1762,7 @@ def _probe_not_found(
         "fingerprint",
         fingerprint=first_text,
         url=first_url,
+        base=base,
         reason=f"{served}, so HTTP 200 from this host does not show that a page is there",
     )
 
@@ -1683,15 +1845,19 @@ def count_broken_nav_links(
         report.add(Status.ERROR, f"Home page HTML could not be parsed: {doc.parse_error}")
 
     home_url = home.final_url or home.url
-    targets = _nav_targets(doc, home_url)
+    invented = _invented_base(home_url, doc.base_href)
+    moved_by_base: list[str] = []
+    targets = _nav_targets(doc, home_url, moved_by_base=moved_by_base)
     if not targets:
         # No <nav>/<footer> markup at all is common on hand-written pages; fall
         # back to every internal link and say so, rather than reporting a clean
         # zero for links that were never looked at.
-        targets = _nav_targets(doc, home_url, regions=None)
+        moved_by_base.clear()
+        targets = _nav_targets(doc, home_url, regions=None, moved_by_base=moved_by_base)
         report.used_all_links = bool(targets)
 
     report.found = len(targets)
+    _record_refused_base(report, invented, moved_by_base)
 
     # Asked once for the whole menu, and only when there is something to sort:
     # on a menu of nothing the answer would decide nothing and the request would
@@ -1701,18 +1867,14 @@ def count_broken_nav_links(
         probe = not_found
         report.not_found_regime = probe.regime
     elif targets:
-        # Probed where the LINKS land, and `_request_base` is what makes that
-        # one address rather than an approximation of one. Three things separate
-        # it from the URL the operator typed, and each makes the answer useless:
-        # a site redirecting apex to www answers as a different host; a `<base
-        # href>` moves every link into a subdirectory that may answer a missing
-        # page quite differently from the root — asking the root and then judging
-        # `/app/` by it reported OK over a menu of dead links; and `as_base` on
-        # top of a resolved base rounded the address to a directory `urljoin`
-        # would not, which put the probe and the links in different places again.
-        probe = _probe_not_found(
-            _request_base(home_url, doc.base_href), session=sess, timeout=timeout
-        )
+        # Probed in the directory this audit INVENTS URLs in, which is the only
+        # question a single probe can answer. It is measured against the host
+        # that actually ANSWERED, not the one the operator typed: apex -> www is
+        # two hosts, and asking the first what it serves for a missing page and
+        # then judging the second's pages by it is the same category error one
+        # origin up. Where the links land is a separate question, and
+        # `_probe_covers` is what asks it per link instead of assuming.
+        probe = _probe_not_found(invented.url, session=sess, timeout=timeout)
         report.not_found_regime = probe.regime
 
     for url, text in targets[:limit]:
@@ -1727,6 +1889,21 @@ def count_broken_nav_links(
             # is allowed to call a link broken.
             report.broken.append(
                 NavLink(url=url, text=text, status_code=code, reason=f"HTTP {code}")
+            )
+            continue
+        landed = response.final_url or response.url
+        if not _probe_covers(probe, landed):
+            # The response came from a directory the probe never asked about, so
+            # its answer — honest or not — says nothing here. An absolute link
+            # into a sibling install is the shape that matters: the probe found
+            # the root honest, `/app/` soft-404s, and three dead links under it
+            # printed PASS at every commit before this one.
+            report.outside_probe.append(
+                NavLink(
+                    url=url, text=text, status_code=code,
+                    reason=f"HTTP {code} answered from {landed}, outside {probe.base} — the "
+                           f"only directory this run measured, with {probe.url}",
+                )
             )
             continue
         if probe.trustworthy:
@@ -1779,6 +1956,21 @@ def count_broken_nav_links(
             f"shown to lead anywhere: {report.unverified_reason}. Counted as neither working "
             f"nor broken: {listed}",
         )
+    if report.outside_probe:
+        listed = ", ".join(link.url for link in report.outside_probe[:5])
+        report.add(
+            # MISSING for the same reason the two lists above are: the condition
+            # was not observed. The probe measured one directory, these answered
+            # from another, and a soft-404 template one directory over answers
+            # 200 exactly like a page. Calling them working is the `[PASS]` over
+            # three dead links this gate exists to stop; calling them broken
+            # would invent failures out of links nobody showed to be dead.
+            Status.MISSING,
+            f"{len(report.outside_probe)} navigation link(s) answered HTTP 200 from outside "
+            f"{probe.base}, the only directory this run measured (with {probe.url}). What a "
+            "host serves for a URL it does not have is a fact about one directory, so these "
+            f"are counted as neither working nor broken: {listed}",
+        )
     if report.unresolved:
         listed = ", ".join(f"{link.url} ({link.reason})" for link in report.unresolved[:5])
         report.add(
@@ -1801,6 +1993,7 @@ def _nav_targets(
     doc: Document,
     home_url: str,
     regions: tuple[str, ...] | None = ("nav", "footer"),
+    moved_by_base: list[str] | None = None,
 ) -> list[tuple[str, str]]:
     # Relative hrefs point wherever `<base href>` says, which is why this is not
     # `home_url`: a menu of three live links under `<base href="/app/">` was
@@ -1812,6 +2005,19 @@ def _nav_targets(
     base = resolve_base(home_url, doc.base_href)
     out: list[tuple[str, str]] = []
     seen = {_canonical(home_url)}
+
+    def dropped(href: str) -> None:
+        """Note a RELATIVE href the base carried somewhere unfetchable.
+
+        Relative only, because those are the ones the base moved: a footer link
+        written out in full to twitter.com is off-site whatever the base says,
+        and counting it would make the sentence below fire on every ordinary
+        site. `//host/x` is not relative for this purpose — it names its own
+        host and only borrows the scheme.
+        """
+        if moved_by_base is not None and not split_url(href).scheme and not href.startswith("//"):
+            moved_by_base.append(href)
+
     for link in doc.links:
         if regions is not None and link.region not in regions:
             continue
@@ -1822,8 +2028,10 @@ def _nav_targets(
             continue
         target = _resolve_target(base, href)
         if split_url(target).scheme not in ("http", "https"):
+            dropped(href)
             continue
         if not _same_site(target, home_url):
+            dropped(href)
             continue  # external links are somebody else's uptime
         key = _canonical(target)
         if key in seen:
@@ -1918,12 +2126,17 @@ def check_completeness(
     # does not have. Costs the same one or two requests wherever it is asked;
     # asked here it is also spent on a site whose menu is empty, and the trust
     # pages are requested on every site there is.
-    # Asked at `_request_base`, which is where every URL below is requested from
-    # — the navigation links, the linked trust candidates and the conventional
-    # trust paths alike. A probe measured anywhere else answers about a directory
-    # nothing is fetched from, and this one answer is what both sub-checks use.
+    # Asked in the directory this audit invents URLs in — the not-found probe
+    # itself and the conventional trust paths. It is deliberately NOT claimed to
+    # be where every URL of the run lands: the navigation links and the linked
+    # trust candidates go where `urljoin` and their own absolute addresses put
+    # them, which is a different place whenever the base has no trailing slash
+    # or a link names its own directory. `_probe_covers` gates the answer at
+    # each response instead, so a directory this never measured cannot be judged
+    # by it. Measured against the host that ANSWERED, not the one typed: apex ->
+    # www is two hosts and the second one's pages are the ones being judged.
     not_found = _probe_not_found(
-        _request_base(home.final_url or home.url, doc.base_href),
+        _invented_base(home.final_url or home.url, doc.base_href).url,
         session=sess,
         timeout=timeout,
     )

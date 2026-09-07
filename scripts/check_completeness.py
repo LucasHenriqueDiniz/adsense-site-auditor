@@ -179,6 +179,13 @@ def main() -> int:
         # Unresolved links raise the status to ERROR and used to contribute no
         # evidence, so the fallback fired and an [ERR] line read "none broken".
         evidence += [f"{link.url} -> unresolved ({link.reason})" for link in nav.unresolved]
+        # Printed per link, like same_as_not_found and unlike the group line
+        # below, because the directory a link landed in differs from link to
+        # link — it is a fact about the request, not about the host.
+        evidence += [
+            f"{link.url} -> HTTP {link.status_code}, unverified: {link.reason}"
+            for link in nav.outside_probe
+        ]
         if nav.unverified:
             # One line for the group: the reason is a single observation about
             # the host, not a fact about each link. Printing it per link would
@@ -226,6 +233,11 @@ def main() -> int:
                  "http_4xx_5xx": nav.count,
                  "same_as_not_found": len(nav.same_as_not_found),
                  "unverified": len(nav.unverified),
+                 # Its own column rather than folded into `unverified`: the two
+                 # are the same weight but not the same fact, and a run where
+                 # this one is non-zero is telling the operator that part of
+                 # their menu lives outside the directory that was measured.
+                 "outside_probed_directory": len(nav.outside_probe),
                  "not_found_regime": nav.not_found_regime or "not probed"},
                 # Counting links that 404 is ADS-COMPLETE-01's "site looks
                 # abandoned", which is what count_broken_nav_links' own docstring

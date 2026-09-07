@@ -299,3 +299,39 @@ def test_o_maior_timeout_que_o_socket_aceita_nao_e_recusado(server, monkeypatch,
     check_completeness.main()
 
     assert "/" in [caminho for _metodo, caminho, _headers in routes.received]
+
+
+def test_linha_de_navegacao_nomeia_os_links_fora_do_diretorio_sondado(
+    server, monkeypatch, capsys
+):
+    """A lista `outside_probe` tem que chegar ao papel, não só ao veredito.
+
+    Um link que respondeu 200 de um diretório que a sonda nunca mediu é
+    MISSING, e o achado agregado já dizia isso — mas a linha `navigation`
+    montava sua evidência a partir de `broken`, `same_as_not_found`,
+    `unresolved` e `unverified`, e cairia no ramo "all N navigation links
+    followed, none broken" com a lista nova invisível. `render` conta a Line, e
+    uma Line que esconde metade do que decidiu é como este pacote imprimia PASS
+    sob a própria lista de problemas.
+    """
+    base, routes = server
+    menu = "<nav><a href='/loja/a'>a</a><a href='/loja/b'>b</a></nav>"
+    routes["/app/"] = (
+        200, HTML,
+        '<html><head><base href="/app/"><title>Casa</title></head>'
+        f"<body><h1>Casa</h1><p>{PROSA}</p>{menu}</body></html>",
+    )
+    # `/app/` é honesta; `/loja/` responde 200 para tudo.
+    routes.default = lambda metodo, caminho: (
+        (200, HTML, _home()) if caminho.startswith("/loja/") else None
+    )
+
+    monkeypatch.setattr("sys.argv", ["check_completeness.py", base + "/app/", "-v"])
+    codigo = check_completeness.main()
+    saida = capsys.readouterr().out
+
+    assert f"{base}/loja/a" in saida
+    assert f"{base}/loja/b" in saida
+    assert "none broken" not in saida
+    assert "outside_probed_directory" in saida
+    assert codigo == 1

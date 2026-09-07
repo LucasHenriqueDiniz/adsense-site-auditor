@@ -10,6 +10,7 @@ seguido silenciosamente, 403 confundido com 404, conexão cortada — e um mock
 reproduziria a suposição errada em vez do protocolo.
 """
 
+
 import check_completeness as check_completeness_cli
 import pytest
 import requests
@@ -23,7 +24,10 @@ from adsense_checks.completeness import (
     NavLinkReport,
     Status,
     _candidates,
+    _invented_base,
     _nav_targets,
+    _NotFoundProbe,
+    _probe_covers,
     _probe_not_found,
     check_completeness,
     check_trust_pages,
@@ -1902,7 +1906,14 @@ def test_base_href_para_fora_do_site_nao_cobra_uptime_de_terceiro(server):
     relatorio = count_broken_nav_links(base + "/")
 
     assert (relatorio.found, relatorio.checked, relatorio.count) == (0, 0, 0)
-    assert relatorio.passed is True
+    # `passed is True` ficava aqui, e era o silêncio que o revisor pegou: a linha
+    # impressa era "[PASS] all 0 navigation links followed, none broken" sobre um
+    # menu que TINHA link, sem uma palavra sobre a base que os levou embora. Zero
+    # links seguidos porque a base foi recusada é condição não observada, e neste
+    # pacote condição não observada é MISSING — nunca um pass.
+    assert relatorio.status is Status.MISSING
+    dito = frases(relatorio)
+    assert "outro-site.invalid" in dito and "sobre" in dito
     # E o crawler chega ao mesmo endereço, pela mesma base, sem visitá-lo.
     assert crawl(base + "/", delay=0).off_site == ["https://outro-site.invalid/sobre"]
 
@@ -1999,7 +2010,13 @@ def test_base_href_com_esquema_que_o_cliente_nao_fala_nao_vira_candidato(server)
     relatorio = check_trust_pages(base + "/")
 
     assert relatorio.pages["about"].status is Status.MISSING
-    assert "ftp://" not in " | ".join(relatorio.issues)
+    # Nenhuma tentativa por ftp: é isso que o filtro impede, e por isso o desfecho
+    # é MISSING e não o ERROR de "no connection adapters" que o site levava a
+    # culpa por. O que o relatório agora PODE citar — e cita — é a declaração:
+    # calar sobre uma base recusada é como um menu inteiro sumia sem deixar linha.
+    assert [u for u, _ in relatorio.pages["about"].attempts if u.startswith("ftp://")] == []
+    assert "connection adapters" not in " | ".join(relatorio.issues)
+    assert f'<base href="ftp://127.0.0.1:{porta}/">' in " | ".join(relatorio.issues)
 
 
 def test_base_href_com_esquema_que_o_cliente_nao_fala_nao_vira_link_de_menu():
@@ -2182,15 +2199,25 @@ def test_um_base_href_sem_host_nao_vira_um_endereco_inventado(server):
     `<base href="mailto:contato@127.0.0.1:61081">` virava
     `https://mailto:contato@127.0.0.1:61081/` — uma conexão de verdade para um
     endereço que ninguém escreveu — e a URL forjada era impressa no relatório do
-    operador como se o host auditado a tivesse respondido.
+    operador como se o host auditado a tivesse respondido. É por isso que o
+    clamp roda ANTES de `as_base`, e é essa ordem que este teste prende.
 
-    O esquema é conferido junto com o host porque `same_site` compara host e
-    porta e ignora o esquema de propósito: `<base href="ftp://o-proprio-host/">`
-    passa pelo filtro de mesmo-site e mesmo assim não é um transporte que este
-    cliente fala.
+    O parágrafo sobre `ftp://` que ficava aqui argumentava por um caso que este
+    teste não exercia: quem prende o esquema no host auditado é
+    `test_base_href_ftp_no_host_auditado_e_recusado_porque_same_site_ignora_esquema`,
+    que manda um `ftp://` de verdade pelo mesmo caminho.
     """
     base, rotas = server
-    rotas["/"] = (200, {}, home_com_base("mailto:contato@127.0.0.1:61081", menu_de("sobre")))
+    # A porta do endereço forjado é A DO HOST AUDITADO, de propósito. Com uma
+    # porta qualquer o filtro de mesmo-site derruba a base antes de a ordem
+    # entre clamp e `as_base` decidir coisa alguma, e trocar a ordem sobrevivia
+    # à suíte inteira. Com a porta batendo, `as_base` primeiro produz
+    # `https://mailto:contato@127.0.0.1:<porta>/`, cujo host e porta passam por
+    # `same_site` — e aí a URL montada a partir da marcação vira a base de
+    # verdade, com `mailto:contato@` viajando como userinfo.
+    porta = base.rsplit(":", 1)[1]
+    forjado = f"mailto:contato@127.0.0.1:{porta}"
+    rotas["/"] = (200, {}, home_com_base(forjado, menu_de("sobre")))
     rotas.default = lambda metodo, caminho: (200, {}, ERRO_404_LONGO)
 
     relatorio = check_completeness(base + "/")
@@ -2199,22 +2226,39 @@ def test_um_base_href_sem_host_nao_vira_um_endereco_inventado(server):
     assert f"/{NOT_FOUND_PROBE_PATHS[0]}" in caminhos_pedidos(rotas)
     texto = " | ".join(relatorio.issues)
     assert f"{base}/{NOT_FOUND_PROBE_PATHS[0]}" in texto
-    assert "mailto:contato@127.0.0.1:61081" not in texto
+    # O endereço FORJADO é o que não pode existir em lugar nenhum.
+    assert "https://mailto:" not in texto
+    # A declaração, essa aparece, e de propósito: o operador precisa saber que o
+    # documento declarou uma base e que os caminhos chutados foram para outro
+    # lugar por causa dela.
+    assert f'<base href="{forjado}">' in texto
 
 
-# Cada forma de `<base href>` com o diretório em que os links dela caem, escrito
-# aqui em vez de calculado: é `urljoin` que decide isto, e recalcular a regra no
-# teste deixaria os dois lados errados juntos. `/app` sem barra final NÃO é um
-# diretório para `urljoin` — o último segmento é substituído — e é exatamente
-# nessas linhas que `as_base` divergia, porque ele arredonda para `/app/`.
-BASES_E_O_DIRETORIO_DOS_LINKS = [
-    ("/app/", "/app/"),
-    ("/app", "/"),
-    ("/a/b/c", "/a/b/"),
-    ("app", "/"),
-    ("/app/index.html", "/app/"),
-    ("/v1.0", "/"),
-    ("/blog.old", "/"),
+# Cada forma de `<base href>` com OS DOIS diretórios que ela produz, escritos
+# aqui em vez de calculados: recalcular a regra no teste deixaria os dois lados
+# errados juntos.
+#
+#   * o diretório dos LINKS é o que `urljoin` faz com um href relativo. `/app`
+#     sem barra final não é um diretório para ele — o último segmento é
+#     substituído — então `sobre` cai em `/sobre`.
+#   * o diretório das URLS INVENTADAS é o que `as_base` diz, e ele arredonda
+#     `/app` para `/app/`.
+#
+# Que as duas colunas DIFIRAM em cinco das sete linhas é a tese deste arquivo,
+# não um defeito: são duas perguntas diferentes e nenhuma expressão responde as
+# duas. Três commits tentaram uma expressão só e cada um consertou um lado
+# quebrando o outro. O que impede a diferença de virar veredito errado não é
+# igualá-las — é `_probe_covers`, que só deixa a sonda classificar uma resposta
+# que voltou de onde ela mediu.
+BASES_E_OS_DOIS_DIRETORIOS = [
+    # base_href, diretório dos links, diretório das URLs inventadas
+    ("/app/", "/app/", "/app/"),
+    ("/app", "/", "/app/"),
+    ("/a/b/c", "/a/b/", "/a/b/c/"),
+    ("app", "/", "/app/"),
+    ("/app/index.html", "/app/", "/app/"),
+    ("/v1.0", "/", "/v1.0/"),
+    ("/blog.old", "/", "/blog.old/"),
 ]
 
 
@@ -2227,20 +2271,24 @@ PONTOS_DE_ENTRADA = [count_broken_nav_links, check_completeness]
 
 
 @pytest.mark.parametrize("entrada", PONTOS_DE_ENTRADA, ids=lambda f: f.__name__)
-@pytest.mark.parametrize(("base_href", "diretorio"), BASES_E_O_DIRETORIO_DOS_LINKS)
-def test_a_sonda_cai_exatamente_onde_os_links_caem(server, base_href, diretorio, entrada):
-    """F3, e a invariante que nenhum teste prendia: MESMA URL, não "mesma ideia".
+@pytest.mark.parametrize(("base_href", "dos_links", "das_inventadas"), BASES_E_OS_DOIS_DIRETORIOS)
+def test_a_sonda_cai_no_diretorio_das_urls_inventadas_e_os_links_onde_urljoin_manda(
+    server, base_href, dos_links, das_inventadas, entrada
+):
+    """As DUAS bases de uma vez, cada uma no endereço que lhe cabe.
 
-    A sonda seguir o `<base href>` estava preso; cair ONDE OS LINKS CAEM não. E
-    `as_base(resolve_base(...))` faz as duas coisas divergirem, porque `as_base`
-    aplica `looks_like_document` e `urljoin` não: em `<base href="/app">` os
-    links iam para `/sobre` e a sonda para `/app/`, que é os dois defeitos
-    originais de volta ao mesmo tempo, um em cada direção.
+    Este teste substitui `test_a_sonda_cai_exatamente_onde_os_links_caem`, que
+    exigia UM endereço só. Essa exigência era o defeito, não a correção: a sonda
+    pergunta o que este servidor responde para um caminho que ninguém roteia, e
+    a resposta vale no DIRETÓRIO em que foi medida. Uma auditoria pede URLs em
+    mais de um diretório — as que ela inventa num, as que o documento escreveu
+    noutro, as absolutas onde bem entenderem — e obrigar tudo a caber numa base
+    só é o que fez três commits consertarem um lado quebrando o outro.
 
-    O menu deste teste tem UM link, e o href dele é a própria primeira URL de
-    `NOT_FOUND_PROBE_PATHS`. Se a sonda cai onde os links caem, os dois pedidos
-    são o mesmo endereço e o fio mostra UM caminho com esse nome; se divergem,
-    mostra dois. É a invariante escrita como ela é, e não uma paráfrase dela.
+    O menu tem UM link e o href dele é a primeira URL de
+    `NOT_FOUND_PROBE_PATHS`, então o fio mostra exatamente onde cada uma das duas
+    perguntas foi parar: um caminho quando as duas bases coincidem, dois quando
+    divergem — e divergir é o esperado em cinco das sete formas da tabela.
     """
     base, rotas = server
     sonda = NOT_FOUND_PROBE_PATHS[0]
@@ -2248,21 +2296,27 @@ def test_a_sonda_cai_exatamente_onde_os_links_caem(server, base_href, diretorio,
 
     entrada(base + "/")
 
-    assert [c for c in caminhos_pedidos(rotas) if sonda in c] == [diretorio + sonda]
+    pedidos = sorted(c for c in caminhos_pedidos(rotas) if sonda in c)
+    assert pedidos == sorted({dos_links + sonda, das_inventadas + sonda})
 
 
 @pytest.mark.parametrize("entrada", PONTOS_DE_ENTRADA, ids=lambda f: f.__name__)
-def test_a_sonda_cai_onde_os_links_caem_sem_precisar_de_um_base_href(server, entrada):
-    """A mesma invariante quando quem não é um diretório é a PRÓPRIA home.
+def test_a_sonda_cai_no_diretorio_da_home_mesmo_sem_um_base_href(server, entrada):
+    """ESTE TESTE PRENDIA O DEFEITO, e por isso ele muda em vez de sobreviver.
 
-    Sem `<base href>`, a base dos links é a URL final do documento — e um
-    redirect para `/app`, sem barra, não é um diretório para `urljoin`: ele
-    substitui o último segmento, então `sobre` cai em `/sobre`. `as_base`
-    arredonda `/app` para `/app/`, e é por isso que a ordem importa e não só a
-    presença: `resolve_base(as_base(url), href)` põe a sonda em `/app/` enquanto
-    os links seguem na raiz. Sem esta linha nada media a diferença — em todo
-    outro teste a home responde em `/`, onde `as_base` é idempotente e a troca
-    de ordem não muda endereço nenhum.
+    Ele se chamava `test_a_sonda_cai_onde_os_links_caem_sem_precisar_de_um_base_href`
+    e exigia a sonda em `/` — que é, literalmente, a regressão de `eede9ce`. A
+    forma é a de uma instalação Next.js com `trailingSlash:false` em `/app`: a
+    raiz redireciona para `/app`, `/app` não é diretório para `urljoin`, e com a
+    sonda obrigada a acompanhar os links ela ia parar na raiz. Numa raiz honesta
+    e com `/app/` servindo soft 404, a sonda voltava "este host gasta um 404
+    numa página que não tem" e três links absolutos mortos dentro de `/app/`
+    saíam `[PASS]`, exit 0. A suíte protegia isso.
+
+    O que vale é o contrário: a sonda pertence ao diretório da INSTALAÇÃO, que é
+    onde esta auditoria inventa URL, e é `/app/`. Os links relativos continuam
+    caindo na raiz, porque é lá que `urljoin` os põe — e é `_probe_covers` que
+    impede a resposta de um diretório de julgar as do outro.
     """
     base, rotas = server
     sonda = NOT_FOUND_PROBE_PATHS[0]
@@ -2271,7 +2325,8 @@ def test_a_sonda_cai_onde_os_links_caem_sem_precisar_de_um_base_href(server, ent
 
     entrada(base + "/")
 
-    assert [c for c in caminhos_pedidos(rotas) if sonda in c] == ["/" + sonda]
+    pedidos = sorted(c for c in caminhos_pedidos(rotas) if sonda in c)
+    assert pedidos == sorted(["/app/" + sonda, "/" + sonda])
 
 
 def test_a_sonda_da_auditoria_inteira_segue_o_redirect_para_quem_de_fato_responde(
@@ -2319,6 +2374,359 @@ def test_a_sonda_da_navegacao_segue_o_redirect_para_quem_de_fato_responde(
     assert [c for c in caminhos_pedidos(rotas) if NOT_FOUND_PROBE_PATHS[0] in c] == []
     assert f"/{NOT_FOUND_PROBE_PATHS[0]}" in caminhos_pedidos(rotas_destino)
     assert relatorio.not_found_regime == "fingerprint"
+
+
+# --------------------------------------------------------------------------
+# A sonda vale num DIRETÓRIO, e só nele.
+#
+# Uma base só nunca cobriu todos os pedidos de uma auditoria, e nenhuma escolha
+# de base cobre um link ABSOLUTO — ele cai onde ele diz, debaixo de nenhuma das
+# duas. Então a sonda responde pelo diretório onde foi medida e `_probe_covers`
+# pergunta, pedido a pedido, se foi de lá que a resposta veio. O que ela não
+# mediu é MISSING: nem passe, nem falha.
+#
+# Cada teste abaixo é uma forma que quebrou pelo menos uma tentativa anterior.
+# --------------------------------------------------------------------------
+
+
+def test_instalacao_em_app_com_raiz_honesta_nao_aprova_links_absolutos_mortos(server):
+    """Caso 1: Next.js `trailingSlash:false`, e nenhum `<base href>` envolvido.
+
+    A raiz redireciona para `/app`, `/app/` serve soft 404 e a raiz é honesta.
+    Com a sonda obrigada a cair onde os links relativos cairiam ela ia para a
+    RAIZ, voltava "este host gasta um 404 numa página que não tem", e três links
+    absolutos mortos dentro de `/app/` saíam aprovados: `[PASS]`, exit 0, sobre
+    um menu inteiro que não leva a lugar nenhum.
+    """
+    base, rotas = server
+    mortos = ("/app/blog", "/app/loja", "/app/cursos")
+    rotas["/"] = (301, {"Location": "/app"}, "")
+    rotas["/app"] = (200, {}, pagina("Casa", extra=menu_de(*mortos)))
+    # `/app/` responde 200 para o que não tem; a raiz 404 honestamente.
+    rotas.default = lambda metodo, caminho: (
+        (200, {}, ERRO_404_LONGO) if caminho.startswith("/app/") else None
+    )
+
+    relatorio = check_completeness(base + "/")
+
+    pedidos = caminhos_pedidos(rotas)
+    assert f"/app/{NOT_FOUND_PROBE_PATHS[0]}" in pedidos
+    assert f"/{NOT_FOUND_PROBE_PATHS[0]}" not in pedidos
+    # Nenhum foi observado quebrado — e nenhum foi dado como vivo.
+    assert relatorio.nav.count == 0
+    assert [link.url for link in relatorio.nav.unclassified] == [base + c for c in mortos]
+    assert relatorio.nav.status is Status.MISSING
+    assert relatorio.status is not Status.OK
+
+
+def test_base_href_sem_barra_final_com_raiz_honesta_nao_aprova_links_mortos(server):
+    """Caso 2: a mesma forma sem redirect nenhum, declarada na marcação.
+
+    `<base href="/app">` sem barra final. `urljoin` troca o último segmento, de
+    modo que os links RELATIVOS dele caem na raiz — e por isso a sonda amarrada
+    a eles ia para a raiz também, exatamente como no caso 1. A instalação, no
+    entanto, é `/app/`: é lá que os caminhos que esta auditoria inventa têm que
+    ser pedidos, e é lá que ela precisa perguntar o que vale um 200.
+    """
+    base, rotas = server
+    mortos = ("/app/blog", "/app/loja", "/app/cursos")
+    rotas["/app/"] = (200, {}, home_com_base("/app", menu_de(*mortos)))
+    rotas.default = lambda metodo, caminho: (
+        (200, {}, ERRO_404_LONGO) if caminho.startswith("/app/") else None
+    )
+
+    relatorio = check_completeness(base + "/app/")
+
+    pedidos = caminhos_pedidos(rotas)
+    assert f"/app/{NOT_FOUND_PROBE_PATHS[0]}" in pedidos
+    assert f"/{NOT_FOUND_PROBE_PATHS[0]}" not in pedidos
+    assert relatorio.nav.count == 0
+    assert [link.url for link in relatorio.nav.unclassified] == [base + c for c in mortos]
+    assert relatorio.nav.status is Status.MISSING
+
+
+def test_base_href_com_barra_final_e_tudo_vivo_continua_saindo_ok(server):
+    """Caso 4: a direção oposta, que é o que uma correção grosseira quebra.
+
+    Site inteiro dentro de `/app/`, base declarada com a barra, sonda honesta
+    ali dentro e todo link vivo debaixo dela. Não sobra nada não observado, e o
+    veredito tem que ser OK — senão o preço da correção é transformar todo site
+    são num relatório de coisas que não deu para verificar. É por isso que
+    `_probe_covers` é contenção e não igualdade: exigir o MESMO diretório faria
+    de todo `/blog/post` de um site comum um link não verificado.
+    """
+    base, rotas = server
+    rotas["/app/"] = (200, {}, home_com_base("/app/", menu_de("sobre", "contato", "blog")))
+    rotas["/app/sobre"] = (200, {}, pagina("Sobre"))
+    rotas["/app/contato"] = (200, {}, contato())
+    rotas["/app/blog"] = (200, {}, pagina("Blog"))
+
+    relatorio = check_completeness(base + "/app/")
+
+    assert caminhos_pedidos(rotas).count(f"/app/{NOT_FOUND_PROBE_PATHS[0]}") == 1
+    assert relatorio.nav.not_found_regime == "honest"
+    assert relatorio.nav.unclassified == []
+    assert relatorio.trust.pages["about"].url == base + "/app/sobre"
+    assert relatorio.status is Status.OK
+
+
+def test_base_href_ftp_no_host_auditado_e_recusado_porque_same_site_ignora_esquema(server):
+    """Caso 6: mesmo host, mesma porta, transporte que este cliente não fala.
+
+    `same_site` compara host e porta e ignora o esquema DE PROPÓSITO — um site
+    servido por http e https é um site só. Então conferir só o host deixa
+    `<base href="ftp://o-host-auditado/">` passar, e aí toda URL inventada vira
+    um `ftp://` que volta "No connection adapters were found": o relatório
+    culpava o site por endereços que nunca poderiam ter sido pedidos por HTTP.
+    """
+    base, rotas = server
+    porta = base.rsplit(":", 1)[1]
+    rotas["/"] = (200, {}, home_com_base(f"ftp://127.0.0.1:{porta}/", menu_de("sobre", "contato")))
+    rotas.default = lambda metodo, caminho: (200, {}, ERRO_404_LONGO)
+
+    relatorio = check_completeness(base + "/")
+
+    # A sonda saiu por http, no host auditado, e nenhuma URL ftp foi pedida.
+    assert f"/{NOT_FOUND_PROBE_PATHS[0]}" in caminhos_pedidos(rotas)
+    texto = " | ".join(relatorio.issues)
+    assert "connection adapters" not in texto
+    # E a recusa é dita, nomeando a base que a causou.
+    assert f'<base href="ftp://127.0.0.1:{porta}/">' in texto
+
+
+def test_erro_de_raiz_com_relogio_da_o_mesmo_veredito_em_vinte_corridas(server):
+    """Caso 7: reprodutibilidade quando a página de erro carrega um timestamp.
+
+    Duas sondas contra um template com relógio casam ou não conforme onde caiu a
+    virada do segundo, e isso escolhe entre os regimes `fingerprint` e `opaque`.
+    Se os dois decidissem coisas diferentes, o veredito de um menu morto seria
+    tirado na moeda — que foi o que já aconteceu aqui. Os dois significam a mesma
+    coisa para quem lê: um 200 deste host não prova nada. Só a frase muda.
+
+    A virada é FORÇADA em metade das corridas em vez de esperada de um relógio
+    real. Medido: com as duas sondas saindo com ~1ms de intervalo, um
+    `int(time.time())` cai no mesmo segundo em 20 de 20 corridas, então um teste
+    escrito com o relógio de verdade só exercita `fingerprint` e a moeda que ele
+    diz estar prendendo nunca é lançada. Aqui os dois regimes aparecem, e o
+    veredito é o mesmo nos dois.
+    """
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/a", "/b", "/c")))
+    # `corre` liga o carimbo que muda a cada requisição — a mesma diferença que
+    # a virada do segundo produz, no momento em que ela cai entre as sondas.
+    relogio = {"corre": False, "n": 0}
+
+    def erro(metodo, caminho):
+        relogio["n"] += 1
+        carimbo = relogio["n"] if relogio["corre"] else 0
+        return (200, {}, pagina("Não encontrada", corpo=f"{PROSA} Gerado em {carimbo}."))
+
+    rotas.default = erro
+
+    vistos, regimes = set(), set()
+    for corrida in range(20):
+        relogio["corre"] = bool(corrida % 2)
+        relatorio = count_broken_nav_links(base + "/")
+        vistos.add(relatorio.status)
+        regimes.add(relatorio.not_found_regime)
+
+    # As duas faces da moeda saíram...
+    assert regimes == {"fingerprint", "opaque"}
+    # ...e o veredito não depende de qual delas caiu.
+    assert vistos == {Status.MISSING}
+
+
+def test_links_absolutos_para_um_diretorio_que_a_sonda_nao_mediu_nao_saem_como_pass(server):
+    """Caso 10: o buraco que NENHUMA escolha de base fecha.
+
+    Um link absoluto cai onde ele diz — debaixo nem da base dos links nem da das
+    URLs inventadas. Aqui a instalação em `/app/` é honesta, a sonda mede `/app/`
+    e diz "este host gasta um 404", e o menu aponta para `/loja/`, que serve soft
+    404. Com a resposta da sonda valendo em todo lugar, esses links saíam vivos:
+    é o mesmo `[PASS]` dos casos 1 e 2, e nenhuma das três tentativas anteriores
+    o via, porque as três discutiam QUAL base usar em vez de perguntar se a
+    resposta veio de onde a sonda mediu.
+
+    As páginas de confiança ficam sãs de propósito: o que este teste isola é a
+    navegação, e um FAIL vindo delas mascararia o defeito.
+    """
+    base, rotas = server
+    fora = ("/loja/a", "/loja/b")
+    rotas["/app/"] = (200, {}, home_com_base("/app/", menu_de(*fora)))
+    rotas["/app/sobre"] = (200, {}, pagina("Sobre"))
+    rotas["/app/contato"] = (200, {}, contato())
+    rotas.default = lambda metodo, caminho: (
+        (200, {}, ERRO_404_LONGO) if caminho.startswith("/loja/") else None
+    )
+
+    relatorio = check_completeness(base + "/app/")
+
+    # A sonda achou o host honesto — e é justamente essa a armadilha.
+    assert relatorio.nav.not_found_regime == "honest"
+    assert relatorio.nav.status is Status.MISSING
+    assert [link.url for link in relatorio.nav.outside_probe] == [base + c for c in fora]
+    # E `unclassified` carrega as três listas, não duas: tirar `outside_probe`
+    # dela sobrevivia à suíte inteira, e o docstring da propriedade diz que as
+    # três pesam igual — nada aqui foi observado funcionando nem quebrado.
+    assert relatorio.nav.unclassified == relatorio.nav.outside_probe
+    assert relatorio.nav.count == 0
+    assert relatorio.trust.pages["about"].status is Status.OK
+    assert relatorio.status is not Status.OK
+
+
+def test_um_base_href_https_no_proprio_site_vale_nas_tres_guardas_de_esquema():
+    """A metade https de `("http", "https")` não era exercida por nada.
+
+    Toda fixture desta suíte fala http, porque o servidor de teste é http. Com
+    isso, trocar a tupla por `("http",)` sobrevivia às 592: o clamp de
+    `_invented_base` passava a recusar a base no esquema que TODO site real usa
+    e caía no fallback em silêncio, e as duas guardas de link derrubavam todo
+    href do documento. Nada aqui precisa de rede — é a regra, não o protocolo.
+    """
+    doc = parse_document(
+        home_com_base("https://ex.com/app/", "<nav><a href='sobre'>Sobre</a></nav>")
+    )
+
+    # 1. A base inventada aceita https e NÃO cai para o fallback.
+    inventada = _invented_base("https://ex.com/", doc.base_href)
+    assert (inventada.url, inventada.refused) == ("https://ex.com/app/", "")
+    # 2. O menu resolve por ela.
+    assert [u for u, _ in _nav_targets(doc, "https://ex.com/")] == ["https://ex.com/app/sobre"]
+    # 3. O candidato declarado também.
+    home = Fetch(url="https://ex.com/", final_url="https://ex.com/", status_code=200)
+    assert [c.url for c in _candidates(home, doc, (), _ABOUT_HINT, 6)] == [
+        "https://ex.com/app/sobre"
+    ]
+    # 4. E a cobertura da sonda vale entre https e https, que é o par que um site
+    #    real produz — `same_site` ignora o esquema, então isto é sobre o caminho.
+    sonda = _NotFoundProbe("honest", base="https://ex.com/app/")
+    assert _probe_covers(sonda, "https://ex.com/app/sobre") is True
+    assert _probe_covers(sonda, "https://ex.com/loja/sobre") is False
+
+
+def test_um_base_href_de_fora_nao_inventa_endereco_local_para_um_link_declarado(
+    server, outro_servidor
+):
+    """`link_base` NÃO é clampado, e o docstring de `_candidates` já proibia — sem
+    nada prendendo. Trocá-lo por `_invented_base(...).url` sobrevivia às 592.
+
+    Sob a troca, um `<base href>` para outro host passa a ser IGNORADO na hora de
+    resolver os links que o documento escreveu: o href relativo `quem-eu-sou`,
+    que aponta para o terceiro, vira `http://host-auditado/quem-eu-sou` — um
+    endereço que ninguém escreveu — é pedido, responde, e a resposta do host
+    auditado é reportada como sendo daquele link.
+
+    `quem-eu-sou` não está em `ABOUT_PATHS` de propósito: com um caminho
+    convencional a página seria achada por outra via e o teste passaria com o
+    defeito dentro dele.
+    """
+    base, rotas = server
+    terceiro, rotas_terceiro = outro_servidor
+    rodape = "<footer><a href='quem-eu-sou'>Sobre</a></footer>"
+    rotas["/"] = (200, {}, home_com_base(terceiro + "/", rodape))
+    rotas["/quem-eu-sou"] = (200, {}, pagina("Sobre"))
+
+    relatorio = check_trust_pages(base + "/")
+
+    assert "/quem-eu-sou" not in caminhos_pedidos(rotas)
+    assert rotas_terceiro.received == []
+    assert relatorio.pages["about"].status is Status.MISSING
+
+
+def test_um_link_que_redireciona_para_fora_do_diretorio_medido_nao_e_julgado(server):
+    """A cobertura olha de ONDE A RESPOSTA VEIO, não para o que foi pedido.
+
+    O filtro de mesmo-site e a resolução acontecem antes do `fetch`, então a
+    única forma de um pedido sair do diretório medido é um redirect — e ele é
+    comum: `/app/velho` que virou `/loja/novo`. Conferindo a URL PEDIDA, o link
+    conta como coberto, a sonda honesta de `/app/` vale para ele, e a resposta
+    do soft 404 de `/loja/` sai como página viva.
+    """
+    base, rotas = server
+    rotas["/app/"] = (200, {}, home_com_base("/app/", menu_de("/app/velho")))
+    rotas["/app/velho"] = (301, {"Location": "/loja/novo"}, "")
+    rotas.default = lambda metodo, caminho: (
+        (200, {}, ERRO_404_LONGO) if caminho.startswith("/loja/") else None
+    )
+
+    relatorio = count_broken_nav_links(base + "/app/")
+
+    assert relatorio.not_found_regime == "honest"
+    assert [link.url for link in relatorio.outside_probe] == [base + "/app/velho"]
+    assert relatorio.status is Status.MISSING
+
+
+def test_um_link_que_redireciona_para_outro_host_nao_e_julgado_pela_sonda_daqui(
+    server, outro_servidor
+):
+    """Mesmo caminho, outra origem: `same_site` faz parte da cobertura.
+
+    O link é do site auditado, então ele é seguido — e a resposta vem de outro
+    servidor. Sem a conferência de host na cobertura, o caminho `/pagina` do
+    terceiro começa com `/`, casa com o prefixo da sonda medida na raiz daqui, e
+    o regime deste host decide o veredito de uma resposta que ele não escreveu.
+    """
+    base, rotas = server
+    terceiro, rotas_terceiro = outro_servidor
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/parceiro")))
+    rotas["/parceiro"] = (302, {"Location": terceiro + "/pagina"}, "")
+    rotas_terceiro["/pagina"] = (200, {}, pagina("Parceiro"))
+
+    relatorio = count_broken_nav_links(base + "/")
+
+    # A raiz daqui é honesta: nada roteia a sonda e ela volta 404.
+    assert relatorio.not_found_regime == "honest"
+    assert [link.url for link in relatorio.outside_probe] == [base + "/parceiro"]
+    assert relatorio.status is Status.MISSING
+
+
+def test_o_proprio_diretorio_sem_a_barra_final_conta_como_coberto(server):
+    """`/app` é o endereço para o qual `/app/` redireciona — é o mesmo recurso.
+
+    Só `startswith("/app/")` o deixaria de fora, e a porta de entrada da própria
+    instalação sairia no relatório como link não verificado. O menu aponta para
+    `/app?ref=nav`: a query o mantém distinto da home na deduplicação, que é o
+    que faz o caso chegar até aqui em vez de ser descartado antes.
+    """
+    base, rotas = server
+    rotas["/app/"] = (308, {"Location": "/app"}, "")
+    rotas["/app"] = (200, {}, pagina("Casa", extra=menu_de("/app?ref=nav")))
+    # O servidor de teste roteia pelo caminho COM query, então a mesma página
+    # precisa das duas chaves — é a home respondendo aos dois endereços.
+    rotas["/app?ref=nav"] = (200, {}, pagina("Casa"))
+
+    relatorio = count_broken_nav_links(base + "/app/")
+
+    assert relatorio.not_found_regime == "honest"
+    assert relatorio.outside_probe == []
+    assert relatorio.status is Status.OK
+
+
+def test_pagina_de_confianca_achada_fora_do_diretorio_medido_diz_que_foi_julgada_pelo_texto(
+    server,
+):
+    """A mesma frase que um host soft 404 rende, pela mesma razão, no outro lado.
+
+    A sonda achou `/app/` honesta, mas a página Sobre que a home declara está em
+    `/loja/`, que serve soft 404. Ela tem prosa suficiente, então `_judge_page`
+    a aprova pelo TEXTO — e sem esta linha o relatório sai `[PASS] about page`
+    sem dizer que o 200 dela não foi verificado por ninguém.
+    """
+    base, rotas = server
+    rodape = "<footer><a href='/loja/quem-eu-sou'>Sobre</a></footer>"
+    rotas["/app/"] = (200, {}, home_com_base("/app/", rodape))
+    rotas["/app/contato"] = (200, {}, contato())
+    rotas.default = lambda metodo, caminho: (
+        (200, {}, ERRO_404_LONGO) if caminho.startswith("/loja/") else None
+    )
+
+    relatorio = check_completeness(base + "/app/")
+
+    assert relatorio.trust.pages["about"].url == base + "/loja/quem-eu-sou"
+    dito = " | ".join(relatorio.trust.issues)
+    assert f"outside {base}/app/" in dito
+    assert "judged on the content it served" in dito
+    assert relatorio.status is not Status.OK
 
 
 # --------------------------------------------------------------------------
