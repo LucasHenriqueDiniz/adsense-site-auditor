@@ -207,6 +207,15 @@ MAX_PROBED_DIRECTORIES = 8
 # path to one directory per run would leave every other directory's soft-404
 # template able to pass as a trust page. That is why the cap is stated in
 # directories AND in requests: eight directories, at most sixteen requests.
+# The status codes that mean "routed, and there is nothing here". Anything else
+# at or above 400 refuses the request instead of answering it — 401 and 403 say
+# who you are is the problem, 429 says not now, 5xx says the server broke — and
+# none of them describes what this directory does with a path nothing routes.
+# Reading them as honesty is how a WAF's 403 on a scan-shaped path turned a menu
+# of dead links into a pass. 405 and 451 are refusals of the same kind and stay
+# out; 410 is in, because Gone is the server routing the path and saying so.
+_ROUTED_TO_NOTHING = frozenset({404, 410})
+
 NOT_FOUND_PROBE_PATHS = (
     "adsense-auditor-probe-no-such-page",
     "adsense-auditor-probe-nn-9x7",
@@ -912,10 +921,13 @@ class NavLinkReport(_Verdict):
     # deliberately not a claim about the host: the other directories a run
     # touches are measured separately and can disagree with this one.
     not_found_regime: str = ""
-    # Directories a response came from that this run declined to measure because
-    # `MAX_PROBED_DIRECTORIES` was already spent. Named so the report can say
-    # which addresses went unjudged and why, rather than leaving the reader to
-    # infer a ceiling from a count.
+    # Directories this run declined to measure because `MAX_PROBED_DIRECTORIES`
+    # was already spent. Named so the report can say which addresses went
+    # unjudged and why, rather than leaving the reader to infer a ceiling from a
+    # count. Not every entry is a directory a NAVIGATION link came from: a trust
+    # candidate or the anchor asks first and can spend the last slot, so a reader
+    # pointing a second run at one of these may find nothing there to re-check.
+    # The list is what the ceiling refused, not a list of suspect addresses.
     refused_directories: list[str] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
 
@@ -1903,8 +1915,13 @@ class _NotFoundProbes:
     make the gate ornamental — the key would already guarantee the match, so
     loosening the predicate to `startswith` would change no behaviour and no
     test, which is exactly how a gate rots into a comment. With the scan, a
-    loosened predicate hands `/blog-antigo/x` the answer measured in `/blog/`
-    and skips the probe that would have caught it, and the suite says so.
+    loosened predicate hands one directory's answer to a response from another
+    AND skips the probe that would have caught it. Loosening to `startswith` is
+    the case to hold in mind, and `/` is what makes it bite: every directory is
+    below it, so one honest apex would answer for the whole site — the false
+    pass this design exists to close. A sibling pair like `/blog/` and
+    `/blog-antigo/` does NOT separate them, because `_directory_of` always emits
+    the trailing slash and `/blog-antigo/` does not start with `/blog/`.
     """
 
     def __init__(
@@ -2050,8 +2067,22 @@ def _probe_not_found(
         )
     if first.status_code is None:
         return opaque(f"{first_url} answered without a status code")
-    if first.status_code >= 400:
+    if first.status_code in _ROUTED_TO_NOTHING:
         return _NotFoundProbe("honest", url=first_url, base=base)
+    if first.status_code >= 400:
+        # A refusal is not an answer about routing. `>= 400` used to be enough,
+        # and a WAF is exactly the thing that 403s a path shaped like a scan —
+        # which is what the probe path looks like. With every other URL soft-404
+        # ing, one 403 here read as "this directory spends a status code on a
+        # missing page" and a menu of five dead links came back OK, About and
+        # Contact passing over the error template. 401, 429 and 5xx say the same
+        # nothing: the request never reached the router whose behaviour is the
+        # question.
+        return opaque(
+            f"{first_url} does not exist and this host answered HTTP "
+            f"{first.status_code} for it, which refuses the request rather than "
+            "routing it: what this directory does with a missing page is unknown"
+        )
 
     # Past here this DIRECTORY is a proven soft-404 directory: it answered a
     # success code for a path nothing routes. Not the host — a neighbour may well

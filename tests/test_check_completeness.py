@@ -214,7 +214,10 @@ def test_o_CLI_diz_por_que_o_menu_limpo_e_limpo(server, monkeypatch, capsys):
     saida = capsys.readouterr().out
 
     assert "all 1 navigation links followed, none broken" in saida
-    assert "answers 4xx for a URL that does not exist" in saida
+    # Nomeia os dois códigos, não a faixa: `>= 400` engolia 401, 403, 429 e 5xx,
+    # que recusam a requisição em vez de roteá-la, e a frase afirmava sobre
+    # roteamento uma coisa medida numa recusa.
+    assert "answers 404 or 410 for a URL that does not exist" in saida
 
 
 def test_o_CLI_nao_conta_link_inclassificavel_como_bom_nem_como_quebrado(

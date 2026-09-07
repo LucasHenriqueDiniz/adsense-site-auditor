@@ -868,6 +868,55 @@ def test_uma_pagina_de_erro_contida_na_outra_nao_vira_impressao_digital(server, 
     assert [link.url for link in r.unverified] == [base + "/a", base + "/b"]
 
 
+@pytest.mark.parametrize("recusa", [401, 403, 405, 429, 451, 500, 503])
+def test_uma_recusa_na_sonda_nao_e_resposta_sobre_roteamento(server, recusa):
+    """`>= 400` lia recusa como honestidade, e o falso pass sai daí.
+
+    O caminho da sonda tem cara de varredura — é essa a intenção, ninguém o
+    roteia — e um WAF na frente do site é exatamente a coisa que devolve 403
+    para ele. Com o app fazendo soft-404 em todo o resto, esse único 403 dizia
+    "este diretório gasta um código de status numa página que não tem", e um
+    menu de links todos mortos voltava OK. 401 fala de quem você é, 429 fala de
+    agora não, 5xx fala do servidor quebrado: nenhum deles chegou ao roteador
+    cujo comportamento é a pergunta.
+    """
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/a", "/b")))
+
+    def borda(metodo, caminho):
+        if "adsense-auditor-probe" in caminho:
+            return (recusa, {}, "")
+        return (200, {}, pagina_simples("Página não encontrada. Volte para a home."))
+
+    rotas.default = borda
+
+    r = count_broken_nav_links(base + "/")
+
+    assert r.not_found_regime == "opaque"
+    assert "refuses the request rather than routing it" in frases(r)
+    assert r.status is Status.MISSING
+    assert [link.url for link in r.unverified] == [base + "/a", base + "/b"]
+
+
+@pytest.mark.parametrize("roteado", [404, 410])
+def test_so_404_e_410_dizem_que_o_diretorio_roteou_e_nao_ha_nada(server, roteado):
+    """O contrapeso do teste acima, fixado pelos dois códigos que valem.
+
+    Sem isto, restringir a recusa poderia ir longe demais e nenhum host seria
+    honesto. 410 entra porque Gone é o servidor roteando o caminho e dizendo o
+    que houve — é resposta sobre roteamento, não recusa.
+    """
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de("/a")))
+    rotas["/a"] = (200, {}, pagina("A"))
+    rotas.default = (roteado, {}, "")
+
+    r = count_broken_nav_links(base + "/")
+
+    assert r.not_found_regime == "honest"
+    assert r.status is Status.OK
+
+
 def test_status_diferente_entre_as_sondas_nao_vira_impressao_digital(server):
     """Mesmo arquivo de erro, status diferente — e isso não é uma impressão
     digital, é um host cujo código de status não diz se a página está lá.
@@ -3241,6 +3290,14 @@ def test_um_base_href_https_no_proprio_site_vale_nas_tres_guardas_de_esquema():
     sentinela = _NotFoundProbe("honest")
     assert sentinela.base == ""
     assert _probe_covers(sentinela, "https://ex.com/qualquer") is False
+    # 6. E a caixa do caminho separa diretórios. O docstring de `_probe_covers`
+    #    diz seguir a RFC 3986 aqui e nada prendia: trocar a comparação por
+    #    `casefold` sobrevivia à suíte, e num host onde `/blog/` é honesto mas o
+    #    catch-all serve `/Blog/`, o mutante entrega a resposta medida no
+    #    primeiro para um link que veio do segundo — um PASS falso.
+    do_blog = _NotFoundProbe("honest", base="https://ex.com/blog/")
+    assert _probe_covers(do_blog, "https://ex.com/blog/vivo") is True
+    assert _probe_covers(do_blog, "https://ex.com/Blog/morto") is False
 
 
 def test_um_base_href_de_fora_nao_inventa_endereco_local_para_um_link_declarado(

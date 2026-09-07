@@ -64,9 +64,12 @@ description, visible word count, and the links it chose not to follow.
 `check_completeness.py` also asks the audited host, for a handful of paths that
 nothing can route — `adsense-auditor-probe-no-such-page` and a second one. That
 is how it tells a working page from a "page not found" template served with
-HTTP 200: where the server answers 4xx, a 200 means the page is there; where it
-does not, no 200 from it is evidence either way and the links are reported as
-unverified rather than as broken.
+HTTP 200: where the server answers 404 or 410 — routed, and there is nothing here
+— a 200 means the page is there. Where it does not, no 200 from it is evidence
+either way and the links are reported as unverified rather than as broken. A
+401, 403, 429 or 5xx counts as "does not": those refuse the request instead of
+routing it, and a WAF answering 403 to a path shaped like a scan says nothing
+about what the site does with a page it lacks.
 
 The answer is a fact about ONE DIRECTORY, never about the host. A WordPress
 install under `/blog/` and a static apex above it answer that question

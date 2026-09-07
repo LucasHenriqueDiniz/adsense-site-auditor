@@ -216,7 +216,7 @@ def main() -> int:
             # recorded as unverified, so this branch is unreachable there:
             # `evidence` is never empty. Nothing left to word carefully.
             proof = {
-                "honest": "; every directory they came from answers 4xx for a URL that does "
+                "honest": "; every directory they came from answers 404 or 410 for a URL that does "
                           "not exist, so HTTP 200 from it means the page is there",
             }.get(nav.not_found_regime, "")
             evidence = [f"all {nav.checked} navigation links followed, none broken{proof}"]
