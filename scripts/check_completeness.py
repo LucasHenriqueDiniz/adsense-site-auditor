@@ -184,7 +184,7 @@ def main() -> int:
         # link — it is a fact about the request, not about the host.
         evidence += [
             f"{link.url} -> HTTP {link.status_code}, unverified: {link.reason}"
-            for link in nav.outside_probe
+            for link in nav.unmeasured
         ]
         if nav.unverified:
             # One line for the group: the reason is a single observation about
@@ -216,8 +216,8 @@ def main() -> int:
             # recorded as unverified, so this branch is unreachable there:
             # `evidence` is never empty. Nothing left to word carefully.
             proof = {
-                "honest": "; this host answers 4xx for a URL that does not exist, so HTTP 200 "
-                          "means the page is there",
+                "honest": "; every directory they came from answers 4xx for a URL that does "
+                          "not exist, so HTTP 200 from it means the page is there",
             }.get(nav.not_found_regime, "")
             evidence = [f"all {nav.checked} navigation links followed, none broken{proof}"]
         lines.append(
@@ -236,9 +236,18 @@ def main() -> int:
                  # Its own column rather than folded into `unverified`: the two
                  # are the same weight but not the same fact, and a run where
                  # this one is non-zero is telling the operator that part of
-                 # their menu lives outside the directory that was measured.
-                 "outside_probed_directory": len(nav.outside_probe),
-                 "not_found_regime": nav.not_found_regime or "not probed"},
+                 # their menu answered from a directory this run never measured.
+                 "unmeasured": len(nav.unmeasured),
+                 # The directories the per-run ceiling refused, spelled out. A
+                 # count alone cannot tell the operator where to point a second
+                 # run, and it cannot separate a ceiling that bit from a menu
+                 # that redirected off-origin, which needs no second run at all.
+                 "refused_directories": nav.refused_directories,
+                 # The regime of the ANCHOR directory only — the one this audit
+                 # invents URLs in. Named per directory in the evidence above,
+                 # because the other directories a run measures can disagree
+                 # with this one and usually do on a subdirectory install.
+                 "anchor_not_found_regime": nav.not_found_regime or "not probed"},
                 # Counting links that 404 is ADS-COMPLETE-01's "site looks
                 # abandoned", which is what count_broken_nav_links' own docstring
                 # says. ADS-UX-01 is a `judgement` requirement about readability,

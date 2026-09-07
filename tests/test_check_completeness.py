@@ -8,6 +8,7 @@ o que permite rodar `main()` de ponta a ponta.
 import check_completeness
 import pytest
 
+from adsense_checks.completeness import MAX_PROBED_DIRECTORIES
 from adsense_checks.completeness import check_completeness as checar
 from adsense_checks.status import Status
 
@@ -301,37 +302,46 @@ def test_o_maior_timeout_que_o_socket_aceita_nao_e_recusado(server, monkeypatch,
     assert "/" in [caminho for _metodo, caminho, _headers in routes.received]
 
 
-def test_linha_de_navegacao_nomeia_os_links_fora_do_diretorio_sondado(
+def test_linha_de_navegacao_nomeia_os_links_do_diretorio_que_o_teto_recusou(
     server, monkeypatch, capsys
 ):
-    """A lista `outside_probe` tem que chegar ao papel, não só ao veredito.
+    """A lista `unmeasured` tem que chegar ao papel, não só ao veredito.
 
-    Um link que respondeu 200 de um diretório que a sonda nunca mediu é
-    MISSING, e o achado agregado já dizia isso — mas a linha `navigation`
-    montava sua evidência a partir de `broken`, `same_as_not_found`,
-    `unresolved` e `unverified`, e cairia no ramo "all N navigation links
-    followed, none broken" com a lista nova invisível. `render` conta a Line, e
-    uma Line que esconde metade do que decidiu é como este pacote imprimia PASS
-    sob a própria lista de problemas.
+    Um link que respondeu 200 de um diretório que ninguém mediu é MISSING, e o
+    achado agregado já dizia isso — mas a linha `navigation` montava sua
+    evidência a partir de `broken`, `same_as_not_found`, `unresolved` e
+    `unverified`, e cairia no ramo "all N navigation links followed, none
+    broken" com a lista nova invisível. `render` conta a Line, e uma Line que
+    esconde metade do que decidiu é como este pacote imprimia PASS sob a própria
+    lista de problemas.
+
+    O menu tem um diretório a mais do que `MAX_PROBED_DIRECTORIES` permite, que
+    é a única forma de o teto morder num site de um host só: a âncora `/` toma o
+    primeiro lugar e os `MAX_PROBED_DIRECTORIES - 1` seguintes tomam o resto.
+    Todos os links respondem 200 e o servidor 404 as sondas, então nada aqui
+    está quebrado — o que o relatório precisa dizer é QUANTO ficou sem medir e
+    ONDE, para o operador poder apontar uma segunda corrida ao subdiretório.
     """
     base, routes = server
-    menu = "<nav><a href='/loja/a'>a</a><a href='/loja/b'>b</a></nav>"
-    routes["/app/"] = (
+    diretorios = [f"/d{i}/" for i in range(MAX_PROBED_DIRECTORIES + 2)]
+    itens = "".join(f"<a href='{d}'>{d}</a>" for d in diretorios)
+    routes["/"] = (
         200, HTML,
-        '<html><head><base href="/app/"><title>Casa</title></head>'
-        f"<body><h1>Casa</h1><p>{PROSA}</p>{menu}</body></html>",
+        "<html><head><title>Casa</title></head>"
+        f"<body><h1>Casa</h1><p>{PROSA}</p><nav>{itens}</nav></body></html>",
     )
-    # `/app/` é honesta; `/loja/` responde 200 para tudo.
-    routes.default = lambda metodo, caminho: (
-        (200, HTML, _home()) if caminho.startswith("/loja/") else None
-    )
+    for d in diretorios:
+        routes[d] = (200, HTML, _home(corpo=f"Pagina {d}. {PROSA}"))
 
-    monkeypatch.setattr("sys.argv", ["check_completeness.py", base + "/app/", "-v"])
+    monkeypatch.setattr("sys.argv", ["check_completeness.py", base + "/", "-v"])
     codigo = check_completeness.main()
     saida = capsys.readouterr().out
 
-    assert f"{base}/loja/a" in saida
-    assert f"{base}/loja/b" in saida
+    # Os três últimos diretórios ficaram fora do teto: 1 âncora + 7 medidos.
+    recusados = diretorios[MAX_PROBED_DIRECTORIES - 1:]
+    for d in recusados:
+        assert f"{base}{d}" in saida
     assert "none broken" not in saida
-    assert "outside_probed_directory" in saida
+    assert "unmeasured: 3" in saida
+    assert f"refused_directories: {recusados}" in saida
     assert codigo == 1

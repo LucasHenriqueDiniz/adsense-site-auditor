@@ -61,48 +61,101 @@ description, visible word count, and the links it chose not to follow.
 | `--verify-stateless` | off | Re-requests each redirecting page without cookies, one extra request each. Any page that redirects holds ADS-CRAWL-04 at `MISSING` until it runs. |
 | `--verify-canonical` | off | Re-requests every page twice from fresh sessions to compare the canonical. ADS-CRAWL-05 reports `MISSING` until it runs, so on a site that declares canonicals this flag is the only route to exit 0. |
 
-`check_completeness.py` also asks the audited host, once per run, for one or
-two paths that nothing can route — `adsense-auditor-probe-no-such-page` and a
-second one. That is how it tells a working page from a "page not found"
-template served with HTTP 200: where the host answers 4xx, a 200 means the page
-is there; where it does not, no 200 from it is evidence either way and the
-links are reported as unverified rather than as broken.
+`check_completeness.py` also asks the audited host, for a handful of paths that
+nothing can route — `adsense-auditor-probe-no-such-page` and a second one. That
+is how it tells a working page from a "page not found" template served with
+HTTP 200: where the server answers 4xx, a 200 means the page is there; where it
+does not, no 200 from it is evidence either way and the links are reported as
+unverified rather than as broken.
 
-The answer is a fact about ONE DIRECTORY, not about the host. The probe is asked
-in the directory this script invents URLs in — its own probe paths and the
-conventional About/Contact paths it guesses. That directory is the home page's
-`<base href>` when it declares a usable one and the URL that answered otherwise.
-That address is used as a base, so a document-shaped one — `/index.php`, from an
-apex that redirects there — puts the probe in the directory containing it, the
-same way a relative link beside it resolves.
+The answer is a fact about ONE DIRECTORY, never about the host. A WordPress
+install under `/blog/` and a static apex above it answer that question
+differently, so the question is asked **per directory**: every directory a
+response actually came back from is asked about itself, and no directory's
+answer is ever allowed to classify another's. Reading one off the other is what
+wrecked four attempts at this in a row — the last of them by treating
+"contained in the probed directory" as "measured by the probe", which is a no-op
+when the probed directory is the root.
 
-That is deliberately **not** where every URL of the run is asked, and the script
-no longer pretends otherwise. A navigation link the page wrote goes where a
-browser would put it, which for a `<base href>` without a trailing slash is a
-different directory; an absolute link goes where it says, under neither. So each
-200 is checked against the directory the probe measured before the probe's
-answer is allowed to classify it. For a navigation link, a 200 from anywhere
-else is reported `MISSING` — unverified, neither working nor broken. For an
-About or Contact page it is an `INFO` note beside the verdict rather than a
-refusal, because that check has its own discriminators — word count, unfinished
-markers — and does not rest on the status code alone. The consequence is worth
-knowing: a trust page found outside the probed directory, on a host that serves
-its not-found template with prose and HTTP 200, still passes. On a site declaring
-`<base href="/app/">` the whole run does happen inside `/app/`; on one declaring
-`<base href="/app">` the guessed paths go to `/app/` while the relative links go
-to the root, and those links are reported as unverified rather than judged by a
-probe that never asked about their directory.
+The directory a URL belongs to is what `urljoin(url, ".")` says, so a
+document-shaped address — `/index.php`, from an apex that redirects there —
+belongs to the directory containing it, and a trailing slash makes an address
+its own directory. That second part is what costs: on a modern menu nearly every
+link is a directory of its own.
 
-That base never leaves the site you named. An off-site or non-HTTP
-`<base href>` is honoured for the links the page actually wrote — they do point
-elsewhere, and they are skipped as off-site — but the probe and the guessed
-paths fall back to the audited host, the way `crawl_site.py` refuses a seed
-that is not on the site under audit. When that happens the report says so,
-naming both the base it refused and the links it dropped because of it.
+| | |
+|---|---|
+| ceiling | **8 distinct directories per run** (`MAX_PROBED_DIRECTORIES`) |
+| worst case on the wire | 8 invented requests, or 16 where every directory soft-404s |
+| measured, documented fixture | 6 directories, 15 requests in total against 10 before |
+| measured, 25-link menu of 25 directories | 8 probes against 43 requests to real addresses |
+| past the ceiling | `MISSING` — unverified, and the report names the directories |
 
-Either probe path can appear in a 404 log. The second is sent only to a host
-that already answered below 400 to the first, which usually means it answers
-below 400 to everything too — but not always: a catch-all matching only
+The ceiling is its own constant and **not** shared with `--nav-limit`. The two
+bound different things: `--nav-limit` bounds how much of the site's own
+published navigation is read — addresses that exist, which a browser fetches
+too — while this bounds requests for addresses nobody routes, which only this
+tool sends and which land in someone's error log. Sharing them would make the
+invented load grow with the size of the menu, so raising `--nav-limit` to see a
+big menu would silently double the footprint on a third party. Eight is the
+smallest value that covers the documented fixture's six with room for the two
+additions that are ordinary rather than exotic: a `<base href>` install
+directory, and a footer trust link in a directory of its own.
+
+No delay is inserted between probes, and there is no flag for one.
+`check_completeness.py` spaces none of its ~20 requests, so slowing only the
+invented ones would make them politer than the site's own pages while leaving
+the run's shape unchanged; the lever here is the NUMBER of invented requests,
+which is what a server's log counts. `--delay` belongs to `crawl_site.py`, which
+walks a whole site.
+
+Two things cost nothing. A link observed to answer 4xx/5xx is broken on the
+evidence and needs no probe at all — the fixture's `/pricing/` adds nothing to
+the count. And a site that keeps everything in one directory costs exactly one
+probe, which is what a single-probe run cost before.
+
+What each answer does, per directory:
+
+- **4xx to the probe.** That directory spends a real status code on a missing
+  page, so a 200 from it is a page and a 4xx/5xx is a broken link. One request.
+- **200 to the probe.** No 200 from that directory is evidence, so every one of
+  them is `MISSING` — `same_as_not_found` where the response is exactly the page
+  that directory serves for nothing, `unverified` otherwise. A second request
+  goes out here, and only here, to find out whether that page is stable enough
+  to recognise the others by. It is asked per directory rather than once per
+  host because in `check_trust_pages` it changes a verdict: the fingerprint is
+  what excludes a not-found template from passing as an About page on the
+  strength of its prose, and a linked About at `/loja/quem-eu-sou` lands in its
+  own directory.
+- **Never asked.** The ceiling was spent, or the response came from another
+  origin, which this script does not send invented URLs to. `MISSING` again, and
+  the report prints `refused_directories` under `-v` so the operator can point a
+  second run at the subdirectory.
+
+A trust page found in a directory that answered 200 for a URL it does not
+have — or in one the ceiling refused — is still reported at the status its own
+content earns, because that check has its own discriminators (word count,
+unfinished markers) and does not rest on the status code alone. Turning it into
+`MISSING` would make a ceiling say "this site has no About page", and paired
+with Contact that is a `FAIL` on a healthy site. What the report adds is a
+`MISSING` finding beside it saying the page was judged on its content rather
+than on its status code — the same weight the navigation half gives the same
+observation, and enough that the run does not exit 0 with the note unread. This
+is the residual hole, stated: such a page passes, and the sentence is what sends
+a human to look.
+
+The directory the script invents URLs in — its own probe paths and the
+conventional About/Contact paths it guesses — never leaves the site you named.
+An off-site or non-HTTP `<base href>` is honoured for the links the page
+actually wrote, since they do point elsewhere and are skipped as off-site, but
+the invented addresses fall back to the audited host, the way `crawl_site.py`
+refuses a seed that is not on the site under audit. A third-party host receives
+zero requests, probes included. When that happens the report says so, naming
+both the base it refused and the links it dropped because of it.
+
+Either probe path can appear in a 404 log. The second is sent only into a
+directory that already answered below 400 to the first, which usually means it
+answers below 400 to everything too — but not always: a catch-all matching only
 alphabetic slugs lets the second path through to a real 404, because that one
 carries digits. The script has a branch for exactly that answer and prints it,
 since two different status codes for two URLs that both do not exist is itself
