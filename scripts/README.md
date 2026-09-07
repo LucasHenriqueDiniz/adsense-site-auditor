@@ -92,7 +92,16 @@ link is a directory of its own.
 | worst case on the wire | 8 invented requests, or 16 where every directory soft-404s |
 | measured, documented fixture | 6 directories, 15 requests in total against 10 before |
 | measured, 25-link menu of 25 directories | 8 probes against 43 requests to real addresses |
+| conventional About/Contact paths | one slot between all seventeen, asked at the base they are invented from |
 | past the ceiling | `MISSING` — unverified, and the report names the directories |
+| coverage it costs | a 25-link menu spread over 25 directories has 18 links reported `MISSING` on a host that answers 404 honestly |
+
+That last row is the price and it is not small: on a site whose menu is spread
+wider than the ceiling, most links come back unverified even though the host is
+honest and every one of them works. The run says so — `MISSING` is exit 1 and
+the directories are named — but a reader who expects a clean pass from a healthy
+site should know why they did not get one, and that raising the ceiling is what
+buys it, at the cost of more requests for addresses nobody routes.
 
 The ceiling is its own constant and **not** shared with `--nav-limit`. The two
 bound different things: `--nav-limit` bounds how much of the site's own

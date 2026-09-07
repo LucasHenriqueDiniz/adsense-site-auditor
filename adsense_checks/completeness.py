@@ -158,7 +158,16 @@ BROKEN_NAV_FAIL_THRESHOLD = 3
 #
 # Eight is the smallest value that covers the documented fixture's six with room
 # for the two additions that are common rather than exotic — a `<base href>`
-# install directory, and a footer trust link in a directory of its own. The cost
+# install directory, and a footer trust link in a directory of its own. That
+# slack is real only because the CONVENTIONAL trust paths no longer take a slot
+# each: `about/`, `sobre/`, `contact/`, `contato/` and `pages/` carry trailing
+# slashes, so asked per address they claimed six of the eight before a single
+# navigation link was judged, and on a soft-404 host the ceiling then ran out
+# before `/sobre/` — where the error template answered and passed as an About
+# page, taking the headline "neither an About nor a Contact page was found" out
+# of the report with it. They are invented addresses, so they are asked at the
+# base they were invented from, which costs one slot between all seventeen. The
+# cost
 # it admits to, measured against a 25-link audit's 43 requests to real
 # addresses: 8 invented requests (19%) on an honest host, 16 (37%) on one that
 # soft-404s in every directory, because a directory proven to soft-404 is asked
@@ -1665,7 +1674,26 @@ def _resolve_trust_page(
         # the 404/410 and the not-ok branches above return first, so a guess
         # that misses costs no invented request.
         landed = response.final_url or response.url
-        probe = not_found.for_url(landed) if not_found is not None else None
+        # A candidate the DOCUMENT wrote is asked about where it landed; one this
+        # audit INVENTED is asked about the base it was invented from. `/about/`
+        # is a guess that a directory exists, so probing inside it presumes the
+        # thing under test — and if it does not exist, what answered was the
+        # base's router, which the base's probe already describes. Measured: on a
+        # soft-404 host the answer taken at `/` recognises the responses to
+        # `/about/`, `/sobre/`, `/contact/` and `/pages/about` alike, because one
+        # catch-all serves them all.
+        #
+        # It is also what keeps the guesses from starving the site's own links.
+        # The conventional tuples carry four trailing-slash spellings and
+        # `pages/`, so asked per address they claimed SIX of the eight slots
+        # before a single navigation link was judged — the audit spending its
+        # ceiling on its own guesses, which are worse evidence than what the
+        # site publishes.
+        probe = None
+        if not_found is not None:
+            probe = (
+                not_found.for_url(landed) if candidate.declared else not_found.anchor_probe()
+            )
         if probe is not None and _is_not_found_page(probe, response):
             # The same move one line up, against the other page a catch-all
             # answers with. Used HERE, as an exclusion, this equality is sound:

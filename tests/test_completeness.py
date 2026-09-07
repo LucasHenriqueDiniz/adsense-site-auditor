@@ -2740,13 +2740,13 @@ def test_o_teto_e_um_so_para_as_duas_sub_checagens(server):
     teto nas páginas de confiança gastaria outro tanto no menu — a constante
     limitaria metade do rastro e diria que limita o todo.
 
-    Num host de soft 404 os caminhos convencionais de confiança já respondem 200
-    em vários diretórios (`/`, `/about/`, `/contact/`, `/sobre/`, `/contato/` e
-    `/pages/` entre eles, porque as tuplas incluem grafias com barra final),
-    então eles consomem o teto ANTES de o menu ser lido. Isso é aceitável e
-    medido: num host que responde 200 para o que não tem, todo link do menu é
-    MISSING de qualquer jeito — `unverified` e `unmeasured` pesam igual — então a
-    ordem custa a frase impressa e não o veredito.
+    Os caminhos convencionais gastam UMA vaga entre todos, não uma cada. Eles são
+    endereços que esta auditoria inventa, então são perguntados na base de onde
+    foram inventados — antes isso era por endereço, e as tuplas incluem quatro
+    grafias com barra final mais `pages/`, então os chutes da ferramenta
+    reivindicavam SEIS das oito vagas antes de um único link do menu ser julgado.
+    O menu é publicado pelo site; os chutes não. A evidência pior não pode
+    esfomear a melhor.
     """
     base, rotas = server
     diretorios = [f"/d{i}/" for i in range(6)]
@@ -2755,8 +2755,15 @@ def test_o_teto_e_um_so_para_as_duas_sub_checagens(server):
 
     relatorio = check_completeness(base + "/")
 
-    primeiras = [c for c in caminhos_pedidos(rotas) if NOT_FOUND_PROBE_PATHS[0] in c]
-    assert len(primeiras) == MAX_PROBED_DIRECTORIES
+    sondados = {
+        c.rsplit("/", 1)[0] + "/"
+        for c in caminhos_pedidos(rotas)
+        if NOT_FOUND_PROBE_PATHS[0] in c
+    }
+    # A base, mais os seis diretórios do menu. Nenhum `/about/`, `/sobre/`,
+    # `/contact/`, `/contato/` ou `/pages/`: os convencionais couberam na base.
+    assert sondados == {"/"} | set(diretorios)
+    assert len(sondados) < MAX_PROBED_DIRECTORIES
     # Nada foi observado quebrado e nada foi dado como vivo, seja o link
     # `unverified` (diretório medido) ou `unmeasured` (teto gasto).
     assert relatorio.nav.count == 0
@@ -2813,26 +2820,23 @@ def test_o_custo_de_uma_corrida_medido_no_fio_por_forma(server):
     assert sondas < total - sondas
 
 
-def test_o_teto_gasto_nao_deixa_uma_pagina_de_confianca_sair_com_exit_0(server):
-    """O buraco que o teto ABRE nas páginas de confiança, medido e nomeado.
+def test_um_rodape_espalhado_nao_faz_o_teto_aprovar_o_template_de_erro(server):
+    """O buraco que o teto ABRIA nas páginas de confiança, agora fechado.
 
-    A âncora chega por demanda e não é espremida — `MAX_LINKED_CANDIDATES` (6,
-    por tipo) é menor que `MAX_PROBED_DIRECTORIES` (8), então os caminhos
-    convencionais, que caem todos nela, sempre alcançam um lugar. Só que os
-    convencionais NÃO estão todos na âncora: as tuplas incluem grafias com barra
-    final, e `/sobre/` é o seu próprio diretório. Com o rodapé linkando seis
-    candidatos Sobre em seis diretórios, o teto acaba antes de `/sobre/` — e num
-    host de soft 404 é o template de erro que responde lá, com prosa de sobra
-    para `_judge_page` aprovar.
+    Era assim: as tuplas convencionais incluem grafias com barra final, e
+    `/sobre/` era o seu próprio diretório. Um rodapé linkando oito candidatos
+    Sobre em oito diretórios gastava o teto antes de `/sobre/` chegar, e num host
+    de soft 404 é o template de erro que responde lá — com prosa de sobra para
+    `_judge_page` aprovar. A página SAÍA aprovada, e o `[FAIL] Neither an About
+    nor a Contact page was found` sumia do relatório de um site que não tem
+    nenhuma das duas.
 
-    Medido, e a página SAI aprovada: recusar-se a medir não a torna inexistente,
-    e virá-la MISSING transformaria um teto num "site sem página Sobre" — que na
-    dupla com Contact é FAIL, um falso FAIL sobre um site são.
-
-    O que este teste prende é que a corrida não sai por 0. O achado é MISSING e
-    não INFO, porque é a MESMA observação que a navegação registra — um 200 que
-    ninguém mostrou significar algo — e dar dois pesos a uma observação só é como
-    as duas metades deste módulo passaram a se contradizer.
+    O que fecha é os convencionais serem perguntados na base de onde foram
+    inventados em vez de cada um no diretório que ocuparia. Uma vaga entre todos,
+    e a resposta medida na base reconhece o template que `/sobre/` serve, porque
+    é o mesmo catch-all. O documento continua mandando: os oito linkados são
+    endereços que o SITE escreveu, então cada um é perguntado onde caiu, e são
+    eles que gastam o teto — como deve ser, evidência melhor primeiro.
     """
     assert MAX_LINKED_CANDIDATES < MAX_PROBED_DIRECTORIES
     base, rotas = server
@@ -2842,21 +2846,21 @@ def test_o_teto_gasto_nao_deixa_uma_pagina_de_confianca_sair_com_exit_0(server):
 
     relatorio = check_completeness(base + "/")
 
-    # A âncora foi medida, apesar de os linkados chegarem antes — e por isso
-    # `/about`, sem barra, foi corretamente descartado.
     assert f"/{NOT_FOUND_PROBE_PATHS[0]}" in caminhos_pedidos(rotas)
-    # `/sobre/` ficou fora do teto e foi julgada pelo texto.
+    # Nenhum candidato era página: todos serviram o que a base serve para o que
+    # não existe, `/sobre/` inclusive.
     sobre = relatorio.trust.pages["about"]
-    assert sobre.url == base + "/sobre/"
-    assert sobre.status is Status.OK
-    # E é isso que o relatório diz, no PESO exato. MISSING e não INFO, senão
-    # `exit_code` devolve 0 e a corrida sai bem-sucedida sobre uma página de
-    # confiança que ninguém verificou; MISSING e não WARNING, porque nada aqui
-    # foi observado errado — o que falta é a evidência, não a página.
-    severidades = {
-        f.status for f in relatorio.trust.findings if "did not measure" in f.message
-    }
-    assert severidades == {Status.MISSING}
+    assert sobre.status is Status.MISSING
+    assert sobre.url is None
+    assert "the page their own directory serves for a URL that does not exist" in sobre.reason
+    # E o veredito de manchete voltou. Antes ele sumia: `/sobre/` passava e a
+    # dupla About+Contact deixava de estar ausente, então o site sem nenhuma das
+    # duas não ouvia a frase que o AdSense de fato aplica.
+    assert relatorio.trust.pages["contact"].status is Status.MISSING
+    assert any(
+        "Neither an About nor a Contact page was found" in f.message
+        for f in relatorio.trust.findings
+    )
     assert exit_code(relatorio.status) == 1
     assert relatorio.status.is_bad
 
