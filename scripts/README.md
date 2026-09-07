@@ -71,16 +71,23 @@ links are reported as unverified rather than as broken.
 The answer is a fact about ONE DIRECTORY, not about the host. The probe is asked
 in the directory this script invents URLs in — its own probe paths and the
 conventional About/Contact paths it guesses. That directory is the home page's
-`<base href>` when it declares a usable one and the URL that answered otherwise,
-rounded to the directory containing it.
+`<base href>` when it declares a usable one and the URL that answered otherwise.
+That address is used as a base, so a document-shaped one — `/index.php`, from an
+apex that redirects there — puts the probe in the directory containing it, the
+same way a relative link beside it resolves.
 
 That is deliberately **not** where every URL of the run is asked, and the script
 no longer pretends otherwise. A navigation link the page wrote goes where a
 browser would put it, which for a `<base href>` without a trailing slash is a
 different directory; an absolute link goes where it says, under neither. So each
 200 is checked against the directory the probe measured before the probe's
-answer is allowed to classify it, and a 200 that came from anywhere else is
-reported `MISSING` — unverified, neither working nor broken. On a site declaring
+answer is allowed to classify it. For a navigation link, a 200 from anywhere
+else is reported `MISSING` — unverified, neither working nor broken. For an
+About or Contact page it is an `INFO` note beside the verdict rather than a
+refusal, because that check has its own discriminators — word count, unfinished
+markers — and does not rest on the status code alone. The consequence is worth
+knowing: a trust page found outside the probed directory, on a host that serves
+its not-found template with prose and HTTP 200, still passes. On a site declaring
 `<base href="/app/">` the whole run does happen inside `/app/`; on one declaring
 `<base href="/app">` the guessed paths go to `/app/` while the relative links go
 to the root, and those links are reported as unverified rather than judged by a

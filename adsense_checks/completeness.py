@@ -1009,8 +1009,13 @@ def _invented_base(document_url: str, base_href: str | None) -> _InventedBase:
     requests URLs in more than one. So this function answers only the question it
     is named for — where do the INVENTED URLs go — and `_probe_covers` decides,
     per request, whether the probe measured the place that request landed in.
-    Everything it did not measure is MISSING, which is what this package already
-    does with a condition it could not observe.
+    A navigation link it did not measure is MISSING, which is what this package
+    already does with a condition it could not observe. A trust page outside it
+    is annotated instead, at INFO: that check does not rest on the status code
+    alone, so the probe's silence narrows its evidence without emptying it. The
+    cost is that a trust page found outside the probed directory still passes on
+    a host whose not-found template carries prose, and `exit_code` returns 0 for
+    INFO — the same hole the sibling case in `check_trust_pages` records.
 
     The cost of `as_base` here is stated rather than hidden: on a base with no
     trailing slash the guesses go one segment deeper than a browser resolves a
@@ -1077,12 +1082,31 @@ def _probe_covers(probe: _NotFoundProbe, url: str) -> bool:
     `url` must be where the response CAME FROM — `final_url`, not what was asked
     — because a link that redirects out of the probed directory was answered by
     a router the probe never asked.
+
+    Two shapes fall on the wrong side of the comparison, both toward MISSING and
+    neither toward a pass. A directory whose name is non-ASCII AND comes from the
+    markup rather than from the typed URL: `probe.base` keeps the raw `<base
+    href>` text while `final_url` comes back percent-encoded, so they do not
+    match. That is a decoding fault older than this gate — the parser turns `ç`
+    into `Ã§` here at every commit on this branch — and normalizing the strings
+    here would hide it rather than fix it. A directory typed as the target is
+    unaffected, because both sides are already encoded. And paths differing only
+    in case: RFC 3986 says they are different paths, so this follows it, which
+    costs a false MISSING on a case-insensitive server.
     """
     if not probe.base:
         return False
     if not same_site(url, probe.base):
         return False
-    directory = split_url(probe.base).path or "/"
+    # Resolved the way `_join` resolves, not sliced off `probe.base`. The probe
+    # is SENT through `urljoin`, which drops a document-shaped last segment, so a
+    # base of `/index.php` puts the probe in `/` — and slicing the path instead
+    # made the gate believe it had measured `/index.php` as a directory. Every
+    # link beside it, in the very directory the probe answered from, came back
+    # "outside the only directory this run measured", and an apex redirecting to
+    # `/index.php` is enough to earn that: three live links reported MISSING with
+    # a sentence that was false about the run's own probe.
+    directory = split_url(join_url(probe.base, ".")).path or "/"
     path = split_url(url).path
     # The directory itself counts, spelled without its trailing slash: `/app` is
     # the address `/app/` redirects to on a `trailingSlash:false` install, and

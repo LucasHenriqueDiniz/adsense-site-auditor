@@ -2299,6 +2299,21 @@ def test_a_sonda_cai_no_diretorio_das_urls_inventadas_e_os_links_onde_urljoin_ma
     pedidos = sorted(c for c in caminhos_pedidos(rotas) if sonda in c)
     assert pedidos == sorted({dos_links + sonda, das_inventadas + sonda})
 
+    # E a TRAVA tem de concordar com a mesma coluna. Só o fio estava afirmado
+    # aqui, e a trava fatiava `probe.base` em vez de resolvê-la como o `_join`
+    # resolve: numa base com cara de documento o `urljoin` derruba o último
+    # segmento, então a sonda ia para `/app/` enquanto a trava se julgava dona
+    # de `/app/index.html`. Esta linha da tabela passava com a trava errada, e
+    # um apex que redireciona para `/index.php` bastava para reportar MISSING
+    # sobre os vizinhos da própria sonda.
+    # A base é a que `_invented_base` devolve, NÃO o diretório onde a sonda cai:
+    # numa base com cara de documento as duas diferem (`/app/index.html` contra
+    # `/app/`), e é exatamente essa diferença que a trava errava. Construir a
+    # sonda com o diretório de chegada esconderia o defeito.
+    do_lado = _NotFoundProbe("honest", base=_invented_base(base + "/", base_href).url)
+    assert _probe_covers(do_lado, base + das_inventadas + "vizinho") is True
+    assert _probe_covers(do_lado, base + "/outro-diretorio/vizinho") is False
+
 
 @pytest.mark.parametrize("entrada", PONTOS_DE_ENTRADA, ids=lambda f: f.__name__)
 def test_a_sonda_cai_no_diretorio_da_home_mesmo_sem_um_base_href(server, entrada):
@@ -2602,6 +2617,15 @@ def test_um_base_href_https_no_proprio_site_vale_nas_tres_guardas_de_esquema():
     sonda = _NotFoundProbe("honest", base="https://ex.com/app/")
     assert _probe_covers(sonda, "https://ex.com/app/sobre") is True
     assert _probe_covers(sonda, "https://ex.com/loja/sobre") is False
+    # 5. E a sonda sentinela — `_NotFoundProbe("honest")`, sem base — não cobre
+    #    NADA. Hoje ela só existe onde o laço não roda (menu vazio), então a
+    #    guarda é inalcançável em produção e trocá-la por `return True` sobrevive
+    #    à suíte. Fica prendida aqui porque `trustworthy` é True nela: se um
+    #    chamador futuro a passar com um menu, esta guarda é a única coisa entre
+    #    "não medi nada" e liberar todo link do site como página verificada.
+    sentinela = _NotFoundProbe("honest")
+    assert sentinela.base == ""
+    assert _probe_covers(sentinela, "https://ex.com/qualquer") is False
 
 
 def test_um_base_href_de_fora_nao_inventa_endereco_local_para_um_link_declarado(
