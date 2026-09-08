@@ -1455,6 +1455,40 @@ def test_no_maximo_seis_candidatos_linkados_por_pagina_de_confianca(server):
     assert len([c for c in largo if not c.declared]) == len([c for c in cands if not c.declared])
 
 
+def test_um_endereco_que_o_documento_escreveu_continua_declarado_apos_o_teto(server):
+    """O teto corta a REQUISIÇÃO por conta do orçamento, não a autoria.
+
+    O rodapé escreve sete links Sobre, e o sétimo é `/sobre/` — que é também um
+    dos caminhos convencionais. `MAX_LINKED_CANDIDATES` derruba o sétimo antes de
+    ele entrar em `seen`, então a metade convencional o readicionava como CHUTE.
+    A partir daí a URL que o site publica era julgada na âncora em vez de onde
+    caiu — o inverso exato da razão do split — e saía de `declared_blocked`, de
+    modo que um 503 na página Sobre do próprio site virava "um chute que não
+    achou" em vez de "a URL que a home oferece não pôde ser lida".
+
+    `declared` é um fato sobre o DOCUMENTO, e é isso que ele passa a dizer.
+    """
+    from adsense_checks.completeness import _ABOUT_HINT, ABOUT_PATHS, _candidates
+    from adsense_checks.http import Fetch
+
+    # Seis identidades que gastam o teto, e `/sobre/` como sétima.
+    links = "".join(f'<a href="/sobre-{i}">Sobre {i}</a>' for i in range(6))
+    links += '<a href="/sobre/">Sobre</a>'
+    html = f"<html><body><footer>{links}</footer></body></html>"
+    home = Fetch(url="http://ex.com/", final_url="http://ex.com/", status_code=200,
+                 text=html, headers={"content-type": "text/html"})
+
+    cands = _candidates(home, parse_document(html), ABOUT_PATHS, _ABOUT_HINT, 6)
+
+    por_url = {c.url: c for c in cands}
+    # Pedido uma vez só, pela metade convencional — o orçamento fez o seu papel.
+    assert [c.url for c in cands].count("http://ex.com/sobre/") == 1
+    # Mas o documento escreveu este endereço, então ele NÃO é um chute.
+    assert por_url["http://ex.com/sobre/"].declared is True
+    # E um convencional que o documento não escreveu continua chute.
+    assert por_url["http://ex.com/quem-somos"].declared is False
+
+
 def test_o_limite_padrao_de_links_de_navegacao_e_25(server):
     """DEFAULT_NAV_LINK_LIMIT pelo valor: 30 links no menu, 25 seguidos."""
     base, routes = server
@@ -2740,34 +2774,50 @@ def test_o_teto_e_um_so_para_as_duas_sub_checagens(server):
     teto nas páginas de confiança gastaria outro tanto no menu — a constante
     limitaria metade do rastro e diria que limita o todo.
 
-    Os caminhos convencionais gastam UMA vaga entre todos, não uma cada. Eles são
-    endereços que esta auditoria inventa, então são perguntados na base de onde
-    foram inventados — antes isso era por endereço, e as tuplas incluem quatro
-    grafias com barra final mais `pages/`, então os chutes da ferramenta
-    reivindicavam SEIS das oito vagas antes de um único link do menu ser julgado.
-    O menu é publicado pelo site; os chutes não. A evidência pior não pode
-    esfomear a melhor.
+    Para carregar o nome, o teto tem de ser ALCANÇADO e as duas metades têm de
+    ter gasto dele. O site abaixo põe quatro diretórios ao alcance da metade de
+    confiança (links do rodapé, cada um no seu) e oito ao alcance do menu, num
+    host de soft 404 — que é o que faz cada 200 precisar de classificação. Com um
+    teto só, a soma para em `MAX_PROBED_DIRECTORIES`. Com um teto por
+    sub-checagem, a navegação recomeçaria do zero e a soma passaria dele.
+
+    O que este teste NÃO fixa é QUAIS links ficam sem medição. Isso é
+    consequência do teto, não objetivo dele; prender a lista transformava um
+    efeito colateral tolerado em contrato, e era o que a versão anterior fazia.
     """
     base, rotas = server
-    diretorios = [f"/d{i}/" for i in range(6)]
-    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de(*diretorios)))
+    confianca = "".join(f"<a href='/a{i}/sobre'>Sobre</a>" for i in range(3))
+    confianca += "<a href='/c0/contato'>Contato</a>"
+    menu = [f"/d{i}/" for i in range(8)]
+    rotas["/"] = (
+        200,
+        {},
+        pagina("Casa", extra=menu_de(*menu) + f"<footer>{confianca}</footer>"),
+    )
     rotas.default = (200, {}, ERRO_404_LONGO)
 
     relatorio = check_completeness(base + "/")
 
+    pedidos = caminhos_pedidos(rotas)
     sondados = {
-        c.rsplit("/", 1)[0] + "/"
-        for c in caminhos_pedidos(rotas)
-        if NOT_FOUND_PROBE_PATHS[0] in c
+        c.rsplit("/", 1)[0] + "/" for c in pedidos if NOT_FOUND_PROBE_PATHS[0] in c
     }
-    # A base, mais os seis diretórios do menu. Nenhum `/about/`, `/sobre/`,
-    # `/contact/`, `/contato/` ou `/pages/`: os convencionais couberam na base.
-    assert sondados == {"/"} | set(diretorios)
-    assert len(sondados) < MAX_PROBED_DIRECTORIES
-    # Nada foi observado quebrado e nada foi dado como vivo, seja o link
-    # `unverified` (diretório medido) ou `unmeasured` (teto gasto).
+    # Uma soma só, e ela chega no teto.
+    assert len(sondados) == MAX_PROBED_DIRECTORIES
+    # As duas metades gastaram do MESMO teto: há diretório de link de confiança e
+    # diretório de menu no mesmo conjunto. Com um `_NotFoundProbes` por
+    # sub-checagem, a navegação começaria com o teto inteiro na mão e a soma
+    # passaria de `MAX_PROBED_DIRECTORIES`.
+    assert sondados & {f"/a{i}/" for i in range(3)}
+    assert sondados & set(menu)
+    # E foi o teto que segurou, não a falta de diretório: a corrida pediu
+    # endereços em mais diretórios do que ela mediu.
+    visitados = {
+        c.rsplit("/", 1)[0] + "/" for c in pedidos if NOT_FOUND_PROBE_PATHS[0] not in c
+    }
+    assert len(visitados) > MAX_PROBED_DIRECTORIES
+    # Nada foi observado quebrado: um 200 não medido nunca vira link morto.
     assert relatorio.nav.count == 0
-    assert len(relatorio.nav.unclassified) == len(diretorios)
     assert relatorio.nav.status is Status.MISSING
 
 
@@ -2863,6 +2913,385 @@ def test_um_rodape_espalhado_nao_faz_o_teto_aprovar_o_template_de_erro(server):
     )
     assert exit_code(relatorio.status) == 1
     assert relatorio.status.is_bad
+
+
+# --------------------------------------------------------------------------
+# ACEITAR NÃO É EXCLUIR.
+#
+# Perguntar o convencional na base fecha o caso em que `/about/` NÃO existe: o
+# catch-all da base responde, e a resposta da base o descreve. Não fecha o caso
+# em que o chute ACERTA — `/about/` montado como roteador próprio, com o seu
+# próprio template de erro. Aí a resposta da âncora descreve um roteador que a
+# resposta nunca tocou, não reconhece nada, e o template de erro do subsite é
+# aprovado como a página Sobre.
+#
+# As duas perguntas passam a ter evidências diferentes. EXCLUIR é barato e usa o
+# que já está na mão: o que já foi medido para aquele diretório, e a âncora. Uma
+# exclusão errada só faz olhar o próximo candidato e terminar em MISSING.
+# ACEITAR exige uma resposta que COBRE de onde a resposta veio, e se nenhuma
+# cobre, pergunta àquele diretório.
+# --------------------------------------------------------------------------
+
+
+def test_um_subsite_com_roteador_proprio_nao_passa_por_pagina_sobre(server):
+    """O espelho do defeito que o commit anterior fechou: o chute ACERTA.
+
+    `/about/` é montado como subsite com roteador próprio e serve soft 404 lá
+    dentro; o apex 404 honestamente. Perguntado só na âncora, `/about/` era
+    julgado pela resposta do apex — que é honesta, então nada foi reconhecido e o
+    template de erro do subsite passou como a página Sobre. O site não tem página
+    Sobre nenhuma, e a checagem de confiança ficou só com contagem de palavras e
+    marcadores de rascunho, que um template de erro com prosa atravessa.
+
+    O que se perde não é o exit code — uma segunda passada ainda diz que aquele
+    diretório não foi medido — é a SEVERIDADE e a frase que o AdSense de fato
+    aplica.
+    """
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa"))
+    # O subsite responde 200 com o SEU template de erro para tudo abaixo de
+    # /about/; qualquer outro caminho o apex 404 de verdade.
+    rotas.default = lambda metodo, caminho: (
+        (200, {}, ERRO_404_LONGO) if caminho.startswith("/about/") else None
+    )
+
+    relatorio = check_completeness(base + "/")
+
+    sobre = relatorio.trust.pages["about"]
+    assert sobre.status is Status.MISSING
+    assert sobre.url is None
+    # O diretório do subsite foi perguntado sobre si mesmo, que é a evidência
+    # que faltava. A âncora não serve: ela mede `/`, e `/about/` é outro roteador.
+    assert f"/about/{NOT_FOUND_PROBE_PATHS[0]}" in caminhos_pedidos(rotas)
+    assert relatorio.trust.pages["contact"].status is Status.MISSING
+    assert any(
+        "Neither an About nor a Contact page was found" in f.message
+        for f in relatorio.trust.findings
+    )
+    assert relatorio.status is Status.FAIL
+
+
+def test_a_resposta_ja_medida_vale_para_o_convencional_do_mesmo_diretorio(server):
+    """Um diretório, duas respostas iguais, e o relatório dizia coisas opostas.
+
+    O rodapé linka `/about/equipe`, então o candidato linkado faz a checagem
+    perguntar `/about/` e guardar a resposta. Em seguida o convencional `/about/`
+    — inventado — era julgado só na âncora, e a medição de `/about/` ficava
+    parada em `_measured` sem ninguém olhar.
+
+    O relatório saía com `[MISS] navigation — /about/equipe … serving exactly the
+    page /about/…probe… serves` e `[PASS] ADS-UX-05 about page — /about/` na
+    mesma corrida, sobre respostas byte a byte idênticas do mesmo diretório.
+
+    Consultar o já medido é de graça: nenhuma requisição a mais, e é o primeiro
+    lugar onde olhar.
+    """
+    base, rotas = server
+    rodape = "<footer><a href='/about/equipe'>Equipe</a></footer>"
+    rotas["/"] = (200, {}, pagina("Casa", extra=rodape))
+    rotas.default = lambda metodo, caminho: (
+        (200, {}, ERRO_404_LONGO) if caminho.startswith("/about/") else None
+    )
+
+    relatorio = check_completeness(base + "/")
+
+    # A navegação já dizia que `/about/equipe` é o que aquele diretório serve
+    # para o que não existe. A checagem de confiança agora diz o mesmo.
+    assert [link.url for link in relatorio.nav.same_as_not_found] == [base + "/about/equipe"]
+    assert relatorio.trust.pages["about"].status is Status.MISSING
+    # E sem pagar por isso: `/about/` foi perguntado UMA vez, pelo candidato
+    # linkado. O convencional reusou a medição.
+    sondas_no_about = [
+        c for c in caminhos_pedidos(rotas) if c.startswith(f"/about/{NOT_FOUND_PROBE_PATHS[0]}")
+    ]
+    assert len(sondas_no_about) == 1
+
+
+def test_um_convencional_que_redireciona_para_fora_e_julgado_onde_caiu(server):
+    """O chute sai do diretório em que foi inventado, e a âncora não o segue.
+
+    A base serve soft 404 com o template A; `/about/` responde 301 para
+    `/loja/sobre/`, e o roteador da loja serve soft 404 com o template B. Julgado
+    na âncora, o candidato era comparado com o template A, que não reconhece o B
+    — e o erro da loja passava como a página Sobre com `/loja/` nunca medido.
+
+    `_probe_covers` não chegava a ser consultado sobre a resposta: para um
+    endereço inventado nada comparava o diretório medido com o diretório de onde
+    a resposta veio.
+    """
+    base, rotas = server
+    erro_da_loja = pagina("Sem página", corpo="Beta " * 60)
+    rotas["/"] = (200, {}, pagina("Casa"))
+    rotas["/about/"] = (301, {"Location": "/loja/sobre/"}, "")
+    rotas["/about"] = (301, {"Location": "/loja/sobre/"}, "")
+    rotas.default = lambda metodo, caminho: (
+        (200, {}, erro_da_loja) if caminho.startswith("/loja/") else (200, {}, ERRO_404_LONGO)
+    )
+
+    relatorio = check_completeness(base + "/")
+
+    sobre = relatorio.trust.pages["about"]
+    assert sobre.status is Status.MISSING
+    assert sobre.url is None
+    # O diretório de DESTINO foi medido, que é de onde a resposta veio.
+    assert any(
+        c.startswith("/loja/") and NOT_FOUND_PROBE_PATHS[0] in c
+        for c in caminhos_pedidos(rotas)
+    )
+    assert any(
+        "Neither an About nor a Contact page was found" in f.message
+        for f in relatorio.trust.findings
+    )
+
+
+def test_um_declarado_que_redireciona_para_um_soft_404_e_julgado_no_destino(server):
+    """O mutante do costume: `for_url(landed)` trocado por `for_url(candidate.url)`.
+
+    O apex é honesto; `/sobre` — que o RODAPÉ escreveu — responde 301 para
+    `/loja/sobre`, e `/loja/` serve soft 404 com prosa. Medido em `landed`, o
+    diretório perguntado é `/loja/` e o template é reconhecido: MISSING, com a
+    manchete. Medido no endereço PEDIDO, o diretório perguntado é `/` — honesto,
+    nada reconhecido — e o template de erro da loja sai `[PASS] about page`.
+
+    A linha existia antes deste commit e sobrevivia à suíte inteira; `58435f0`
+    reescreveu-a e deixou a guarda sem exercício.
+    """
+    base, rotas = server
+    erro_da_loja = pagina("Sem página", corpo="Beta " * 60)
+    rodape = "<footer><a href='/sobre'>Sobre</a></footer>"
+    rotas["/"] = (200, {}, pagina("Casa", extra=rodape))
+    rotas["/sobre"] = (301, {"Location": "/loja/sobre"}, "")
+    rotas.default = lambda metodo, caminho: (
+        (200, {}, erro_da_loja) if caminho.startswith("/loja/") else None
+    )
+
+    relatorio = check_completeness(base + "/")
+
+    sobre = relatorio.trust.pages["about"]
+    assert sobre.status is Status.MISSING
+    assert sobre.url is None
+    # `/loja/`, para onde o link caiu — e NÃO `/`, onde ele foi pedido.
+    assert f"/loja/{NOT_FOUND_PROBE_PATHS[0]}" in caminhos_pedidos(rotas)
+    # Aqui a sonda COBRE de onde a resposta veio, então o relatório pode dizer
+    # "seu diretório" — e a cobertura é aferida em `landed`, não no endereço
+    # pedido, cujo diretório é `/`.
+    excluidos = [m for _url, m in sobre.attempts if "does not exist" in m]
+    assert excluidos, sobre.attempts
+    assert all("its directory answers with" in m for m in excluidos), excluidos
+    assert any(f"/loja/{NOT_FOUND_PROBE_PATHS[0]}" in m for m in excluidos), excluidos
+    assert any(
+        "Neither an About nor a Contact page was found" in f.message
+        for f in relatorio.trust.findings
+    )
+
+
+def test_um_linkado_e_medido_no_diretorio_dele_e_nao_na_ancora(server):
+    """Um endereço que o DOCUMENTO escreveu ganha a medição do diretório dele.
+
+    A âncora pode excluir um chute desta ferramenta de graça, porque um chute que
+    não existe foi respondido pelo roteador da base. Um link que o SITE escreveu
+    não é um chute: o documento afirma que a página está ali, e a afirmação é
+    sobre AQUELE diretório. Julgá-lo pela âncora faz o relatório nomear um
+    diretório que a corrida nunca perguntou.
+
+    O host tem UM catch-all, então a impressão digital da âncora casaria com a
+    resposta e a exclusão sairia igual — é justamente por isso que a diferença só
+    aparece no fio e no texto: com a âncora, `/loja/` nunca é perguntado.
+
+    O par Sobre/Contato não é decoração. Sobre roda primeiro e é lá que `/` e
+    `/loja/` são medidos; quando Contato chega, as DUAS medições estão na mão e
+    as duas casariam com a resposta. É a única configuração em que se vê qual
+    delas foi consultada — procurar a medição pelo endereço PEDIDO acha a âncora,
+    procurá-la por onde a resposta VEIO acha `/loja/`.
+    """
+    base, rotas = server
+    rodape = "<footer><a href='/sobre'>Sobre</a><a href='/contato'>Contato</a></footer>"
+    rotas["/"] = (200, {}, pagina("Casa", extra=rodape))
+    rotas["/sobre"] = (301, {"Location": "/loja/sobre"}, "")
+    rotas["/contato"] = (301, {"Location": "/loja/contato"}, "")
+    # O mesmo template em toda parte, `/loja/` inclusive.
+    rotas.default = (200, {}, ERRO_404_LONGO)
+
+    relatorio = check_completeness(base + "/")
+
+    sobre = relatorio.trust.pages["about"]
+    assert sobre.status is Status.MISSING
+    # O diretório de destino foi perguntado sobre si mesmo, mesmo com a âncora
+    # já medida e casando.
+    assert f"/loja/{NOT_FOUND_PROBE_PATHS[0]}" in caminhos_pedidos(rotas)
+    assert f"/loja/{NOT_FOUND_PROBE_PATHS[0]}" in dict(sobre.attempts)[base + "/loja/sobre"]
+    # Contato chega com âncora e `/loja/` medidos, e cita `/loja/`.
+    contato_pg = relatorio.trust.pages["contact"]
+    assert contato_pg.status is Status.MISSING
+    citado = dict(contato_pg.attempts)[base + "/loja/contato"]
+    assert "its directory answers with" in citado
+    assert f"/loja/{NOT_FOUND_PROBE_PATHS[0]}" in citado
+
+
+def test_o_convencional_reusa_a_medicao_do_diretorio_e_nao_a_da_ancora(server):
+    """Já medido vem antes da âncora, e o relatório nomeia o que foi medido.
+
+    Num host de um catch-all só, as duas respostas casam com a resposta — a do
+    diretório e a da âncora — então o VEREDITO sai igual pelos dois caminhos. O
+    que muda é qual medição o relatório cita. Olhar a âncora primeiro faz o
+    relatório dizer que `/` respondeu por uma resposta que veio de `/about/`,
+    tendo a medição de `/about/` na mão.
+    """
+    base, rotas = server
+    rodape = "<footer><a href='/about/equipe'>Equipe</a></footer>"
+    rotas["/"] = (200, {}, pagina("Casa", extra=rodape))
+    rotas.default = (200, {}, ERRO_404_LONGO)
+
+    relatorio = check_completeness(base + "/")
+
+    sobre = relatorio.trust.pages["about"]
+    assert sobre.status is Status.MISSING
+    # O candidato linkado mandou perguntar `/about/`, uma vez.
+    sondas_no_about = [
+        c for c in caminhos_pedidos(rotas) if c.startswith(f"/about/{NOT_FOUND_PROBE_PATHS[0]}")
+    ]
+    assert len(sondas_no_about) == 1
+    # E o CONVENCIONAL `/about/` — inventado, e portanto o que olharia a âncora
+    # — foi excluído contra ESSA medição, que cobre de onde a resposta veio. Com
+    # a âncora primeiro a frase citaria `/`, tendo a medição de `/about/` na mão.
+    convencional = dict(sobre.attempts)[base + "/about/"]
+    assert "its directory answers with" in convencional
+    assert f"/about/{NOT_FOUND_PROBE_PATHS[0]}" in convencional
+
+
+def test_com_um_catch_all_so_a_ancora_ainda_exclui_os_convencionais_de_graca(server):
+    """A economia que `58435f0` comprou, mantida.
+
+    Num host com UM catch-all, a resposta medida na base reconhece o que
+    `/about/`, `/sobre/`, `/contact/` e `/pages/about` servem, porque é o mesmo
+    template. Excluir por ela não custa requisição nenhuma, e é o que impede os
+    dezessete caminhos convencionais de reivindicarem seis das oito vagas antes
+    de um único link do menu ser julgado.
+
+    Exigir cobertura para EXCLUIR desfaria exatamente isso — por isso a cobertura
+    é exigida só para ACEITAR.
+    """
+    base, rotas = server
+    rodape = "".join(
+        f"<a href='/{d}/sobre'>Sobre</a>"
+        for d in ("institucional", "pt", "en", "blog", "loja", "ajuda")
+    )
+    rotas["/"] = (200, {}, pagina("Casa", extra=f"<footer>{rodape}</footer>"))
+    rotas.default = (200, {}, ERRO_404_LONGO)
+
+    relatorio = check_completeness(base + "/")
+
+    sondados = {
+        c.rsplit("/", 1)[0] + "/"
+        for c in caminhos_pedidos(rotas)
+        if NOT_FOUND_PROBE_PATHS[0] in c
+    }
+    # Nenhum diretório convencional foi perguntado: a âncora deu conta de todos.
+    assert "/about/" not in sondados
+    assert "/sobre/" not in sondados
+    assert "/contact/" not in sondados
+    sobre = relatorio.trust.pages["about"]
+    assert sobre.status is Status.MISSING
+    # As duas formas da frase, uma em cada metade, e é o que impede a economia
+    # de virar uma afirmação falsa. `/sobre/` é o seu próprio diretório e
+    # NINGUÉM o mediu: dizer "seu diretório respondeu" seria pôr no relatório
+    # uma medição que esta corrida não fez. `/loja/sobre` o documento escreveu,
+    # e `/loja/` foi medido, então ali a frase mais afiada é verdadeira.
+    por_url = dict(sobre.attempts)
+    convencional = por_url[base + "/sobre/"]
+    assert "served exactly the page" in convencional
+    assert "its directory answers with" not in convencional
+    assert f"{base}/{NOT_FOUND_PROBE_PATHS[0]}" in convencional
+    linkado = por_url[base + "/loja/sobre"]
+    assert "its directory answers with" in linkado
+    assert f"/loja/{NOT_FOUND_PROBE_PATHS[0]}" in linkado
+    assert any(
+        "Neither an About nor a Contact page was found" in f.message
+        for f in relatorio.trust.findings
+    )
+
+
+def test_num_host_honesto_aceitar_nao_custa_sonda_nenhuma_a_mais(server):
+    """O preço da exigência de cobertura, medido no fio.
+
+    Só um candidato que já respondeu 200 e sobreviveu às exclusões de graça chega
+    a pedir uma sonda, e aceitar RETORNA. Num host honesto os chutes 404 e nunca
+    chegam lá, então a conta é a mesma de antes desta mudança.
+    """
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa"))
+    rotas["/sobre"] = (200, {}, pagina("Sobre"))
+    rotas["/contato"] = (200, {}, contato())
+
+    check_trust_pages(
+        base + "/",
+        not_found=_NotFoundProbes(base + "/", session=requests.Session(), timeout=5),
+    )
+
+    # A âncora e mais nada: `/sobre` e `/contato` vieram da âncora, que já estava
+    # medida, e todo o resto 404 antes de chegar a qualquer sonda.
+    sondas = [c for c in caminhos_pedidos(rotas) if "adsense-auditor-probe" in c]
+    assert sondas == [f"/{NOT_FOUND_PROBE_PATHS[0]}"]
+
+
+def test_aceitar_custa_no_maximo_um_diretorio_por_tipo_de_pagina(server):
+    """O teto do preço novo, medido no fio.
+
+    O custo cai onde a evidência decide um veredito: um diretório que o chute
+    ACERTOU e que tem roteador próprio de soft 404. Como aceitar RETORNA, no
+    máximo um candidato por tipo chega a pedir, então o acréscimo é de um
+    diretório para Sobre e um para Contato — e nenhum a mais, por mais
+    convencionais que a tupla tenha.
+    """
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa"))
+    # `/about/` e `/contact/` são subsites com roteador próprio; o apex é honesto.
+    rotas.default = lambda metodo, caminho: (
+        (200, {}, ERRO_404_LONGO)
+        if caminho.startswith(("/about/", "/contact/"))
+        else None
+    )
+
+    relatorio = check_completeness(base + "/")
+
+    sondados = {
+        c.rsplit("/", 1)[0] + "/"
+        for c in caminhos_pedidos(rotas)
+        if NOT_FOUND_PROBE_PATHS[0] in c
+    }
+    # A âncora mais UM diretório por tipo. `/sobre/`, `/contato/`, `/pages/` e as
+    # outras grafias convencionais 404 e não custam sonda nenhuma.
+    assert sondados == {"/", "/about/", "/contact/"}
+    assert relatorio.trust.pages["about"].status is Status.MISSING
+    assert relatorio.trust.pages["contact"].status is Status.MISSING
+
+
+def test_a_lista_de_diretorios_recusados_diz_quantos_ela_nao_nomeou(server):
+    """Cinco nomes de dezoito lidos como lista completa.
+
+    `scripts/README.md` prometia "the report names the directories" e citava a
+    linha de dezoito links de um menu de 25 espalhado por 25 diretórios. A frase
+    nomeava cinco e não dizia que havia treze mais — a contagem estava noutro
+    canto da mesma frase, então dava para subtrair, mas ninguém deveria ter de
+    fazer isso para saber se leu a lista inteira.
+    """
+    base, rotas = server
+    diretorios = [f"/s{i}/" for i in range(25)]
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de(*diretorios)))
+    for d in diretorios:
+        rotas[d] = (200, {}, pagina(d))
+
+    relatorio = count_broken_nav_links(base + "/", limit=25)
+
+    recusados = relatorio.refused_directories
+    assert len(recusados) > 5
+    dito = frases(relatorio)
+    # Os cinco primeiros, e o número dos que ficaram de fora.
+    for d in recusados[:5]:
+        assert d in dito
+    assert f"(and {len(recusados) - 5} more)" in dito
+    # E nenhum nome além dos cinco, que é o ponto do corte.
+    assert recusados[5] not in dito
 
 
 def test_com_o_teto_ja_gasto_a_navegacao_diz_nao_medido_em_vez_de_inventar_regime(

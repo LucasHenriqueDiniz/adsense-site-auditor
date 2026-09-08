@@ -93,15 +93,20 @@ link is a directory of its own.
 | measured, documented fixture | 6 directories, 15 requests in total against 10 before |
 | measured, 25-link menu of 25 directories | 8 probes against 43 requests to real addresses |
 | conventional About/Contact paths | one slot between all seventeen, asked at the base they are invented from |
-| past the ceiling | `MISSING` — unverified, and the report names the directories |
+| past the ceiling | `MISSING` — unverified, and the report names the first five directories and counts the rest |
 | coverage it costs | a 25-link menu spread over 25 directories has 18 links reported `MISSING` on a host that answers 404 honestly |
 
 That last row is the price and it is not small: on a site whose menu is spread
 wider than the ceiling, most links come back unverified even though the host is
-honest and every one of them works. The run says so — `MISSING` is exit 1 and
-the directories are named — but a reader who expects a clean pass from a healthy
-site should know why they did not get one, and that raising the ceiling is what
-buys it, at the cost of more requests for addresses nobody routes.
+honest and every one of them works. The run says so — `MISSING` is exit 1, and
+the sentence names five directories and then says how many more it did not name,
+so a truncated list cannot be mistaken for a complete one. But a reader who
+expects a clean pass from a healthy site should know why they did not get one.
+There is no flag for it: raising the ceiling means editing
+`MAX_PROBED_DIRECTORIES` in `adsense_checks/completeness.py`, and it buys the
+coverage at the cost of more requests for addresses nobody routes. The value is
+a design decision about someone else's error log, which is why it is a constant
+with the reasoning written on it rather than a knob.
 
 The ceiling is its own constant and **not** shared with `--nav-limit`. The two
 bound different things: `--nav-limit` bounds how much of the site's own
@@ -143,6 +148,23 @@ What each answer does, per directory:
   origin, which this script does not send invented URLs to. `MISSING` again, and
   the report prints `refused_directories` under `-v` so the operator can point a
   second run at the subdirectory.
+
+Accepting a candidate and excluding one are not the same question, and they do
+not take the same evidence. **Excluding** never sends a request: an answer
+already measured for that directory is free, and so is the base's, because an
+address this script invented is a guess that a directory exists — if it does
+not, the base's router is what answered. That is what keeps the seventeen
+conventional About/Contact paths to one slot between them. **Accepting** a
+candidate as the About or Contact page requires an answer for the directory its
+response actually came from, and asks that directory when none is in hand.
+Otherwise `/about/` mounted as its own router that soft-404s is accepted on the
+apex's answer — a router its response never touched — and on a site with no
+About page the `FAIL` saying neither page was found drops out of the report.
+Only a candidate that already answered 200 and survived every free exclusion
+reaches the ask, and accepting stops the loop, so the added cost is at most one
+directory per page kind: nothing on an honest host, nothing on a single
+catch-all, two extra requests where a guessed directory turns out to be a real
+one with its own soft-404 template.
 
 A trust page found in a directory that answered 200 for a URL it does not
 have — or in one the ceiling refused — is still reported at the status its own

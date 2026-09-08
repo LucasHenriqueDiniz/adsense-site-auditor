@@ -165,17 +165,27 @@ BROKEN_NAV_FAIL_THRESHOLD = 3
 # navigation link was judged, and on a soft-404 host the ceiling then ran out
 # before `/sobre/` — where the error template answered and passed as an About
 # page, taking the headline "neither an About nor a Contact page was found" out
-# of the report with it. They are invented addresses, so they are asked at the
-# base they were invented from, which costs one slot between all seventeen. The
-# cost
-# it admits to, measured against a 25-link audit's 43 requests to real
-# addresses: 8 invented requests (19%) on an honest host, 16 (37%) on one that
-# soft-404s in every directory, because a directory proven to soft-404 is asked
-# the second path too. Either way the addresses this tool invents stay a
-# minority of the run. Past the cap nothing is guessed: a link whose directory
-# was refused a probe is reported MISSING — unverified, neither working nor
-# broken — which is a bounded, honest false MISSING and is stated as such in
-# `count_broken_nav_links`.
+# of the report with it. They are invented addresses, so EXCLUDING one may use
+# the answer already paid for at the base, which costs one slot between all
+# seventeen. ACCEPTING one may not — see `_resolve_trust_page` — so a guess that
+# turns out to be a real directory with its own soft-404 router does spend a
+# slot on itself. That is the whole added cost, it is bounded at one directory
+# per kind because accepting returns, and it lands only where the evidence
+# decides a verdict.
+#
+# The cost it admits to, measured on the wire against a 25-link audit's 43
+# requests to real addresses: 8 invented requests (16%) on an honest host, 16
+# (27%) on one that soft-404s in every directory, because a directory proven to
+# soft-404 is asked the second path too. On the six-link fixture EXAMPLES.md
+# documents: 7 of 16. A host whose `/about/` is its own soft-404 router adds one
+# directory, so two requests, and one more for `/contact/` if it is one too —
+# measured 1 -> 3 and 1 -> 5 invented. A single catch-all adds nothing, because
+# the base's answer recognises what every guessed directory serves. Either way
+# the addresses this tool invents stay a minority of the run.
+#
+# Past the cap nothing is guessed: a link whose directory was refused a probe is
+# reported MISSING — unverified, neither working nor broken — which is a bounded,
+# honest false MISSING and is stated as such in `count_broken_nav_links`.
 #
 # No delay is inserted between probes. `completeness.py` spaces none of its ~20
 # requests, so slowing only the invented ones would make them politer than the
@@ -814,6 +824,24 @@ def channels_in(doc: Document) -> ContactChannels:
 
 def _dedupe(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
+
+
+# How many entries a report sentence lists before it stops naming them.
+_LISTED = 5
+
+
+def _listing(values: list[str]) -> str:
+    """The first few, and how many were left out when there were more.
+
+    A bare `[:5]` reads as a complete list. On a 25-link menu spread over 25
+    directories the ceiling refuses 18 of them, and the sentence named five with
+    nothing to say the other thirteen existed — while `scripts/README.md`
+    promised "the report names the directories". The count is elsewhere in the
+    sentence, so a careful reader could subtract; nobody should have to.
+    """
+    if len(values) <= _LISTED:
+        return ", ".join(values)
+    return f"{', '.join(values[:_LISTED])} (and {len(values) - _LISTED} more)"
 
 
 # --------------------------------------------------------------------------
@@ -1589,6 +1617,19 @@ def _candidates(
     # from being a hole the same size as the one it closes.
     charged: dict[str, int] = {}
     out: list[_Candidate] = []
+    # Every matching address the DOCUMENT wrote, whether or not the cap had room
+    # for it. `declared` is a fact about the document — "the home page offers
+    # this URL as its About page" — not about which half of this list produced
+    # the entry, and `seen` cannot answer it: a candidate dropped by
+    # `max_linked` or `MAX_SPELLINGS_PER_IDENTITY` never enters `seen`, so a
+    # footer writing `/sobre/` as its seventh matching link was re-added below as
+    # a GUESS. Two things then went wrong at once. The address the site published
+    # was judged at the anchor instead of where it landed, which inverts the
+    # split `_resolve_trust_page` describes; and it fell out of
+    # `declared_blocked`, so a 503 at the site's own About URL was reported as a
+    # guess that missed rather than as the URL the home page offers being
+    # unreadable.
+    written = {defrag_url(href) or href for href in linked}
     for href in linked:
         url = defrag_url(href) or href
         identity = _canonical(url)
@@ -1607,7 +1648,7 @@ def _candidates(
         if url in seen or _canonical(url) == casa:
             continue
         seen.add(url)
-        out.append(_Candidate(url=url, declared=False))
+        out.append(_Candidate(url=url, declared=url in written))
     return out
 
 
@@ -1674,40 +1715,69 @@ def _resolve_trust_page(
         # the 404/410 and the not-ok branches above return first, so a guess
         # that misses costs no invented request.
         landed = response.final_url or response.url
-        # A candidate the DOCUMENT wrote is asked about where it landed; one this
-        # audit INVENTED is asked about the base it was invented from. `/about/`
-        # is a guess that a directory exists, so probing inside it presumes the
-        # thing under test — and if it does not exist, what answered was the
-        # base's router, which the base's probe already describes. Measured: on a
-        # soft-404 host the answer taken at `/` recognises the responses to
-        # `/about/`, `/sobre/`, `/contact/` and `/pages/about` alike, because one
-        # catch-all serves them all.
+        # EXCLUDING a candidate and ACCEPTING one are different questions, and
+        # they do not take the same evidence. Asking them with one probe is what
+        # let `/about/` — mounted as its own router that soft-404s — come back
+        # `[PASS] about page` on a host whose apex 404s honestly, taking the
+        # headline "Neither an About nor a Contact page was found" out of the
+        # report with it.
         #
-        # It is also what keeps the guesses from starving the site's own links.
-        # The conventional tuples carry four trailing-slash spellings and
-        # `pages/`, so asked per address they claimed SIX of the eight slots
-        # before a single navigation link was judged — the audit spending its
-        # ceiling on its own guesses, which are worse evidence than what the
-        # site publishes.
+        # EXCLUSION is cheap, and it never has to ask. Two answers are already
+        # paid for. An answer MEASURED for this very directory is the first: the
+        # linked `/about/equipe` above may have just probed `/about/`, and
+        # ignoring it published both verdicts in one report — `[MISS]` on the
+        # navigation link and `[PASS]` on `/about/`, over byte-identical
+        # responses from one directory. The ANCHOR's is the second: an address
+        # this audit INVENTED is a guess that a directory exists, so if it does
+        # not, what answered was the base's router, which the anchor describes.
+        # Consulting it for a directory it does not cover is sound HERE and only
+        # here — the worst it can do is move to the next candidate and end at
+        # MISSING. It is also what keeps the seventeen conventional paths from
+        # claiming six of the eight slots before a navigation link is judged.
+        #
+        # ACCEPTANCE is where the evidence has to be real, so a candidate about
+        # to be returned AS the page is judged by an answer that COVERS where its
+        # response came from, and if none does, this asks that directory. The
+        # anchor's answer describes a router this response never touched: it
+        # recognises nothing in a subsite's own error template, and nothing in
+        # the one a redirect out to `/loja/` lands on.
+        #
+        # The cost is bounded by where the ask sits rather than by a rule about
+        # it. Only a candidate that already answered 200 and survived every free
+        # exclusion reaches it, so an honest host — where the guesses 404 —
+        # spends nothing extra; and accepting returns, so it lands on the
+        # candidates that get far enough to be accepted, one per kind.
         probe = None
         if not_found is not None:
-            probe = (
-                not_found.for_url(landed) if candidate.declared else not_found.anchor_probe()
-            )
-        if probe is not None and _is_not_found_page(probe, response):
+            probe = not_found.measured(landed)
+            if probe is None and not candidate.declared:
+                probe = not_found.anchor_probe()
+            if not _is_not_found_page(probe, response):
+                probe = not_found.for_url(landed)
+        if _is_not_found_page(probe, response):
             # The same move one line up, against the other page a catch-all
             # answers with. Used HERE, as an exclusion, this equality is sound:
             # the worst it can do is keep looking at the next candidate and end
             # at MISSING, which is the honest answer when the only thing found
             # was the not-found page. Used as an accusation it is not sound,
             # which is why count_broken_nav_links refuses to fail a link on it.
-            attempts.append(
-                (
-                    response.final_url,
+            #
+            # The sentence says "its directory" only when the probe actually
+            # measured the directory the response came from. On the anchor's
+            # answer it does not, and claiming otherwise would put a measurement
+            # in the report that this run never made — the fault every other
+            # gate in this module exists to refuse.
+            if _probe_covers(probe, landed):
+                detail = (
                     f"served the page its directory answers with for {probe.url}, "
-                    "which does not exist",
+                    "which does not exist"
                 )
-            )
+            else:
+                detail = (
+                    f"served exactly the page {probe.url} answers with, "
+                    "and that URL does not exist"
+                )
+            attempts.append((response.final_url, detail))
             served_not_found.append(probe.url)
             continue
         return _judge_page(kind, response, doc, attempts, declared_blocked)
@@ -1746,17 +1816,26 @@ def _is_home_again(response: Fetch, home: Fetch, doc: Document, home_text: str) 
 
 
 def _is_not_found_page(probe: _NotFoundProbe | None, response: Fetch) -> bool:
-    """Whether this response IS the page its own directory serves for a missing URL.
+    """Whether this response IS the page some directory serves for a missing URL.
 
-    `probe` must be the answer for the directory the response CAME FROM. A
-    fingerprint taken elsewhere recognises nothing here, and comparing against
-    one would be the same inference this module dropped everywhere else — the
-    direction is safe (it only ever excludes a candidate) but the sentence it
-    writes into `attempts` would name a URL that never described this page.
+    Answers ONE question — is this the not-found page — and the two callers ask
+    it for opposite purposes, which is why the requirement on `probe` differs
+    between them rather than being fixed here.
 
-    Only ever an answer where the not-found page was pinned down, and only ever
-    used to stop treating a response as the page that was asked for. Never used
-    to declare one broken — see `count_broken_nav_links`.
+    To ACCEPT a response as a real page, `probe` must be the answer for the
+    directory the response CAME FROM, and `_resolve_trust_page` asks that
+    directory when nothing already measured covers it. A fingerprint taken
+    elsewhere recognises nothing here, so accepting on one is not evidence at
+    all: it is the absence of a match with a router that was never consulted.
+
+    To EXCLUDE one, an answer from a directory this response did not come from
+    is allowed, and `_resolve_trust_page` uses the anchor's that way for an
+    address this audit invented. The direction is what makes it safe — a match
+    only ever drops a candidate and moves to the next, ending at MISSING, which
+    is the honest answer when the only thing found was the not-found page. What
+    it costs is the sentence, so the caller states which of the two it had.
+
+    Never used to declare a link broken — see `count_broken_nav_links`.
     """
     if probe is None or probe.regime != "fingerprint":
         return False
@@ -2388,8 +2467,8 @@ def count_broken_nav_links(
             f"nor broken: {listed}",
         )
     if report.unmeasured:
-        listed = ", ".join(link.url for link in report.unmeasured[:5])
-        refused = ", ".join(report.refused_directories[:5])
+        listed = _listing([link.url for link in report.unmeasured])
+        refused = _listing(report.refused_directories)
         # Named rather than counted: without the directories the reader cannot
         # tell a ceiling that bit from a menu that wandered off-origin, and the
         # remedy differs — re-run against the subdirectory, or nothing to do.
