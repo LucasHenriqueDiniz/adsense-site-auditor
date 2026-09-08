@@ -3266,6 +3266,196 @@ def test_aceitar_custa_no_maximo_um_diretorio_por_tipo_de_pagina(server):
     assert relatorio.trust.pages["contact"].status is Status.MISSING
 
 
+# --------------------------------------------------------------------------
+# O TETO NÃO É UMA DISPENSA DA REGRA, NEM UMA PROVA DE AUSÊNCIA.
+#
+# `3026a0f` enunciou que aceitar exige uma resposta que COBRE de onde a resposta
+# veio. O código não exigia: `_is_not_found_page(None, response)` é False, então
+# o candidato que precisava de cobertura e não conseguiu caía direto em
+# `_judge_page` e saía aprovado. O teto virava uma dispensa da regra que o
+# próprio commit escreveu.
+#
+# Recusar sozinho troca um erro pelo outro, e os dois são alcançáveis. Uma
+# página que EXISTE num caminho convencional, num site com diretórios de
+# roteador próprio bastantes para gastar o teto, viraria não-encontrada — e
+# junto com a outra ausente dispararia `Neither an About nor a Contact page was
+# found` sobre um site que tem uma.
+#
+# Por isso o resultado distingue TRÊS coisas e não duas: estabelecida, ausente,
+# e encontrada-mas-não-estabelecida. Sem inventar status: MISSING já carrega
+# "não pôde ser observado" em toda esta metade do módulo, e `PageOutcome
+# .unmeasured` é o que separa as duas últimas dentro dele. Quem lê o campo é a
+# manchete, que passa a falar de AUSÊNCIA em vez de "não encontrada".
+# --------------------------------------------------------------------------
+
+
+def erro_proprio_de(caminho):
+    """O template de erro do primeiro segmento de `caminho`.
+
+    Um template por diretório, e distinto dos outros: é o que obriga cada
+    diretório a gastar a sua própria vaga do teto, porque a medição de um não
+    reconhece nada no outro. Com prosa de sobra, para que `_judge_page` o
+    aprovaria se chegasse lá.
+    """
+    return pagina(f"Nada em {caminho.split('/')[1]}")
+
+
+def test_o_teto_gasto_nao_aprova_o_template_de_erro_do_diretorio_seguinte(server):
+    """O falso PASS que o teto abria, e que `3026a0f` disse ter fechado.
+
+    Seis links Sobre no rodapé, cada um num diretório de roteador próprio, gastam
+    seis vagas. O convencional puxa a âncora, que é a sétima, e `/about/` — que
+    tem template próprio — é a oitava. Quando Contato chega, `/contact/`, que
+    também é roteador próprio com o SEU template de erro, precisaria da nona.
+    `for_url` devolve None, `_is_not_found_page(None, response)` é False, e o
+    template de erro do site saía `[PASS] contact page`.
+
+    O site não tem página de Contato nenhuma. O exit code continuava 1 pelo
+    veredito MISSING do Sobre, então o defeito não é exit 0: é uma linha PASS
+    impressa sobre a página que aquele diretório serve para o que não existe, e a
+    manchete some junto porque Contato deixa de constar como não encontrado.
+
+    Todo o resto do host responde o template da RAIZ, que a âncora exclui de
+    graça. É o que faz o teto chegar gasto em `/contact/` sem que a corrida tenha
+    desperdiçado vaga nenhuma nos chutes desta ferramenta — sem isso a forma não
+    se monta, e o defeito não é alcançável.
+    """
+    base, rotas = server
+    rodape = "".join(f"<a href='/a{i}/sobre'>Sobre</a>" for i in range(6))
+    rotas["/"] = (200, {}, pagina("Casa", extra=f"<footer>{rodape}</footer>"))
+    proprios = tuple(f"/a{i}/" for i in range(6)) + ("/about/", "/contact/")
+    rotas.default = lambda metodo, caminho: (
+        200,
+        {},
+        erro_proprio_de(caminho) if caminho.startswith(proprios) else ERRO_404_LONGO,
+    )
+
+    relatorio = check_completeness(base + "/")
+
+    contato_pg = relatorio.trust.pages["contact"]
+    # NÃO aceito. `url` segue None, então nenhuma linha PASS é impressa sobre o
+    # template de erro de `/contact/` — era `Status.OK` com `url` preenchida.
+    assert contato_pg.status is Status.MISSING
+    assert contato_pg.url is None
+    # E NÃO ausente: o candidato respondeu 200 e nada mostrou que não era página.
+    # É esta lista que separa as duas dentro de MISSING.
+    assert contato_pg.unmeasured == [base + "/contact/"]
+    assert "did not measure" in contato_pg.reason
+    assert base + "/contact/" in contato_pg.reason
+    # O diretório recusado é nomeado, como a navegação já faz com os dela.
+    assert "/contact/" in relatorio.nav.refused_directories
+    dito = frases(relatorio.trust)
+    assert "contact page could not be established" in dito
+    # Sobre é o outro MISSING, e é AUSENTE de verdade: `/about/` foi medido — a
+    # oitava vaga — e serviu exatamente o que serve para o que não existe.
+    sobre = relatorio.trust.pages["about"]
+    assert sobre.status is Status.MISSING
+    assert sobre.unmeasured == []
+    # A manchete NÃO sai, e não por acidente. Ela afirma que o SITE não tem como
+    # identificar nem contatar o publisher, e `/contact/` respondeu 200 com prosa
+    # sem que esta corrida conseguisse julgá-lo. Dizer ausência aqui seria trocar
+    # o falso PASS por um falso FAIL — o mesmo erro de categoria na outra direção.
+    assert not any(
+        "Neither an About nor a Contact page was found" in f.message
+        for f in relatorio.trust.findings
+    )
+    # E nada disto se paga com um exit 0: MISSING nos dois lados basta.
+    assert exit_code(relatorio.status) == 1
+    # Mesmo preço de antes: as oito vagas, nem uma requisição a mais. A recusa
+    # acontece onde a sonda JÁ não era enviada.
+    sondados = {
+        c.rsplit("/", 1)[0] + "/"
+        for c in caminhos_pedidos(rotas)
+        if NOT_FOUND_PROBE_PATHS[0] in c
+    }
+    assert len(sondados) == MAX_PROBED_DIRECTORIES
+    assert "/contact/" not in sondados
+
+
+def test_num_site_saudavel_a_exigencia_de_cobertura_nao_muda_nada(server):
+    """O outro lado da conta: num host honesto nada disto é alcançado.
+
+    Os chutes 404, então nenhum candidato passa das exclusões de graça sem já
+    estar coberto pela âncora, e a âncora é honesta. As duas páginas saem OK,
+    nenhuma fica pendurada em medição, e o exit code é 0.
+    """
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa"))
+    rotas["/sobre"] = (200, {}, pagina("Sobre"))
+    rotas["/contato"] = (200, {}, contato())
+
+    relatorio = check_trust_pages(
+        base + "/",
+        not_found=_NotFoundProbes(base + "/", session=requests.Session(), timeout=5),
+    )
+
+    sobre = relatorio.pages["about"]
+    contato_pg = relatorio.pages["contact"]
+    assert sobre.status is Status.OK
+    assert sobre.url == base + "/sobre"
+    assert contato_pg.status is Status.OK
+    assert contato_pg.url == base + "/contato"
+    # Uma página estabelecida não espera medição nenhuma, e é o que faz
+    # `unmeasured` significar algo: ele só é não-vazio junto de um MISSING.
+    assert sobre.unmeasured == []
+    assert contato_pg.unmeasured == []
+    assert relatorio.status is Status.OK
+    assert exit_code(relatorio.status) == 0
+    # A âncora e mais nada.
+    sondas = [c for c in caminhos_pedidos(rotas) if NOT_FOUND_PROBE_PATHS[0] in c]
+    assert sondas == [f"/{NOT_FOUND_PROBE_PATHS[0]}"]
+
+
+def test_o_teto_gasto_noutro_diretorio_nao_recusa_a_pagina_que_a_ancora_cobre(server):
+    """O erro que a recusa simples traria, e que a cobertura evita.
+
+    O teto acaba GASTO nesta corrida — seis diretórios de roteador próprio para
+    Sobre e seis para Contato — e mesmo assim as duas páginas convencionais são
+    aceitas, porque estão no diretório da âncora e a âncora foi medida. É a
+    diferença entre "o teto acabou" e "de onde esta resposta veio não foi
+    medido": recusar pela primeira condição reportaria não-encontradas duas
+    páginas que o site serve, e num par assim dispararia a manchete do AdSense
+    sobre um site que tem as duas.
+
+    Os candidatos linkados que o teto recusou não desaparecem do relatório: são
+    links do rodapé, então `count_broken_nav_links` os lista como não medidos com
+    o mesmo peso. O que este teste fixa é que eles não contaminam a página que
+    ESTA corrida conseguiu estabelecer.
+    """
+    base, rotas = server
+    rodape = "".join(
+        f"<a href='/a{i}/sobre'>Sobre</a><a href='/b{i}/contato'>Contato</a>"
+        for i in range(6)
+    )
+    rotas["/"] = (200, {}, pagina("Casa", extra=f"<footer>{rodape}</footer>"))
+    # As duas páginas de verdade, no diretório da âncora.
+    rotas["/sobre"] = (200, {}, pagina("Sobre"))
+    rotas["/contato"] = (200, {}, contato())
+    proprios = tuple(f"/a{i}/" for i in range(6)) + tuple(f"/b{i}/" for i in range(6))
+    # Cada diretório linkado tem o seu template de erro; a raiz é HONESTA, então
+    # os chutes desta ferramenta 404 e não gastam vaga.
+    rotas.default = lambda metodo, caminho: (
+        (200, {}, erro_proprio_de(caminho)) if caminho.startswith(proprios) else None
+    )
+
+    relatorio = check_completeness(base + "/")
+
+    sobre = relatorio.trust.pages["about"]
+    contato_pg = relatorio.trust.pages["contact"]
+    assert sobre.status is Status.OK
+    assert sobre.url == base + "/sobre"
+    assert contato_pg.status is Status.OK
+    assert contato_pg.url == base + "/contato"
+    assert sobre.unmeasured == []
+    assert contato_pg.unmeasured == []
+    # E o teto REALMENTE acabou: sem isto o teste não separa as duas condições.
+    assert len(relatorio.nav.refused_directories) > 0
+    assert not any(
+        "Neither an About nor a Contact page was found" in f.message
+        for f in relatorio.trust.findings
+    )
+
+
 def test_a_lista_de_diretorios_recusados_diz_quantos_ela_nao_nomeou(server):
     """Cinco nomes de dezoito lidos como lista completa.
 

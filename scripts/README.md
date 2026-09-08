@@ -93,7 +93,7 @@ link is a directory of its own.
 | measured, documented fixture | 6 directories, 15 requests in total against 10 before |
 | measured, 25-link menu of 25 directories | 8 probes against 43 requests to real addresses |
 | conventional About/Contact paths | one slot between all seventeen, asked at the base they are invented from |
-| past the ceiling | `MISSING` — unverified, and the report names the first five directories and counts the rest |
+| past the ceiling | `MISSING` — unverified for a navigation link, "could not be established" for a trust-page candidate, never `PASS`; the report names the first five directories and counts the rest |
 | coverage it costs | a 25-link menu spread over 25 directories has 18 links reported `MISSING` on a host that answers 404 honestly |
 
 That last row is the price and it is not small: on a site whose menu is spread
@@ -145,9 +145,13 @@ What each answer does, per directory:
   strength of its prose, and a linked About at `/loja/quem-eu-sou` lands in its
   own directory.
 - **Never asked.** The ceiling was spent, or the response came from another
-  origin, which this script does not send invented URLs to. `MISSING` again, and
-  the report prints `refused_directories` under `-v` so the operator can point a
-  second run at the subdirectory.
+  origin, which this script does not send invented URLs to. `MISSING` again, for
+  a navigation link AND for a trust-page candidate — a 200 from here is not
+  evidence of a page in either half — and the report prints
+  `refused_directories` under `-v` so the operator can point a second run at the
+  subdirectory. For a trust page this `MISSING` is recorded as "could not be
+  established" and is kept out of the "neither page was found" `FAIL`, which
+  speaks only of pages shown to be absent.
 
 Accepting a candidate and excluding one are not the same question, and they do
 not take the same evidence. **Excluding** never sends a request: an answer
@@ -161,22 +165,43 @@ Otherwise `/about/` mounted as its own router that soft-404s is accepted on the
 apex's answer — a router its response never touched — and on a site with no
 About page the `FAIL` saying neither page was found drops out of the report.
 Only a candidate that already answered 200 and survived every free exclusion
-reaches the ask, and accepting stops the loop, so the added cost is at most one
-directory per page kind: nothing on an honest host, nothing on a single
-catch-all, two extra requests where a guessed directory turns out to be a real
-one with its own soft-404 template.
+reaches the ask, so the added probe cost is at most one directory per page kind:
+nothing on an honest host, nothing on a single catch-all, two extra requests
+where a guessed directory turns out to be a real one with its own soft-404
+template.
 
-A trust page found in a directory that answered 200 for a URL it does not
-have — or in one the ceiling refused — is still reported at the status its own
-content earns, because that check has its own discriminators (word count,
-unfinished markers) and does not rest on the status code alone. Turning it into
-`MISSING` would make a ceiling say "this site has no About page", and paired
-with Contact that is a `FAIL` on a healthy site. What the report adds is a
-`MISSING` finding beside it saying the page was judged on its content rather
-than on its status code — the same weight the navigation half gives the same
-observation, and enough that the run does not exit 0 with the note unread. This
-is the residual hole, stated: such a page passes, and the sentence is what sends
-a human to look.
+**And when that directory cannot be asked, the candidate is not accepted
+either.** The ceiling is not an exemption from the rule above. A candidate whose
+directory the ceiling refused — or that answered from another origin — is
+reported `MISSING` with its URL named, never `PASS`. Measured on a constructed
+host that spends all eight slots before the conventional `/contact/`, the line
+was `[PASS] ADS-UX-05 contact page` printed over that directory's own error
+template; it is now `[MISS]`, with the sentence naming the URL and the ceiling.
+Refusing does **not** stop the loop, so the rest of the candidate list is still
+tried and one of them may still be established from a directory already
+measured; on that same host the run costs 46 requests against 40, with the probe
+count unchanged at 8, because the search no longer ends at the false accept.
+
+Not accepted is not the same as absent, and the report keeps them apart. The
+`FAIL` saying neither page was found is a claim about the **site**, so it is
+raised only when both pages are genuinely absent — nothing answered, or what
+answered was that directory's own not-found page. A candidate that answered 200
+and could not be measured leaves the question open, and counting it as absence
+would trade the false `PASS` for a false `FAIL` on a publisher whose page is
+merely in a directory this run had no slot left to measure. So on that
+constructed host the verdict is `MISSING` on both pages, exit 1, and no
+headline: the run says it could not establish the page and names where, the way
+`refused_directories` already does for navigation.
+
+A trust page found in a directory that WAS measured and answered 200 for a URL
+it does not have is different again, and still reported at the status its own
+content earns: coverage exists, so the audit knows what it is looking at, and
+the check has its own discriminators (word count, unfinished markers) that do
+not rest on the status code. What the report adds is a `MISSING` finding beside
+it saying the page was judged on its content rather than on its status code —
+the same weight the navigation half gives the same observation, and enough that
+the run does not exit 0 with the note unread. This is the residual hole, stated:
+such a page passes, and the sentence is what sends a human to look.
 
 The directory the script invents URLs in — its own probe paths and the
 conventional About/Contact paths it guesses — never leaves the site you named.

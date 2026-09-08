@@ -892,9 +892,20 @@ class _Verdict:
 class PageOutcome:
     """What happened to one trust page.
 
-    `status` is the three-way distinction the audit needs: MISSING (no such
-    page), WARNING (it exists but is unfinished or a stub) and ERROR (it could
-    not be read, so nothing about it is known).
+    `status` is the three-way distinction the audit needs: MISSING (this run did
+    not establish a page here), WARNING (it exists but is unfinished or a stub)
+    and ERROR (it could not be read, so nothing about it is known).
+
+    MISSING covers two facts that must not be confused, and `unmeasured` is what
+    tells them apart: the page is ABSENT (nothing answered, or what answered was
+    the directory's own not-found template) versus a candidate answered HTTP 200,
+    survived every exclusion, and this run could not establish it because the
+    ceiling refused to measure where it came from. Both are "not a page this run
+    found", so neither may print `[PASS]`; only the first is evidence of absence,
+    so only the first may feed the "Neither an About nor a Contact page was
+    found" headline. Collapsing them is what let the ceiling running out read as
+    a page being there — and, once refusing became the rule, would have made it
+    read as a page being gone.
     """
 
     kind: str
@@ -905,6 +916,15 @@ class PageOutcome:
     placeholders: list[Placeholder] = field(default_factory=list)
     channels: ContactChannels | None = None
     attempts: list[tuple[str, str]] = field(default_factory=list)
+    # Candidate URLs that answered HTTP 200, survived every exclusion, and came
+    # back from a directory this run never measured — the per-run ceiling on
+    # probed directories was spent, or the response came from another origin.
+    # A list and not a flag, and named the same as `NavLinkReport.unmeasured`,
+    # because it is the SAME observation on the other half of this module: "a
+    # 200 that was not shown to mean anything", which is only actionable if the
+    # report can name where. Non-empty only alongside MISSING: a page that WAS
+    # established is not waiting on any measurement.
+    unmeasured: list[str] = field(default_factory=list)
     # URLs the home page itself offers as this page and that could not be read,
     # in the case where some other URL did answer. Non-empty only alongside a
     # page that was found: when nothing answered, the outcome is ERROR and its
@@ -1155,8 +1175,9 @@ def _invented_base(document_url: str, base_href: str | None) -> _InventedBase:
     the INVENTED URLs go, and therefore which directory anchors the run — while
     `_NotFoundProbes` asks EVERY directory a response came from about itself and
     `_probe_covers` refuses to let one directory's answer classify another's. A
-    navigation link in a directory the ceiling refused is MISSING, which is what
-    this package already does with a condition it could not observe.
+    navigation link in a directory the ceiling refused is MISSING, and so is a
+    trust-page candidate from one — which is what this package already does with
+    a condition it could not observe.
 
     The cost of `as_base` here is stated rather than hidden: on a base with no
     trailing slash the guesses go one segment deeper than a browser resolves a
@@ -1370,9 +1391,14 @@ def check_trust_pages(
     requested.
 
     Each page ends in exactly one of four states, and three of them are not a
-    pass: OK, MISSING (nothing answered), WARNING (a stub or a placeholder) and
-    ERROR (a 403, a 5xx, a timeout — the page may well exist and we cannot say).
-    An access failure is never an approval.
+    pass: OK, MISSING (this run did not establish a page), WARNING (a stub or a
+    placeholder) and ERROR (a 403, a 5xx, a timeout — the page may well exist and
+    we cannot say). An access failure is never an approval.
+
+    MISSING carries two distinct facts and `PageOutcome.unmeasured` separates
+    them, because only one of them is evidence about the SITE: the page is
+    absent, versus a candidate answered 200 and this run could not establish it.
+    See `PageOutcome` and the FAIL below.
 
     `not_found` is the run's set of per-directory answers to "what does a URL
     that cannot exist look like here", shared with the navigation check so both
@@ -1383,12 +1409,22 @@ def check_trust_pages(
     report whose navigation line said that very page is what the host serves for
     nothing.
 
-    A page that IS found keeps the status its own content earns, because this
+    A page found in a MEASURED directory keeps the status its own content earns,
+    even when that directory answers 200 for URLs it does not have, because this
     check does not rest on the status code alone — word count and unfinished
-    markers are its own discriminators — so a directory that was not measured
-    narrows the evidence without emptying it. Making the page MISSING instead
-    would let a ceiling say "this site has no About page", and paired with
-    Contact that is the FAIL two lines below: a false FAIL on a healthy site.
+    markers are its own discriminators — so a directory whose 200 means nothing
+    narrows the evidence without emptying it.
+
+    A candidate from a directory NOBODY measured is a different case and is not
+    accepted: the ceiling was spent, or the response came from another origin, so
+    there is no answer describing the router that replied and nothing narrows
+    anything. Accepting it printed `[PASS]` over a site's own error template,
+    which is the defect `3026a0f` described and left open. It is recorded MISSING
+    with `unmeasured` naming the URL, and the FAIL below skips it — that is what
+    stops a spent ceiling from saying "this site has no About page", which paired
+    with Contact would be a false FAIL on a healthy site. The earlier way of
+    avoiding that false FAIL was to accept the candidate, which bought it with a
+    false PASS instead.
 
     What is recorded beside it is a MISSING FINDING saying the page was judged
     on its content rather than on its status code — the same weight
@@ -1499,8 +1535,19 @@ def check_trust_pages(
             "the content it served rather than on its status code",
         )
 
-    missing = [k for k, p in report.pages.items() if p.status is Status.MISSING]
-    if len(missing) == len(_TRUST_KINDS):
+    # `not p.unmeasured` is what narrows this from "not found" to ABSENT. A page
+    # whose candidate answered HTTP 200 and could not be measured is MISSING —
+    # it must not print `[PASS]` — but it is not evidence that the site lacks
+    # the page, and this headline is a statement about the SITE: it says AdSense
+    # rejects it. Reading the wider condition would fail a publisher for a
+    # ceiling this run spent on its own guesses, which is the same category
+    # error as the `[PASS]` in the other direction. The per-page MISSING lines
+    # still stand and the exit code is still 1, so nothing here is a pass; what
+    # is withheld is the accusation.
+    absent = [
+        k for k, p in report.pages.items() if p.status is Status.MISSING and not p.unmeasured
+    ]
+    if len(absent) == len(_TRUST_KINDS):
         # Neither page is a rejection on its own at Google, so it outranks the
         # per-page severities instead of merely repeating them.
         report.add(
@@ -1679,6 +1726,10 @@ def _resolve_trust_page(
     # a URL that did. It also carries the only mention of the probe left in a
     # report where no trust page was found, now that the host-level line is gone.
     served_not_found: list[str] = []
+    # Candidates that answered 200 and survived every exclusion, but came back
+    # from a directory nothing measured. Neither found nor absent — see the
+    # branch that fills it and `PageOutcome.unmeasured`.
+    unmeasured: list[str] = []
     for candidate in candidates:
         url = candidate.url
         response = fetch(url, session=session, timeout=timeout)
@@ -1742,6 +1793,13 @@ def _resolve_trust_page(
         # recognises nothing in a subsite's own error template, and nothing in
         # the one a redirect out to `/loja/` lands on.
         #
+        # And when that directory CANNOT be asked — the ceiling spent, or another
+        # origin — the candidate is not accepted either. That is the half `3026a0f`
+        # stated and left out: `_is_not_found_page(None, response)` is False, so
+        # the run fell through to `_judge_page` and the ceiling became an
+        # exemption from this very rule. It is not counted as absence either; see
+        # the `probe is None` branch below.
+        #
         # The cost is bounded by where the ask sits rather than by a rule about
         # it. Only a candidate that already answered 200 and survived every free
         # exclusion reaches it, so an honest host — where the guesses 404 —
@@ -1753,6 +1811,16 @@ def _resolve_trust_page(
             if probe is None and not candidate.declared:
                 probe = not_found.anchor_probe()
             if not _is_not_found_page(probe, response):
+                # Unconditional, and that is what makes the gate below a plain
+                # `is None`. The anchor's answer only survives this line by
+                # having MATCHED, which excludes and returns; everything that
+                # reaches acceptance was reassigned here, and `for_url` hands
+                # back an answer only when `_probe_covers` accepted it for THIS
+                # url. So past this line `probe` is either the answer for
+                # `landed`'s own directory or None. Re-testing `_probe_covers`
+                # would be a branch no input can take — a comment that looks
+                # like a guard — which is the same reasoning
+                # `count_broken_nav_links` states at its own `for_url`.
                 probe = not_found.for_url(landed)
         if _is_not_found_page(probe, response):
             # The same move one line up, against the other page a catch-all
@@ -1780,14 +1848,74 @@ def _resolve_trust_page(
             attempts.append((response.final_url, detail))
             served_not_found.append(probe.url)
             continue
+        if not_found is not None and probe is None:
+            # The rule the paragraphs above state, now enforced. Acceptance
+            # needs an answer COVERING where this response came from, and there
+            # is none: the ceiling was spent before this directory, or the
+            # response came from another origin this audit may not probe.
+            #
+            # `_is_not_found_page(None, response)` is False, so without this
+            # branch the run fell straight through to `_judge_page` and returned
+            # the candidate AS the page. The ceiling therefore handed out an
+            # exemption from the rule: six footer links in their own routers
+            # spend six slots, the anchor and one conventional path spend the
+            # last two, and the ninth directory's own error template came back
+            # `[PASS] contact page` — a pass over a not-found page, granted
+            # because the evidence ran out rather than because any was found.
+            #
+            # `continue`, not a return: the ceiling is spent for THIS directory,
+            # while a later candidate may land in one already measured — a
+            # conventional `/sobre` beside the home page is covered by the
+            # anchor — and that one can still be established.
+            #
+            # Recorded and not silently dropped, because "not established" is
+            # not "absent". The candidate answered 200 and nothing showed it was
+            # a not-found page, so counting it as absence would trade this false
+            # PASS for a false `Neither an About nor a Contact page was found`
+            # over a site that has one. The list is what `_record_page` and the
+            # headline read to tell the two apart.
+            unmeasured.append(landed)
+            continue
         return _judge_page(kind, response, doc, attempts, declared_blocked)
     if access is Status.ERROR:
+        # "no candidate was established", not "none was read": refusing to
+        # accept an unmeasured 200 made this branch reachable with a candidate
+        # this run DID read in hand, and the old wording would have denied
+        # reading it. ERROR still outranks, because a page behind a 403 may
+        # simply exist — and it never reaches the absence headline either.
+        unread = (
+            f"; {len(unmeasured)} answered HTTP 200 from a directory this run did not "
+            f"measure: {_listing(unmeasured)}"
+            if unmeasured
+            else ""
+        )
         return PageOutcome(
             kind=kind,
             status=Status.ERROR,
-            reason="could not read any candidate, so the page may well exist: "
-            + "; ".join(blocked[:3]),
+            reason="no candidate was established as a page, so the page may well exist: "
+            + "; ".join(blocked[:3])
+            + unread,
             attempts=attempts,
+            unmeasured=unmeasured,
+        )
+    if unmeasured:
+        # Ahead of `served_not_found`, because the two facts do not carry the
+        # same weight when both happened. One candidate serving the not-found
+        # template says that URL is not a page; another answering 200 that this
+        # run could not judge leaves the page's existence open, and the open
+        # question outranks the closed one — a report claiming absence while
+        # holding an unjudged 200 is the false headline this branch exists to
+        # prevent. `unmeasured` is carried on every MISSING outcome below as
+        # well, so the headline reads the field and not this ordering.
+        return PageOutcome(
+            kind=kind,
+            status=Status.MISSING,
+            reason=f"no candidate could be established as a page ({len(attempts)} tried); "
+            f"{len(unmeasured)} answered HTTP 200 from a directory this run did not measure "
+            f"(at most {MAX_PROBED_DIRECTORIES} are), so what a missing page looks like there "
+            f"is unknown and a 200 from it is not evidence of a page: {_listing(unmeasured)}",
+            attempts=attempts,
+            unmeasured=unmeasured,
         )
     if served_not_found:
         return PageOutcome(
@@ -1797,12 +1925,14 @@ def _resolve_trust_page(
             f"{len(served_not_found)} answered HTTP 200 with exactly the page their own "
             f"directory serves for a URL that does not exist, such as {served_not_found[0]}",
             attempts=attempts,
+            unmeasured=unmeasured,
         )
     return PageOutcome(
         kind=kind,
         status=Status.MISSING,
         reason=f"no candidate answered 200 ({len(attempts)} tried)",
         attempts=attempts,
+        unmeasured=unmeasured,
     )
 
 
@@ -1827,6 +1957,13 @@ def _is_not_found_page(probe: _NotFoundProbe | None, response: Fetch) -> bool:
     directory when nothing already measured covers it. A fingerprint taken
     elsewhere recognises nothing here, so accepting on one is not evidence at
     all: it is the absence of a match with a router that was never consulted.
+
+    A False from this function is therefore NOT on its own a licence to accept,
+    and reading it as one is the defect `3026a0f` described and did not close:
+    `probe is None` returns False here, so a candidate whose directory the
+    ceiling refused was accepted for want of evidence against it.
+    `_resolve_trust_page` checks `probe is None` separately and records the
+    candidate as unmeasured — not accepted, and not absence either.
 
     To EXCLUDE one, an answer from a directory this response did not come from
     is allowed, and `_resolve_trust_page` uses the anchor's that way for an
@@ -1915,10 +2052,33 @@ def _record_page(
             Status.WARNING, f"{label} page at {outcome.url} looks unfinished — {outcome.reason}"
         )
         return
-    # MISSING. A missing About stays MISSING rather than WARNING because the
-    # identity can legitimately live on the home page, which this check does not
-    # judge. A missing Contact is only that mild when the home page really does
-    # expose a channel; otherwise there is nothing anywhere and it escalates.
+    # MISSING, and the first question is WHICH of the two MISSINGs this is.
+    # Every sentence below says "No {label} page found", which is a claim about
+    # the site. It is only true when this run looked and found nothing; a
+    # candidate that answered HTTP 200 and could not be measured is a claim
+    # about THIS RUN, so it gets its own sentence and never the absence one.
+    # Printing "No Contact page found" over a URL that answered 200 with prose
+    # is the mirror-image false report of the `[PASS]` this outcome replaced,
+    # and on a contact page with no home-page channel the branch below would
+    # have escalated it to WARNING as well.
+    if outcome.unmeasured:
+        report.add(
+            # MISSING for the reason `count_broken_nav_links` gives its own
+            # `unmeasured` list: the condition was not observed. Not OK, because
+            # a 200 out of an unmeasured directory demonstrates nothing — the
+            # soft-404 template one directory over answers 200 exactly like a
+            # page. Not FAIL or WARNING, because nothing here was shown to be
+            # absent, and inventing a rejection out of a spent ceiling would
+            # print "no way to identify the publisher" over a site that has one.
+            Status.MISSING,
+            f"{label} page could not be established — {outcome.reason}. Re-run against the "
+            "directory these came from to spend the ceiling there instead",
+        )
+        return
+    # A missing About stays MISSING rather than WARNING because the identity can
+    # legitimately live on the home page, which this check does not judge. A
+    # missing Contact is only that mild when the home page really does expose a
+    # channel; otherwise there is nothing anywhere and it escalates.
     if outcome.kind == "contact" and not channels_in(home_doc).any_found:
         report.add(
             Status.WARNING,
