@@ -1460,6 +1460,26 @@ def check_trust_pages(
         report.add(Status.ERROR, f"Home page HTML could not be parsed: {home_doc.parse_error}")
     home_text = home_doc.text
 
+    # Shared with the other sub-check when the caller has one, so both halves of
+    # a report read the same answers and spend one ceiling between them — and
+    # built here when it does not, exactly as `count_broken_nav_links` builds
+    # its own. Without this the parameter defaulting to None meant no coverage
+    # was checked AT ALL: `_is_not_found_page(None, response)` is False, so
+    # every candidate survived every exclusion. Called on its own against a host
+    # that answers 200 for a page it does not have, this function sent zero
+    # probes and returned `about=OK` over the site's own error template, where
+    # the same site through `check_completeness` returns MISSING. The two halves
+    # of this module behaving differently on one document is the defect the
+    # per-directory design exists to remove, and a public function that is a
+    # trap only when called directly is that defect wearing a signature.
+    probes = not_found
+    if probes is None:
+        probes = _NotFoundProbes(
+            _invented_base(home.final_url or home.url, home_doc.base_href).url,
+            session=sess,
+            timeout=timeout,
+        )
+
     moved_by_base: list[str] = []
     for kind, (label, paths, hint) in _TRUST_KINDS.items():
         candidates = _candidates(
@@ -1472,7 +1492,7 @@ def check_trust_pages(
             home_text=home_text,
             session=sess,
             timeout=timeout,
-            not_found=not_found,
+            not_found=probes,
         )
         report.pages[kind] = outcome
         _record_page(report, label, outcome, home_doc)
@@ -1491,13 +1511,13 @@ def check_trust_pages(
     # served" over pages that had in fact been judged on a measured 200, and
     # said nothing at all about the one page whose directory was never measured.
     for kind, outcome in report.pages.items():
-        if outcome.url is None or not_found is None:
+        if outcome.url is None:
             continue
         # `measured`, never `for_url`: this pass reports what the run already
         # consulted. Sending a probe here would spend a request to print a
         # sentence about a directory no classification ever used, and would let
         # the ceiling be crossed by the report rather than by the check.
-        probe = not_found.measured(outcome.url)
+        probe = probes.measured(outcome.url)
         if probe is not None and probe.trustworthy:
             # Measured, and it spends a real status code on a missing page. The
             # 200 behind this page IS evidence, so there is nothing to warn

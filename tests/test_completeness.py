@@ -1136,6 +1136,39 @@ def test_pagina_de_confianca_que_e_a_pagina_de_erro_nao_e_aprovada(server):
     assert f"{base}/{NOT_FOUND_PROBE_PATHS[0]}".lower() in dito
 
 
+def test_check_trust_pages_sozinha_mede_como_a_auditoria_inteira(server):
+    """A terceira porta para o mesmo falso PASS, e era a assinatura que a abria.
+
+    `not_found` tem default `None`, e `_is_not_found_page(None, resposta)` é
+    falso — então chamada sem sondas esta função não checava cobertura NENHUMA:
+    todo candidato sobrevivia a toda exclusão. Medido contra um host que
+    responde 200 para o que não tem, sem página Sobre nenhuma:
+
+        check_trust_pages(base)   about=OK       sondas=0
+        via check_completeness    about=MISSING  sondas=1
+
+    A gêmea `count_broken_nav_links` já construía o próprio conjunto nesse caso.
+    As duas metades deste módulo se comportando diferente sobre um documento é
+    exatamente o defeito que o desenho por diretório existe para remover, e uma
+    função pública que só é armadilha quando chamada direto é esse defeito
+    vestindo uma assinatura.
+    """
+    base, rotas = server
+    rotas["/"] = (200, {}, pagina("Casa"))
+    rotas.default = (200, {}, ERRO_404_LONGO)
+
+    sozinha = check_trust_pages(base + "/")
+    pedidos_sozinha = [c for c in caminhos_pedidos(rotas) if NOT_FOUND_PROBE_PATHS[0] in c]
+    rotas.received.clear()
+    inteira = check_completeness(base + "/").trust
+
+    assert sozinha.pages["about"].status is Status.MISSING
+    assert sozinha.pages["about"].status is inteira.pages["about"].status
+    assert sozinha.pages["contact"].status is inteira.pages["contact"].status
+    # E ela paga a sonda, em vez de passar de graça por não ter pedido nenhuma.
+    assert len(pedidos_sozinha) == 1
+
+
 def test_pagina_de_confianca_real_continua_aprovada_em_host_de_soft_404(server):
     """A exclusão é estreita de propósito. Um host pode servir soft 404 e ainda
     ter uma página /sobre de verdade, e ela não vira MISSING por causa do
