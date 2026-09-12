@@ -1144,8 +1144,8 @@ def test_check_trust_pages_sozinha_mede_como_a_auditoria_inteira(server):
     todo candidato sobrevivia a toda exclusão. Medido contra um host que
     responde 200 para o que não tem, sem página Sobre nenhuma:
 
-        check_trust_pages(base)   about=OK       sondas=0
-        via check_completeness    about=MISSING  sondas=1
+        check_trust_pages(base)   about=OK       0 sondas
+        via check_completeness    about=MISSING  2 sondas
 
     A gêmea `count_broken_nav_links` já construía o próprio conjunto nesse caso.
     As duas metades deste módulo se comportando diferente sobre um documento é
@@ -1165,8 +1165,13 @@ def test_check_trust_pages_sozinha_mede_como_a_auditoria_inteira(server):
     assert sozinha.pages["about"].status is Status.MISSING
     assert sozinha.pages["about"].status is inteira.pages["about"].status
     assert sozinha.pages["contact"].status is inteira.pages["contact"].status
-    # E ela paga a sonda, em vez de passar de graça por não ter pedido nenhuma.
+    # E ela paga as sondas, em vez de passar de graça por não pedir nenhuma.
+    # Duas, não uma: esta fixture serve o mesmo template para tudo, então o
+    # primeiro caminho volta 200 e o regime só fica decidido depois do segundo.
+    # O filtro por `NOT_FOUND_PROBE_PATHS[0]` conta uma e discrimina 0 contra 1,
+    # mas afirmava um custo que a fixture não tem — o total é o que se paga.
     assert len(pedidos_sozinha) == 1
+    assert len([c for c in caminhos_pedidos(rotas) if "adsense-auditor-probe" in c]) == 2
 
 
 def test_pagina_de_confianca_real_continua_aprovada_em_host_de_soft_404(server):
@@ -1448,17 +1453,26 @@ def test_todo_candidato_a_pagina_de_confianca_inacessivel_e_ERROR(server):
 
     import requests
 
-    from adsense_checks.completeness import _Candidate, _resolve_trust_page
+    from adsense_checks.completeness import (
+        _Candidate,
+        _NotFoundProbes,
+        _resolve_trust_page,
+    )
     from adsense_checks.http import fetch as _fetch
 
     morto = "http://127.0.0.1:1/"
+    sessao = requests.Session()
     desfecho = _resolve_trust_page(
         kind="about",
         candidates=[_Candidate(url=morto + "sobre", declared=True)],
         home=_fetch(base + "/"),
         home_text="casa",
-        session=requests.Session(),
+        session=sessao,
         timeout=1,
+        # Obrigatório agora. Enquanto tinha default `None`, este parâmetro era a
+        # mesma armadilha que o `check_trust_pages` acabara de perder: sem
+        # conjunto, nenhuma cobertura era checada e o template de erro passava.
+        not_found=_NotFoundProbes(base + "/", session=sessao, timeout=1),
     )
     assert desfecho.status is Status.ERROR
     assert "may well exist" in desfecho.reason

@@ -1727,7 +1727,17 @@ def _resolve_trust_page(
     home_text: str,
     session: requests.Session,
     timeout: float,
-    not_found: _NotFoundProbes | None = None,
+    # Required, with no default. It used to default to None, and the guard
+    # below then defended a branch that skipped coverage entirely — the same
+    # false PASS `check_trust_pages` was just fixed to stop: called with None
+    # against a host answering 200 for a page it does not have, this returned
+    # `OK` over the error template after one request. Once its only production
+    # caller always passed a set, that branch became unreachable from the CLI
+    # and every test that had been killing the guard stopped: the mutation
+    # forcing it open went from 12 failures to none across the whole suite. A
+    # defaulted parameter that no caller omits is a trap kept warm at the cost
+    # of the test that would have caught it.
+    not_found: _NotFoundProbes,
 ) -> PageOutcome:
     attempts: list[tuple[str, str]] = []
     # Tracks the worst thing that stopped us from reading a candidate. It only
@@ -1825,12 +1835,10 @@ def _resolve_trust_page(
         # exclusion reaches it, so an honest host — where the guesses 404 —
         # spends nothing extra; and accepting returns, so it lands on the
         # candidates that get far enough to be accepted, one per kind.
-        probe = None
-        if not_found is not None:
-            probe = not_found.measured(landed)
-            if probe is None and not candidate.declared:
-                probe = not_found.anchor_probe()
-            if not _is_not_found_page(probe, response):
+        probe = not_found.measured(landed)
+        if probe is None and not candidate.declared:
+            probe = not_found.anchor_probe()
+        if not _is_not_found_page(probe, response):
                 # Unconditional, and that is what makes the gate below a plain
                 # `is None`. The anchor's answer only survives this line by
                 # having MATCHED, which excludes and returns; everything that
