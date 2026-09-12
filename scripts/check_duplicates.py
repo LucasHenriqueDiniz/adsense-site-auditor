@@ -1,184 +1,91 @@
 #!/usr/bin/env python3
-"""
-AdSense Site Auditor: Duplicate Content Detector
+from __future__ import annotations
 
-Detects near-duplicate pages and high boilerplate reuse.
-Useful for flagging ADS-CONTENT-02 and ADS-CONTENT-08 violations.
-
-Usage:
-    python check_duplicates.py <URL_or_FILE> [--threshold 0.8] [--output FILE]
-
-If URL_or_FILE is a file (*.json), reads crawl results from crawl_site.py.
-
-Example:
-    python check_duplicates.py crawl_report.json --threshold 0.8 --output dup_report.txt
-"""
-
+import argparse
 import sys
-import json
-import requests
-from html.parser import HTMLParser
-import difflib
+from pathlib import Path
 
-class TextExtractor(HTMLParser):
-    """Extract main text from HTML."""
-    def __init__(self):
-        super().__init__()
-        self.text = []
-        self.skip_tags = {'script', 'style', 'nav', 'meta', 'link', 'noscript', 'footer'}
-        self.skip_level = 0
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-    def handle_starttag(self, tag, attrs):
-        if tag in self.skip_tags:
-            self.skip_level += 1
+from adsense_checks.duplicates import check_urls  # noqa: E402
+from adsense_checks.report import Line, exit_code, render  # noqa: E402
+from adsense_checks.status import Status  # noqa: E402
 
-    def handle_endtag(self, tag):
-        if tag in self.skip_tags and self.skip_level > 0:
-            self.skip_level -= 1
+__doc__ = """Find near-duplicate pages within one site.
 
-    def handle_data(self, data):
-        if self.skip_level == 0:
-            text = data.strip()
-            if text and len(text) > 2:
-                self.text.append(text)
+Serves ADS-CONTENT-02 in part.
 
-    def get_text(self):
-        return '\n'.join(self.text)
+This compares the URLs you give it against each other. It does NOT search the
+web: ADS-CONTENT-OVERLAP asks for comparison against the top search results, and
+fetching those is outside what this script does. Saying so is the point — the
+previous version was cited in the reference as if it could.
 
-def fetch_text(url, timeout=10):
-    """Fetch a page and extract main text."""
-    try:
-        resp = requests.get(url, timeout=timeout)
-        resp.raise_for_status()
+    python scripts/check_duplicates.py URL [URL ...] [--threshold 0.6]
+"""
 
-        extractor = TextExtractor()
-        try:
-            extractor.feed(resp.text)
-        except Exception:
-            pass
 
-        return extractor.get_text()
-    except Exception:
-        return None
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("urls", nargs="+")
+    parser.add_argument("--threshold", type=float, default=0.6)
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args()
+    if not 0 < args.threshold <= 1:
+        # The grouping test is `jaccard(...) >= threshold`, and jaccard is in
+        # [0, 1] by construction. Outside that range the comparison stops being a
+        # measurement and becomes a constant: `--threshold 5` can never be met,
+        # so the report printed "no near-duplicate groups" over any input at all,
+        # and `--threshold 0` or below is met by every pair, so two pages sharing
+        # no words were reported as "2 pages at similarity >= 0.00" and failed
+        # the run. Both ends fabricate a verdict, which is why 0 is excluded
+        # while 1 — "group only byte-identical extractions" — is kept.
+        parser.error("--threshold must be greater than 0 and at most 1")
 
-def similarity_ratio(text1, text2):
-    """Calculate text similarity using SequenceMatcher (0.0 to 1.0)."""
-    if not text1 or not text2:
-        return 0.0
+    result = check_urls(args.urls, threshold=args.threshold)
+    findings = list(result.reasons)
+    for group in result.groups:
+        # The threshold as typed, not a rounding of it. `:.2f` printed every
+        # legal threshold below 0.005 as "similarity >= 0.00" — the exact string
+        # the guard above cites as the symptom of a threshold that grouped
+        # everything — so the evidence line for a real verdict could not be told
+        # apart from the fabricated one. There is no arithmetic between argparse
+        # and here: the value is `float(what the operator typed)`, and the
+        # default `str` of a float is the shortest text that reads back as the
+        # same float, so it cannot print a threshold other than the one applied.
+        findings.append(f"{len(group.urls)} pages at similarity >= {args.threshold}:")
+        findings.extend(f"    {u}" for u in group.urls)
 
-    matcher = difflib.SequenceMatcher(None, text1, text2)
-    return matcher.ratio()
+    lines = [
+        Line(
+            f"{len(args.urls)} URLs",
+            result.status,
+            findings or ["no near-duplicate groups"],
+            {
+                "analyzed": len(result.analyzed),
+                "unanalyzable": len(result.unanalyzable),
+                "groups": len(result.groups),
+            },
+            # "in part", and the line says so: ADS-CONTENT-02 is `judgement` in
+            # the reference and this measures one half of it — overlap between
+            # the URLs you named. A clean run here is evidence, not a verdict.
+            "ADS-CONTENT-02 (part)",
+        )
+    ]
+    lines.append(
+        Line(
+            "compared against the web",
+            Status.MISSING,
+            [
+                "not measured: ADS-CONTENT-OVERLAP asks for similarity against the top 5"
+                " search results and this script performs no search"
+            ],
+            requirement="ADS-CONTENT-OVERLAP",
+        )
+    )
+    text, overall = render("Duplicate content", lines, verbose=args.verbose)
+    print(text)
+    return exit_code(overall)
 
-def analyze_duplicates(urls, threshold=0.8, timeout=10):
-    """
-    Analyze text similarity across URLs.
 
-    Returns a list of duplicate groups where similarity >= threshold.
-    """
-    print(f"Fetching content from {len(urls)} URLs...\n")
-
-    texts = {}
-    for url in urls:
-        text = fetch_text(url, timeout=timeout)
-        if text:
-            texts[url] = text
-            print(f"  ✓ {url[:70]}")
-        else:
-            print(f"  ✗ {url[:70]}")
-
-    print(f"\nAnalyzing {len(texts)} pages for duplicates (threshold={threshold})...\n")
-
-    duplicates = []
-    processed = set()
-
-    for url1 in texts:
-        if url1 in processed:
-            continue
-
-        group = [url1]
-        for url2 in texts:
-            if url1 == url2 or url2 in processed:
-                continue
-
-            sim = similarity_ratio(texts[url1], texts[url2])
-            if sim >= threshold:
-                group.append((url2, sim))
-
-        if len(group) > 1:
-            duplicates.append({
-                "source": url1,
-                "similar_pages": group[1:],
-                "avg_similarity": sum(sim for _, sim in group[1:]) / len(group[1:]) if group[1:] else 0
-            })
-
-        processed.add(url1)
-        for url2, _ in group[1:]:
-            processed.add(url2)
-
-    return duplicates, texts
-
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python check_duplicates.py <URL_or_FILE> [--threshold N] [--output FILE]")
-        sys.exit(1)
-
-    target = sys.argv[1]
-    threshold = 0.8
-    output = None
-
-    for i, arg in enumerate(sys.argv[2:]):
-        if arg == '--threshold' and i + 1 < len(sys.argv) - 2:
-            threshold = float(sys.argv[i + 3])
-        elif arg == '--output' and i + 1 < len(sys.argv) - 2:
-            output = sys.argv[i + 3]
-
-    # Load URLs from file or use single URL
-    if target.endswith('.json'):
-        print(f"Loading crawl results from {target}...")
-        with open(target, 'r', encoding='utf-8') as f:
-            crawl_data = json.load(f)
-            urls = [r['url'] for r in crawl_data.get('results', []) if r.get('status') == 200]
-    else:
-        urls = [target]
-
-    duplicates, texts = analyze_duplicates(urls, threshold=threshold)
-
-    # Report
-    if duplicates:
-        print(f"⚠️  Found {len(duplicates)} pages with similar content:\n")
-        for dup in duplicates:
-            print(f"Source: {dup['source'][:70]}")
-            for url, sim in dup['similar_pages']:
-                print(f"  ↔ {sim:.0%} similar | {url[:60]}")
-            print()
-    else:
-        print(f"✓ No significant duplicates found (threshold={threshold})")
-
-    # Risk assessment
-    if len(duplicates) > len(urls) * 0.3:
-        print(f"⚠️  High duplication risk: {len(duplicates)} of {len(urls)} pages have >80% similar content")
-        print("    This may trigger ADS-CONTENT-02 or ADS-CONTENT-08 flags\n")
-    else:
-        print(f"✓ Duplication risk appears acceptable\n")
-
-    # Save to file
-    if output:
-        with open(output, 'w', encoding='utf-8') as f:
-            f.write("AdSense Duplicate Content Report\n")
-            f.write(f"Threshold: {threshold}\n")
-            f.write(f"Pages analyzed: {len(texts)}\n")
-            f.write(f"Duplicate groups found: {len(duplicates)}\n\n")
-
-            for dup in duplicates:
-                f.write(f"Source: {dup['source']}\n")
-                f.write(f"Average similarity: {dup['avg_similarity']:.0%}\n")
-                for url, sim in dup['similar_pages']:
-                    f.write(f"  {sim:.0%} | {url}\n")
-                f.write("\n")
-
-        print(f"Report saved to {output}")
-
-    return duplicates
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    raise SystemExit(main())

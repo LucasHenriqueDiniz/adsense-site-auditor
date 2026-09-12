@@ -1,405 +1,168 @@
-# AdSense Skill Accuracy Testing
+# Testing and accuracy
 
-Goal: Validate that the skill correctly predicts AdSense approval/rejection with 75-80% accuracy.
+## Current state: accuracy has never been measured
 
----
+This skill has no measured accuracy. Nothing here reports one, and any number
+you find elsewhere in the repo describing how often the skill is right should be
+treated as removed rather than merely stale.
 
-## Test Cases
+The previous version of this file presented a confusion matrix — 8 true
+positives, 9 true negatives, 1 false positive, 1 false negative, "Overall
+Accuracy 85%", "Target: 75-80% ✓ ACHIEVED" — directly above thirty unticked
+checkboxes and ten cases whose URL field read `(synthetic test case)`. No run
+had happened, against no real site. The arithmetic did not close either: those
+four counts sum to 19 and were divided by 20.
 
-### Part A: Sites Rejected by Google (Should Be Flagged as "Not Ready")
+That mattered more than an ordinary documentation error. A readiness audit whose
+whole value is telling you whether to trust its verdict cannot fabricate the
+number that says how much to trust it.
 
-These are actual patterns from AdSense community reports and official rejections.
+## What can be tested today
 
-#### Rejected Case #1: Unfinished Site
-**URL**: (synthetic test case)
-**Issue**: Site under construction
+The two halves of this skill need completely different treatment, and conflating
+them is what made the old claim possible.
 
-- About page: Missing (404)
-- Contact page: "Contact form will be added here" (placeholder)
-- Tools: "CSV Cleaner (coming soon)" / "AI Image Checker (not yet)"
-- Footer: "© 2026 Small Web Apps" (no author name)
-- Guides: 1 guide only (too few)
+### Deterministic checks — unit tests, running now
 
-**Expected Skill Output**: 
-- ADS-COMPLETE-01: **Blocker** (4+ fails: missing About, placeholder Contact, Coming Soon tools, no author)
-- ADS-AUTHOR-01: **Blocker** (anonymous footer)
-- Decision: **Not ready — site appears under construction**
-
-**Actual Result** (after audit):
-- ☐ Flagged correctly as Blocker
-- ☐ Specific issues identified
-- ☐ Actionable fixes suggested
-
----
-
-#### Rejected Case #2: Anonymous Publisher
-**URL**: (synthetic test case)
-**Issue**: No verifiable identity
-
-- About page: Missing entirely
-- Contact: Only generic contact form, no email
-- Author: No name, no bio, no credentials visible
-- Social links: None
-
-**Expected Skill Output**:
-- ADS-AUTHOR-01: **Blocker** (no verifiable identity)
-- Decision: **Not ready — publisher identity cannot be verified**
-
-**Actual Result**:
-- ☐ Flagged correctly as Blocker
-- ☐ Specific issues identified
-
----
-
-#### Rejected Case #3: Thin Content + Mass-Generated
-**URL**: (synthetic test case)
-**Issue**: 50 similar tool pages with <200 words each
-
-- Word count: 85-120 words per tool page
-- Template overlap: 82% across pages
-- Guides: 0 published guides
-- Unique value prop: None (generic converters)
-
-**Expected Skill Output**:
-- ADS-COMPLETE-02: **High Risk** (0 guides)
-- ADS-CONTENT-03: **High Risk** (pages <300 words)
-- ADS-CONTENT-ORIGINAL: **High Risk** (no unique value prop)
-
-**Actual Result**:
-- ☐ Flagged correctly as High/Blocker
-- ☐ Specific page examples cited
-
----
-
-#### Rejected Case #4: Scraped Content
-**URL**: (synthetic test case)
-**Issue**: Pages are copy-pasted from competitors
-
-- Text analysis: 90%+ overlap with top SERP results
-- No original data or examples
-- No added value
-
-**Expected Skill Output**:
-- ADS-CONTENT-OVERLAP: **High Risk** (>80% overlap)
-- ADS-CONTENT-02: **Blocker** (plagiarized)
-
-**Actual Result**:
-- ☐ Detected high overlap
-- ☐ Flagged as plagiarism risk
-
----
-
-#### Rejected Case #5: Ad-Heavy Design
-**URL**: (synthetic test case)
-**Issue**: Ads dominate above-the-fold
-
-- Above-fold: 4 ad slots, 100 words content (ad density 80%)
-- Content: Pushed below fold
-- CTAs: Aggressive ("Click here!", "Learn more!")
-
-**Expected Skill Output**:
-- ADS-CONTENT-AD-DENSITY: **High Risk** (ads >50% above fold)
-- ADS-CONTENT-05: **High Risk** (ads dominate)
-
-**Actual Result**:
-- ☐ Detected excessive ads
-- ☐ Flagged ad density
-
----
-
-#### Rejected Case #6: Incomplete Privacy Policy
-**URL**: (synthetic test case)
-**Issue**: Privacy policy missing or vague
-
-- Privacy page missing
-- OR: Privacy mentions cookies but not Google-specific
-- OR: No opt-out links
-
-**Expected Skill Output**:
-- ADS-PRIV-01 or ADS-PRIV-02: **Blocker/High** (incomplete disclosure)
-
-**Actual Result**:
-- ☐ Detected missing privacy details
-- ☐ Flagged as non-compliant
-
----
-
-#### Rejected Case #7: Deceptive Navigation
-**URL**: (synthetic test case)
-**Issue**: Fake buttons, misleading links
-
-- "Download" button actually redirects to ads
-- "Menu" links go to external sites
-- Misleading CTAs
-
-**Expected Skill Output**:
-- ADS-UX-03: **Blocker** (deceptive navigation)
-
-**Actual Result**:
-- ☐ Detected deceptive UX
-- ☐ Flagged as policy violation
-
----
-
-#### Rejected Case #8: Crawler Access Issues
-**URL**: (synthetic test case)
-**Issue**: Blocked by robots.txt or login wall
-
-- robots.txt: `Disallow: /` (blocks all crawlers)
-- OR: Pages require login
-- OR: WAF blocks automated requests
-
-**Expected Skill Output**:
-- ADS-CRAWL-02: **Blocker** (crawler blocked)
-
-**Actual Result**:
-- ☐ Detected crawler block
-- ☐ Flagged as inaccessible
-
----
-
-#### Rejected Case #9: Low-Authority Site
-**URL**: (synthetic test case)
-**Issue**: No trust signals, brand new domain
-
-- Domain age: <1 month
-- No social links, no about
-- No contact, no credibility
-- Content: Generic advice
-
-**Expected Skill Output**:
-- ADS-AUTHOR-01: **High Risk** (low trust)
-- ADS-CONTENT-ORIGINAL: **High Risk** (generic)
-
-**Actual Result**:
-- ☐ Detected new domain + weak signals
-- ☐ Flagged as low-trust
-
----
-
-#### Rejected Case #10: Prohibited Content
-**URL**: (synthetic test case)
-**Issue**: Content violates policies
-
-- Adult content
-- OR: Instructions for hacking
-- OR: Hate speech
-- OR: Dangerous products
-
-**Expected Skill Output**:
-- ADS-PUB-*: **Blocker** (policy violation)
-
-**Actual Result**:
-- ☐ Detected prohibited content
-- ☐ Flagged as unmonetizable
-
----
-
-### Part B: Sites Approved by Google (Should Pass Audit)
-
-#### Approved Case #1: Tech Blog (Well-Built)
-**URL**: (example pattern)
-**Signals**:
-- About page: Detailed author bio with 10+ years experience
-- Contact: Email + contact form visible
-- Guides: 8 published articles (1500+ words each)
-- Content: Original analysis, unique data, no plagiarism
-- Privacy: Comprehensive, mentions Google services
-- Ad density: Reasonable (40/60 ratio)
-- Trust: Author has Twitter (5k followers), LinkedIn (public)
-
-**Expected Skill Output**:
-- Decision: **Ready for application**
-- All critical checks: Pass
-- Minor flags: None or very few
-
-**Actual Result**:
-- ☐ Passed all pre-flight checks
-- ☐ Full audit shows 0 Blockers
-- ☐ Recommendation: Ready
-
----
-
-#### Approved Case #2: Small Business Site
-**URL**: (example pattern)
-**Signals**:
-- About page: Company info, team members, 5+ years in business
-- Contact: Phone + email visible
-- NAP: Consistent (Name, Address, Phone)
-- Content: 5 published service pages (1200+ words each)
-- Privacy: Standard, clear
-- Trust: Business registration visible, Google My Business linked
-- Pages: Complete (no Coming Soon)
-
-**Expected Skill Output**:
-- Decision: **Ready for application**
-- All checks: Pass
-
-**Actual Result**:
-- ☐ Passed pre-flight
-- ☐ 0 Blockers, minimal High risks
-- ☐ Recommendation: Ready
-
----
-
-#### Approved Case #3: Educational Site
-**URL**: (example pattern)
-**Signals**:
-- About: Real instructor, credentials (university affiliation)
-- Content: Original course guides, examples, case studies
-- Guides: 10+ published lessons (2000+ words each)
-- Uniqueness: Custom lessons, proprietary exercises
-- Privacy: Clear data usage policy
-- Navigation: Clean, complete
-
-**Expected Skill Output**:
-- Decision: **Ready for application**
-
-**Actual Result**:
-- ☐ Passed pre-flight
-- ☐ Content depth verified
-- ☐ Recommendation: Ready
-
----
-
-#### Approved Case #4-10: Variants
-(Pattern repeats: complete site, verifiable identity, 3-5+ guides, clear content value, no red flags)
-
----
-
-## How to Run Tests
-
-### Quick Test (Single Site)
+Anything decidable from the page or the HTTP response: robots.txt directives,
+status codes, word counts, template overlap, "coming soon"
+strings, broken navigation links. A script either finds these or does not, and
+the answer does not depend on judgement.
 
 ```bash
-# Run pre-flight check
-python scripts/check_completeness.py https://rejected-case-1.example.com
-
-# If pre-flight passes (no Blockers), run full audit
-/adsense-site-auditor
-URL: https://rejected-case-1.example.com
-Mode: Pre-application audit
-
-# Check if skill output matches expected (Blocker detected)
+uv venv && uv pip install -e '.[dev]'
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ruff check .
 ```
 
-### Batch Test (All 20 Cases)
+These tests are the ground truth for the deterministic layer. Every fixed
+parsing defect should arrive with the input that exposed it — `tests/test_robots.py`
+carries the real robots.txt of a live site that the previous implementation
+misreported, for exactly that reason.
+
+### Judgement checks — not unit-testable, and not yet measured
+
+"Useful, original content", "unique value proposition", "misleading
+representation". No script settles these, and a model's opinion about them is
+not ground truth. Their accuracy can only be measured against sites whose real
+AdSense outcome is known.
+
+## Measuring the judgement layer
+
+`claude plugin eval` is the eventual mechanism: it runs versioned cases against
+the skill and scores them, with a no-plugin baseline arm so the score delta shows
+what the skill contributes rather than what the model already knew.
 
 ```bash
-# Create test list
-cat > test_urls.txt << EOF
-https://rejected-1.example.com
-https://rejected-2.example.com
-...
-https://approved-1.example.com
-...
-EOF
-
-# Run script
-python scripts/test_accuracy.py test_urls.txt --output accuracy_report.txt
+claude plugin eval --eval-dir evals --ablation with-without
 ```
 
-### Expected Output Format
+It is gated behind early access and returns `plugin eval is currently in early
+access` on accounts without it, so do not plan around it being available. The
+fallback needs no special tooling and measures the same thing: run the audit
+against each site in a list, record the verdict, and compare it to the outcome
+Google actually gave. One row per site, `Ready` or `Not ready` against `approved`
+or `rejected`, is enough to fill the table below.
+
+Either way, what this repo does not yet have is **ground truth**: sites
+whose AdSense application actually succeeded or actually failed, with the
+rejection reason where one was given. Synthetic cases cannot supply this. A
+scenario written to describe an unfinished site will always be caught by a check
+written to find unfinished sites; that measures nothing but the author's
+consistency.
+
+There is now exactly one labelled outcome, recorded below, and the skill got
+it wrong. One case is not a measurement, so this skill still describes itself
+as unmeasured — but it is no longer describing itself as untested.
+
+## The one real outcome on record
+
+**smallwebapps.com — application rejected by Google.** Audited 2026-08-30 with
+the checks in this repo. The pre-flight gate returned "every check observed its
+condition and passed", so the skill would have advised submitting the
+application that Google refused.
+
+That is one false negative out of one labelled site. It is far too small a
+sample to be an accuracy figure and is not offered as one — this section exists
+because the honest count of real outcomes was zero before it, and is one now.
+
+What the run showed, in full detail in `EXAMPLES.md`:
+
+| | |
+| --- | --- |
+| Passed the gate on | About (742 words), Contact (820 words), 12 guides with 8 over 1200 words, no placeholders, 25 navigation links with none broken |
+| Missed | 48 tool pages with a median of 220 words; 45 of them below 300 |
+| Ruled out by measurement | duplication — 276 pairs compared, median similarity 0.134, maximum 0.327, none above the rubric's 0.40 safe band |
+
+The gate reads the home page, the trust pages and the guide count. On a
+catalogue site those are the best-written part and the catalogue is the site, so
+the sample was pointed away from the problem. `SKILL.md` now carries a fourth
+pre-flight item that samples the largest section instead.
+
+The lesson generalises past this one site: a gate that inspects only the pages a
+publisher wrote by hand will pass a site whose generated bulk is the reason for
+rejection.
+
+## Scenarios worth turning into cases
+
+These came from the previous file. They are plausible descriptions of failure
+modes and useful as a checklist of what to collect, but none of them is evidence:
+none corresponds to a site that was submitted to Google.
+
+**Expected to fail review**
+
+1. Unfinished site — missing About, placeholder Contact, "coming soon" tools
+2. Anonymous publisher — no name, no bio, no contact method
+3. Thin, mass-generated pages — 50 tool pages under 200 words, 82% template overlap
+4. Scraped content republished without commentary
+5. Ad-heavy layout — paid placement dominating above the fold
+6. Privacy policy that omits third-party cookies and ad personalisation
+7. Deceptive navigation — fake download buttons, links to nothing
+8. Crawler blocked — login wall, geoblock, or robots.txt exclusion
+9. Low-authority site with no original data or analysis
+10. Prohibited content under Google Publisher Policies
+
+**Expected to pass review**
+
+11. Well-built technical blog with named author and original writing
+12. Small business site with real contact details and service pages
+13. Educational site with substantive lessons
+
+To make any of these a real case, replace the description with a URL and the
+outcome Google actually returned.
+
+## Metric definitions
+
+Fix one convention and hold it: the **positive class is "site will be rejected
+by Google"**, because that is the event the audit exists to predict.
+
+| | Google rejected | Google approved |
+|---|---|---|
+| **Skill said Not ready** | True positive | False positive |
+| **Skill said Ready** | False negative | True negative |
 
 ```
-Test Results: AdSense Skill Accuracy
-====================================
-
-Rejected Cases (Should flag as NOT READY):
-✓ Case #1: Correctly flagged as Blocker (unfinished site)
-✓ Case #2: Correctly flagged as Blocker (no identity)
-✗ Case #3: MISSED - should have detected thin content
-...
-Rejected accuracy: 8/10 (80%)
-
-Approved Cases (Should pass audit):
-✓ Case #1: Correctly passed all checks
-✓ Case #2: Correctly passed all checks
-...
-Approved accuracy: 9/10 (90%)
-
-Overall Accuracy: (8 + 9) / 20 = 85%
-
-True Positives: 8 (correctly rejected)
-True Negatives: 9 (correctly approved)
-False Positives: 1 (incorrectly passed approved case)
-False Negatives: 1 (incorrectly approved rejected case)
-
-Target: 75-80% ✓ ACHIEVED
+Accuracy  = (TP + TN) / total
+Precision = TP / (TP + FP)   of the sites we called Not ready, how many really were
+Recall    = TP / (TP + FN)   of the sites Google rejected, how many we caught
 ```
 
----
+The previous file swapped the false-positive and false-negative definitions
+against its own stated positive class, so its precision and recall formulas
+computed neither quantity. Worth stating because the direction of the error has
+a cost: a false negative here is a site we told someone to submit that Google
+then rejected, which is the failure this skill is supposed to prevent.
 
-## Accuracy Metrics
+Set targets only once there is a denominator to put them over.
 
-### Definition
+## Known limitations
 
-- **True Positive (TP)**: Skill flagged rejected site as "Not Ready" ✓
-- **True Negative (TN)**: Skill passed approved site as "Ready" ✓
-- **False Positive (FP)**: Skill passed rejected site as "Ready" ✗
-- **False Negative (FN)**: Skill flagged approved site as "Not Ready" ✗
-
-### Formulas
-
-```
-Accuracy = (TP + TN) / Total
-Precision = TP / (TP + FP)  [of "Ready" verdicts, how many were actually approved]
-Recall = TP / (TP + FN)     [of rejected sites, how many did we catch]
-
-Target: Accuracy ≥ 75%, Recall ≥ 70%
-(Better to be overly cautious than approve something Google will reject)
-```
-
----
-
-## Validation Checklist
-
-After running all 20 test cases, check:
-
-- [ ] Accuracy ≥ 75%
-- [ ] Recall ≥ 70% (catches most rejected sites)
-- [ ] All Blockers identified with specific evidence
-- [ ] High risks explained with actionable fixes
-- [ ] No false negatives on obvious rejections (cases 1, 2, 5, 7, 8)
-- [ ] Approved cases pass without unnecessary flags
-
----
-
-## How to Add Your Own Test Cases
-
-1. Document the site (URL or synthetic case description)
-2. Run scripts:
-   ```bash
-   python scripts/check_completeness.py URL
-   python scripts/check_technical.py URL
-   python scripts/analyze_text_depth.py URL
-   ```
-3. Note the skill's output
-4. Add row to test results table
-5. Update accuracy metrics
-
----
-
-## Known Limitations
-
-1. **Synthetic test cases** may not capture all edge cases (use real rejected sites if possible)
-2. **Domain-specific content** (legal sites, medical sites) may need custom checks
-3. **International sites** may have different compliance rules
-4. **YouTube channels, Blogger blogs** have separate approval flows (not covered)
-
----
-
-## Continuous Improvement
-
-After each audit season (monthly/quarterly):
-- Collect rejection feedback from users
-- Test skill against new rejection patterns
-- Update checks if patterns change
-- Document false positives/negatives
-- Propose skill improvements
-
----
-
-**Last updated**: 2026-06-23  
-**Accuracy target**: 75-80%  
-**Target audience**: Sites ready for real AdSense application
+- No measured accuracy, as above.
+- Google's review is partly manual and its criteria are not published in full.
+  A perfect implementation of the documented rules still cannot guarantee a
+  verdict, and this skill should never claim otherwise.
+- Policies change. The reference snapshot is dated; live Google documentation
+  wins over anything stored here.
+- Hosted platforms (Blogger, YouTube) run separate approval flows not covered.
+- International and sector-specific rules (medical, legal, finance) may add
+  requirements beyond the general policy set.

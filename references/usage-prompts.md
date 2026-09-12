@@ -4,17 +4,22 @@ Use this file when the user asks how to invoke the skill or wants ready-to-copy 
 
 ## Skill Invocation
 
-Preferred explicit invocation:
+This is a Claude Code skill. Install it by placing the repository at
+`~/.claude/skills/adsense-site-auditor/`, which auto-loads it on the next
+session, then invoke it by name:
 
 ```text
-@adsense-site-auditor
+/adsense-site-auditor
 ```
 
-If the current Codex surface expects dollar-style skill invocation, use:
+Naming the task also works without the slash — the `description` in `SKILL.md`
+is what matches a request like "audit example.com for AdSense readiness" — but
+the explicit form is what to use when you want to be certain the skill fired
+rather than the model improvising.
 
-```text
-$adsense-site-auditor
-```
+The `@name` and `$name` forms this file used to document are Codex conventions.
+Neither invokes anything in Claude Code, and every worked example in this repo
+uses the slash form, so the two disagreed.
 
 ## Prompt Principles
 

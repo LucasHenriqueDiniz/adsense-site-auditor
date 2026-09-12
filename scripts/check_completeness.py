@@ -1,289 +1,285 @@
 #!/usr/bin/env python3
-"""
-AdSense Site Auditor: Completeness & Identity Checker
+from __future__ import annotations
 
-Detects "site unfinished" patterns and verifies publisher identity.
-Useful for ADS-COMPLETE-* and ADS-AUTHOR-* requirement checks.
-
-Usage:
-    python check_completeness.py <URL> [--repo PATH] [--output FILE]
-
-Example:
-    python check_completeness.py https://example.com --output completeness.txt
-    python check_completeness.py https://example.com --repo /path/to/repo
-"""
-
+import argparse
 import sys
-import requests
-from urllib.parse import urljoin
-from html.parser import HTMLParser
-import json
-from datetime import datetime
+from pathlib import Path
 
-class TextExtractor(HTMLParser):
-    """Extract text from HTML, focus on body content."""
-    def __init__(self):
-        super().__init__()
-        self.text = []
-        self.in_body = False
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-    def handle_starttag(self, tag, attrs):
-        if tag == 'body':
-            self.in_body = True
+from adsense_checks.completeness import (  # noqa: E402
+    CompletenessReport,
+    Finding,
+    check_completeness,
+    strong_placeholders,
+)
+from adsense_checks.http import DEFAULT_TIMEOUT, MAX_WAIT_SECONDS  # noqa: E402
+from adsense_checks.report import Line, exit_code, render  # noqa: E402
+from adsense_checks.status import Status, worst  # noqa: E402
 
-    def handle_endtag(self, tag):
-        if tag == 'body':
-            self.in_body = False
+__doc__ = """The pre-flight gate: unfinished site, trust pages, broken navigation.
 
-    def handle_data(self, data):
-        if self.in_body:
-            text = data.strip()
-            if text:
-                self.text.append(text)
+Serves ADS-COMPLETE-01, ADS-UX-05 and ADS-AUTHOR-02 in part.
 
-    def get_text(self):
-        return ' '.join(self.text)
+    python scripts/check_completeness.py https://example.com [-v]
 
-class CompletenessChecker:
-    def __init__(self, url, timeout=10):
-        self.url = url
-        self.timeout = timeout
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (compatible; AdSenseAuditor/1.0)'
-        })
+Requirement IDs stamped here: ADS-COMPLETE-01 (unfinished markers, broken
+navigation), ADS-UX-05 (the trust pages exist and are not stubs) and
+ADS-AUTHOR-02 (a contact channel exists in the HTML). ADS-AUTHOR-01 — a
+verifiable real name behind the site — is `judgement` and no script decides it.
+"""
 
-    def fetch_page(self, path):
-        """Fetch a page and return status, text."""
-        try:
-            url = urljoin(self.url, path)
-            resp = self.session.get(url, timeout=self.timeout)
-            return resp.status_code, resp.text
-        except Exception as e:
-            return None, str(e)
 
-    def extract_text(self, html):
-        """Extract body text from HTML."""
-        extractor = TextExtractor()
-        try:
-            extractor.feed(html)
-        except:
-            pass
-        return extractor.get_text()
+def _all_findings(report: CompletenessReport) -> list[Finding]:
+    """Every finding recorded anywhere in the report.
 
-    def check_placeholder_text(self, text):
-        """Check for common placeholder/unfinished phrases."""
-        placeholders = [
-            'will be added', 'coming soon', 'not yet', 'planned',
-            'under construction', 'draft', 'todo', 'tbd',
-            'work in progress', 'in development', 'placeholder',
-            'this section'
-        ]
+    `CompletenessReport.findings` holds only what the top-level check wrote. The
+    trust-page and navigation verdicts live on their own sub-reports, so
+    iterating the top-level list alone lost them — including the aggregate FAIL
+    that check_trust_pages raises when neither trust page exists. The report then
+    printed a verdict milder than `CompletenessReport.status`, which is this
+    package's own defect class one layer further out.
+    """
+    found = list(report.findings)
+    for sub in (report.trust, report.nav):
+        if sub is not None:
+            found.extend(sub.findings)
+    return found
 
-        text_lower = text.lower()
-        found = []
-        for phrase in placeholders:
-            if phrase in text_lower:
-                found.append(phrase)
-        return found
 
-    def check_site_complete(self):
-        """Check if site appears complete (not under construction)."""
-        result = {
-            "check": "site_completeness",
-            "status": "OK",
-            "issues": [],
-            "details": {}
-        }
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("url")
+    parser.add_argument("--nav-limit", type=int, default=25)
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args()
+    if args.nav_limit < 1:
+        # `--nav-limit 0` followed no link at all and still exited 0.
+        parser.error("--nav-limit must be at least 1")
+    if not 0 < args.timeout < MAX_WAIT_SECONDS:
+        # Both ends crashed the run with a bare traceback out of the socket
+        # layer. `--timeout 0` came back as urllib3's ValueError; `--timeout
+        # inf` — the plausible spelling of "no timeout", and what `Infinity` and
+        # `1e400` also become under `type=float` — came back as OverflowError
+        # from `socket.settimeout`. `fetch` forwards both on purpose (see
+        # adsense_checks/http.py) because they report a caller's bug and not an
+        # unreachable site, so the CLI is the layer that has to refuse them.
+        # Neither bound is rounded off: the floor is exclusive zero because a
+        # fraction of a second is a legitimate ask against a fast host, and the
+        # ceiling is the exact value the socket stops accepting. One chained
+        # comparison covers `--timeout nan` as well, which satisfies no
+        # comparison at all and so fails this one.
+        parser.error(f"--timeout must be greater than 0 and less than {MAX_WAIT_SECONDS}")
 
-        # Check Homepage
-        status, html = self.fetch_page('/')
-        if status != 200:
-            result["status"] = "FAIL"
-            result["issues"].append(f"Homepage returns {status}")
-            return result
+    report = check_completeness(args.url, nav_link_limit=args.nav_limit, timeout=args.timeout)
+    lines: list[Line] = []
 
-        text = self.extract_text(html)
+    # check_completeness returns before building either sub-report when the home
+    # page could not be read, and that is the only path that leaves them unset.
+    # Every line below has to say so instead of reporting on a document nobody
+    # read: "no unfinished markers found" over an unfetched page is a pass
+    # printed for a condition nobody observed.
+    home_unreadable = report.trust is None
+    unread = "not checked: the home page could not be read"
 
-        # Check for placeholder text on homepage
-        placeholders = self.check_placeholder_text(text)
-        if placeholders:
-            result["issues"].append(f"Homepage contains placeholder phrases: {', '.join(placeholders)}")
-            result["status"] = "WARNING"
-
-        # Check About page
-        about_status, about_html = self.fetch_page('/about')
-        if about_status == 404:
-            result["issues"].append("About page missing (404)")
-            result["details"]["about_page"] = "MISSING"
-        elif about_status == 200:
-            about_text = self.extract_text(about_html)
-            if len(about_text.split()) < 100:
-                result["issues"].append("About page is a stub (<100 words)")
-                result["details"]["about_page"] = "STUB"
-            else:
-                result["details"]["about_page"] = "OK"
-                # Check for placeholder on About
-                about_placeholders = self.check_placeholder_text(about_text)
-                if about_placeholders:
-                    result["issues"].append(f"About page contains placeholder: {', '.join(about_placeholders)}")
-        else:
-            result["details"]["about_page"] = f"ERROR ({about_status})"
-
-        # Check Contact page
-        contact_status, contact_html = self.fetch_page('/contact')
-        if contact_status == 404:
-            result["issues"].append("Contact page missing (404)")
-            result["details"]["contact_page"] = "MISSING"
-        elif contact_status == 200:
-            contact_text = self.extract_text(contact_html)
-            contact_placeholders = self.check_placeholder_text(contact_text)
-            if contact_placeholders:
-                result["issues"].append(f"Contact page placeholder: {', '.join(contact_placeholders)}")
-                result["details"]["contact_page"] = "PLACEHOLDER"
-            elif 'email' not in contact_text.lower() and '@' not in contact_text:
-                result["issues"].append("Contact page missing email/form")
-                result["details"]["contact_page"] = "NO_EMAIL"
-            else:
-                result["details"]["contact_page"] = "OK"
-        else:
-            result["details"]["contact_page"] = f"ERROR ({contact_status})"
-
-        # Severity: count issues
-        if len(result["issues"]) >= 4:
-            result["status"] = "FAIL"
-        elif len(result["issues"]) >= 2:
-            result["status"] = "HIGH_RISK"
-
-        return result
-
-    def check_publisher_identity(self):
-        """Check if publisher identity is verifiable."""
-        result = {
-            "check": "publisher_identity",
-            "status": "OK",
-            "issues": [],
-            "details": {}
-        }
-
-        # Fetch About page
-        status, html = self.fetch_page('/about')
-        if status == 404:
-            result["status"] = "FAIL"
-            result["issues"].append("About page missing")
-            return result
-
-        if status != 200:
-            result["status"] = "ERROR"
-            result["issues"].append(f"Cannot access About page ({status})")
-            return result
-
-        text = self.extract_text(html)
-
-        # Check for real name (heuristic: look for capital letter + space + capital letter pattern)
-        has_likely_name = False
-        words = text.split()
-        for i in range(len(words) - 1):
-            if words[i][0].isupper() and words[i+1][0].isupper() and len(words[i]) > 2 and len(words[i+1]) > 2:
-                has_likely_name = True
-                break
-
-        if not has_likely_name:
-            result["issues"].append("No clear real name found (not First Last format)")
-            result["status"] = "HIGH_RISK"
-        else:
-            result["details"]["has_name"] = True
-
-        # Check for contact info
-        has_contact = False
-        contact_signals = ['email@', 'contact', 'reach us', 'get in touch', 'linkedin', 'twitter', 'github']
-        text_lower = text.lower()
-        for signal in contact_signals:
-            if signal in text_lower:
-                has_contact = True
-                break
-
-        if not has_contact:
-            result["issues"].append("No contact method visible (email, form, or social)")
-            result["status"] = "HIGH_RISK"
-        else:
-            result["details"]["has_contact"] = True
-
-        # Check for credentials/expertise
-        credential_signals = ['years', 'experience', 'expert', 'professional', 'founder', 'ceo', 'engineer', 'developer', 'consultant']
-        has_credentials = any(signal in text_lower for signal in credential_signals)
-        result["details"]["has_credentials"] = has_credentials
-        if not has_credentials:
-            result["issues"].append("No visible credentials or expertise claimed")
-
-        return result
-
-    def run_all_checks(self):
-        """Run all completeness checks."""
-        return [
-            self.check_site_complete(),
-            self.check_publisher_identity(),
-        ]
-
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python check_completeness.py <URL> [--output FILE]")
-        sys.exit(1)
-
-    url = sys.argv[1]
-    output = None
-
-    for i, arg in enumerate(sys.argv[2:]):
-        if arg == '--output' and i + 1 < len(sys.argv) - 2:
-            output = sys.argv[i + 3]
-
-    print(f"Checking completeness for {url}...\n")
-
-    checker = CompletenessChecker(url)
-    results = checker.run_all_checks()
-
-    # Print results
-    for check in results:
-        status_symbol = {"OK": "✓", "HIGH_RISK": "⚠️ ", "FAIL": "❌", "ERROR": "❓", "WARNING": "⚠️ "}.get(check["status"], "?")
-        print(f"{status_symbol} {check['check']:25} | {check['status']:10}")
-
-        for issue in check.get('issues', []):
-            print(f"   → {issue}")
-
-        for key, val in check.get('details', {}).items():
-            print(f"   • {key}: {val}")
-
-        print()
-
-    # Risk summary
-    failures = sum(1 for c in results if c['status'] in ['FAIL', 'ERROR'])
-    high_risks = sum(1 for c in results if c['status'] == 'HIGH_RISK')
-
-    if failures > 0:
-        print(f"❌ {failures} FAIL checks — site appears unfinished or identity unverifiable")
-    elif high_risks > 0:
-        print(f"⚠️  {high_risks} HIGH_RISK checks — likely AdSense rejection")
+    # Placeholders on the home page. A Placeholder carries no status of its own —
+    # it is an observation, and the severity comes from its confidence, exactly as
+    # check_completeness derives it: a strong marker is a WARNING, a weak one an
+    # INFO that asks a human to look.
+    home = report.home_placeholders
+    if home_unreadable:
+        home_status = Status.ERROR
+    elif strong_placeholders(home):
+        home_status = Status.WARNING
+    elif home:
+        home_status = Status.INFO
     else:
-        print("✓ Completeness checks passed")
+        home_status = Status.OK
+    lines.append(
+        Line(
+            "home page is finished",
+            home_status,
+            [f"unfinished marker ({p.confidence}): {p.phrase!r}" for p in home]
+            or [unread if home_unreadable else "no unfinished markers found"],
+            requirement="ADS-COMPLETE-01",
+        )
+    )
 
-    # Save to file
-    if output:
-        with open(output, 'w', encoding='utf-8') as f:
-            f.write(f"AdSense Completeness Check Report\n")
-            f.write(f"URL: {url}\n")
-            f.write(f"Date: {datetime.now().isoformat()}\n\n")
+    # Trust pages, one line each, always carrying the evidence for the verdict.
+    # A Pass with nothing shown is what the reference forbids: the reader cannot
+    # tell an observed pass from a check that never ran.
+    for kind in ("about", "contact"):
+        # Saying "not found" about a page nobody looked for would be the false
+        # MISSING this package exists to prevent.
+        outcome = None if home_unreadable else report.trust.pages.get(kind)
+        if outcome is None:
+            lines.append(Line(f"{kind} page", Status.ERROR, [unread], requirement="ADS-UX-05"))
+            continue
+        evidence = [f"{outcome.url} ({outcome.words} words)"] if outcome.url else []
+        if outcome.reason:
+            evidence.append(outcome.reason)
+        # None for every MISSING and ERROR outcome: nothing was parsed, so there
+        # are no channels to list. `describe()` is the module's own rendering and
+        # covers mailto: and obfuscated addresses, which this line used to drop.
+        channels = outcome.channels
+        if channels is not None and channels.any_found:
+            evidence.append("contact: " + channels.describe())
+        lines.append(Line(f"{kind} page", outcome.status, evidence, requirement="ADS-UX-05"))
 
-            for check in results:
-                f.write(f"{check['check']}: {check['status']}\n")
-                for issue in check.get('issues', []):
-                    f.write(f"  • {issue}\n")
-                for key, val in check.get('details', {}).items():
-                    f.write(f"  {key}: {val}\n")
-                f.write("\n")
+    # ADS-AUTHOR-02 gets its own line. The docstring claimed it while every Line
+    # was stamped ADS-UX-05, so `grep ADS-AUTHOR-02` over a whole run returned
+    # nothing and SKILL.md's completeness gate read the requirement as unchecked.
+    contact = None if home_unreadable else report.trust.pages.get("contact")
+    channels = contact.channels if contact is not None else None
+    if home_unreadable:
+        lines.append(Line("contact channel", Status.ERROR, [unread], requirement="ADS-AUTHOR-02"))
+    elif channels is None:
+        lines.append(
+            Line(
+                "contact channel",
+                Status.MISSING,
+                [
+                    "no contact page was read, so the HTML offers nothing to inspect"
+                    f" ({contact.reason if contact else 'not checked'})"
+                ],
+                requirement="ADS-AUTHOR-02",
+            )
+        )
+    else:
+        found = channels.any_found
+        lines.append(
+            Line(
+                "contact channel",
+                Status.OK if found else Status.MISSING,
+                [channels.describe() if found else "no mailto:, address, form or profile link"]
+                # Presence is all the HTML can show. The requirement also asks
+                # that the channel RESOLVE, and probing it would mean sending
+                # mail or POSTing to a stranger, so that half stays unmeasured.
+                + ["reachability not tested: presence in the HTML is not delivery"],
+                requirement="ADS-AUTHOR-02",
+            )
+        )
 
-        print(f"\nReport saved to {output}")
+    # Navigation.
+    nav = report.nav
+    if nav is None:
+        lines.append(Line("navigation", Status.ERROR, [unread], requirement="ADS-COMPLETE-01"))
+    else:
+        evidence = [f"{link.url} -> HTTP {link.status_code}" for link in nav.broken]
+        # Printed per link and not as a group, unlike the line below, because
+        # what was compared differs from link to link and the reader is entitled
+        # to disbelieve "HTTP 200, and yet" without being shown the comparison.
+        # It says "unverified", never "broken": the same equality holds for a
+        # real page that renders the site's "nothing here" template.
+        evidence += [
+            f"{link.url} -> HTTP {link.status_code}, unverified: {link.reason}"
+            for link in nav.same_as_not_found
+        ]
+        # Unresolved links raise the status to ERROR and used to contribute no
+        # evidence, so the fallback fired and an [ERR] line read "none broken".
+        evidence += [f"{link.url} -> unresolved ({link.reason})" for link in nav.unresolved]
+        # Printed per link, like same_as_not_found and unlike the group line
+        # below, because the directory a link landed in differs from link to
+        # link — it is a fact about the request, not about the host.
+        evidence += [
+            f"{link.url} -> HTTP {link.status_code}, unverified: {link.reason}"
+            for link in nav.unmeasured
+        ]
+        if nav.unverified:
+            # One line for the group: the reason is a single observation about
+            # the host, not a fact about each link. Printing it per link would
+            # bury the URLs under the same sentence repeated.
+            evidence.append(
+                f"{len(nav.unverified)} link(s) answered HTTP 200 but were shown to be neither "
+                f"working nor broken — {nav.unverified_reason} — and are counted as neither: "
+                + ", ".join(link.url for link in nav.unverified[:5])
+            )
+        if nav.truncated:
+            # "25 links followed, none broken" over a 32-link menu with three
+            # 404s past the limit. The count is a lower bound and has to say so
+            # on the line, not only in a finding further down.
+            evidence.append(
+                f"{nav.checked} of {nav.found} links followed (limit {args.nav_limit});"
+                " the rest were not checked, so the broken count is a lower bound"
+            )
+        elif not evidence:
+            # A pass has to name what makes it a pass. "None broken" over a host
+            # that answers 200 for every URL it does not have is the soft-404
+            # hole, so the line states which of the two things was observed.
+            # "honest" is the only regime with an entry, and that is the point.
+            # It used to also claim, for "fingerprint", that "none of these
+            # links served the page it answers with" — a proof the code cannot
+            # give, since a host with two not-found templates (a CMS mounted at
+            # /blog/) matches neither and exits 0 under that sentence. On any
+            # host that answers 200 for a URL it does not have, every 200 is now
+            # recorded as unverified, so this branch is unreachable there:
+            # `evidence` is never empty. Nothing left to word carefully.
+            proof = {
+                "honest": "; every directory they came from answers 404 or 410 for a URL that does "
+                          "not exist, so HTTP 200 from it means the page is there",
+            }.get(nav.not_found_regime, "")
+            evidence = [f"all {nav.checked} navigation links followed, none broken{proof}"]
+        lines.append(
+            Line(
+                "navigation",
+                nav.status,
+                evidence,
+                # `lead_nowhere` used to sit here beside `http_4xx_5xx` carrying
+                # a different number, the difference being the links this check
+                # had merely inferred were dead. It no longer infers any, so the
+                # two would now be the same column printed twice.
+                {"found": nav.found, "checked": nav.checked,
+                 "http_4xx_5xx": nav.count,
+                 "same_as_not_found": len(nav.same_as_not_found),
+                 "unverified": len(nav.unverified),
+                 # Its own column rather than folded into `unverified`: the two
+                 # are the same weight but not the same fact, and a run where
+                 # this one is non-zero is telling the operator that part of
+                 # their menu answered from a directory this run never measured.
+                 "unmeasured": len(nav.unmeasured),
+                 # The directories the per-run ceiling refused, spelled out. A
+                 # count alone cannot tell the operator where to point a second
+                 # run, and it cannot separate a ceiling that bit from a menu
+                 # that redirected off-origin, which needs no second run at all.
+                 "refused_directories": nav.refused_directories,
+                 # The regime of the ANCHOR directory only — the one this audit
+                 # invents URLs in. Named per directory in the evidence above,
+                 # because the other directories a run measures can disagree
+                 # with this one and usually do on a subdirectory install.
+                 "anchor_not_found_regime": nav.not_found_regime or "not probed"},
+                # Counting links that 404 is ADS-COMPLETE-01's "site looks
+                # abandoned", which is what count_broken_nav_links' own docstring
+                # says. ADS-UX-01 is a `judgement` requirement about readability,
+                # alignment and dropdowns — stamping it here printed a PASS on a
+                # requirement three quarters of which nobody looked at.
+                "ADS-COMPLETE-01",
+            )
+        )
 
-    return results
+    # `getattr(finding, "message", finding)` used to stand here, defending
+    # against a shape `Finding` cannot have. What it actually hid was the
+    # sub-reports being skipped entirely.
+    #
+    # One line for all of them, not one line each: `render` counts its lines as
+    # checks, so a finding per line made four checks tally as five, or as seven
+    # when both trust pages were missing. Every message is still shown and the
+    # worst status still reaches the verdict — this changes what is counted,
+    # never what is decided.
+    findings = _all_findings(report)
+    if findings:
+        lines.append(
+            Line(
+                "recorded findings",
+                worst(*(f.status for f in findings)),
+                [f"[{f.status.name}] {f.message}" for f in findings],
+            )
+        )
 
-if __name__ == '__main__':
-    main()
+    text, overall = render(f"Completeness — {args.url}", lines, verbose=args.verbose)
+    print(text)
+    return exit_code(overall)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

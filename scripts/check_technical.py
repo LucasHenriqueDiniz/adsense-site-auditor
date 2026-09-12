@@ -1,308 +1,288 @@
 #!/usr/bin/env python3
+"""robots.txt, sitemap, availability and reachability for one site.
+
+Serves ADS-CRAWL-01, ADS-CRAWL-02, ADS-CRAWL-06 and ADS-CRAWL-07. ADS-CRAWL-06
+names four things and this script observes three of them — DNS, TLS and response
+time; see `_availability` for why the fourth is reported as a gap rather than
+decided. Security headers are not checked by anything in this repo.
+
+Thin wrapper: every decision lives in adsense_checks/, where it is unit-tested.
+Exits non-zero whenever a check did not observe its condition — a site this
+script could not read must not be reported as a site that passed.
+
+    python scripts/check_technical.py https://example.com [-v]
 """
-AdSense Site Auditor: Technical Checks
 
-Verifies robots.txt, sitemap.xml, redirects, security headers, and crawler accessibility.
-Useful for ADS-CRAWL-* and ADS-SITE-* requirements.
 
-Usage:
-    python check_technical.py <URL> [--output FILE]
+from __future__ import annotations
 
-Example:
-    python check_technical.py https://example.com --output technical_report.txt
-"""
-
+import argparse
 import sys
-import requests
-from urllib.parse import urljoin, urlparse
-import xml.etree.ElementTree as ET
+from pathlib import Path
 
-class TechnicalChecker:
-    def __init__(self, url, timeout=10):
-        self.url = url
-        self.domain = urlparse(url).netloc
-        self.base_url = f"{urlparse(url).scheme}://{self.domain}"
-        self.timeout = timeout
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1)'
-        })
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-    def check_robots_txt(self):
-        """Check if robots.txt exists and if Googlebot is allowed."""
-        result = {
-            "check": "robots.txt",
-            "status": "OK",
-            "issues": [],
-            "details": {}
-        }
+from adsense_checks.http import (  # noqa: E402
+    DEFAULT_TIMEOUT,
+    MAX_WAIT_SECONDS,
+    Fetch,
+    fetch,
+    join_url,
+    split_url,
+)
+from adsense_checks.report import Line, exit_code, render  # noqa: E402
+from adsense_checks.robots import (  # noqa: E402
+    ADSBOT_CRAWLER,
+    ADSENSE_CRAWLER,
+    INDEX_CRAWLER,
+    Robots,
+    blocks_everything,
+    parse_robots,
+)
+from adsense_checks.sitemap import check_sitemap, verify_sample_urls  # noqa: E402
+from adsense_checks.status import Status, escalate  # noqa: E402
 
-        url = f"{self.base_url}/robots.txt"
-        try:
-            resp = self.session.get(url, timeout=self.timeout)
+# A review threshold, not a Google policy line: AdSense publishes no response-time
+# limit. Stated here rather than inlined so the reader of a WARNING can see what
+# it was measured against. `Fetch.elapsed_ms` covers the whole redirect chain.
+SLOW_RESPONSE_MS = 2500
 
-            result["details"]["http_status"] = resp.status_code
+_REQ_ROBOTS = "ADS-CRAWL-02"
 
-            if resp.status_code == 200:
-                content = resp.text.lower()
 
-                # Check for Googlebot blocks
-                if 'user-agent:' in content:
-                    if '*' in content and 'disallow: /' in content:
-                        result["status"] = "FAIL"
-                        result["issues"].append("robots.txt blocks all crawlers with Disallow: /")
+def _robots(base: str, timeout: int) -> tuple[Line, Robots]:
+    """ADS-CRAWL-02 — read robots.txt and say whether it shuts a crawler out.
 
-                    if 'mediapartners-google' in content:
-                        if 'mediapartners-google' in content.split('user-agent:')[-1]:
-                            if 'disallow:' in content:
-                                result["issues"].append("robots.txt may block Mediapartners-Google (AdSense crawler)")
-                                result["status"] = "WARNING"
+    Every return carries the requirement ID. Only the success path used to, so a
+    503 or a refused connection printed with an empty requirement column, and
+    SKILL.md's completeness gate — which reconciles the IDs a report prints
+    against the reference — read a failed ADS-CRAWL-02 as one never checked.
 
-                result["details"]["found"] = True
-                result["details"]["snippet"] = content[:300]
-            else:
-                result["status"] = "MISSING"
-                result["issues"].append(f"robots.txt returns {resp.status_code}")
+    What arrives is classified before it is parsed, the way crawl._load_robots
+    already does it. Anything that is not a 200 carrying a non-HTML body used to
+    fall straight into `parse_robots`, and an HTML error page contains no
+    `user-agent:` line, so a 403 and a SPA catch-all both came out as "everything
+    is allowed" — an assertion about permissions read off a document that was not
+    robots.txt, with the HTTP status printed nowhere.
+    """
+    url = join_url(base, "/robots.txt") or f"{base} (unresolvable)"
+    # robots.txt is only ever read from the origin root. Appending to the URL as
+    # typed asked a subdirectory install for `/blog/robots.txt`, took the 404 as
+    # "absent: everything is crawlable", and reported a site as fully open
+    # without having fetched the file that governs it.
+    response = fetch(url, timeout=timeout)
+    code = response.status_code
 
-        except Exception as e:
-            result["status"] = "ERROR"
-            result["issues"].append(str(e))
+    def unreadable(status: Status, note: str) -> tuple[Line, Robots]:
+        return Line("robots.txt", status, [note], {"url": url}, _REQ_ROBOTS), Robots(missing=True)
 
-        return result
+    if response.error is not None:
+        return unreadable(Status.ERROR, f"{url} could not be fetched: {response.error}")
+    if code == 429 or (code is not None and code >= 500):
+        # Google reads 429 and 5xx as a temporary error and stops crawling the
+        # whole site rather than assuming permission. Worse than a 404.
+        return unreadable(Status.FAIL, f"{url} returned HTTP {code}: crawling stops site-wide")
+    if code is not None and code >= 400:
+        # Every other 4xx, 404 included: Google crawls as if the file did not
+        # exist. Not a failure, but the code is named — "absent" and "we were
+        # refused" are different facts and the report used to print neither.
+        detail = "absent" if code == 404 else f"unreadable (HTTP {code})"
+        return unreadable(Status.INFO, f"{url} {detail}: Google crawls as if unrestricted")
+    if "html" in response.headers.get("content-type", "").lower():
+        # A catch-all route answering 200 with the app shell. An HTML document
+        # holds no `user-agent:` line, so parsing it read as "allow everything"
+        # for the wrong reason.
+        return unreadable(Status.INFO, f"{url} served as HTML (soft 404): no rules were read")
 
-    def check_sitemap(self):
-        """Check if sitemap.xml exists and is valid."""
-        result = {
-            "check": "sitemap.xml",
-            "status": "OK",
-            "issues": [],
-            "details": {}
-        }
+    robots = parse_robots(response.text)
+    findings: list[str] = []
+    status = Status.OK
+    for crawler, label in (
+        (ADSENSE_CRAWLER, "the AdSense crawler"),
+        (INDEX_CRAWLER, "Googlebot"),
+        (ADSBOT_CRAWLER, "AdsBot"),
+    ):
+        if blocks_everything(robots, crawler):
+            status = escalate(status, Status.FAIL)
+            findings.append(f"{crawler} is disallowed at /: {label} cannot read this site")
+    if not findings:
+        findings.append("Mediapartners-Google, Googlebot and AdsBot are all allowed at /")
+    return Line(
+        "robots.txt",
+        status,
+        findings,
+        {"url": url, "sitemaps": robots.sitemaps, "groups": len(robots.groups)},
+        _REQ_ROBOTS,
+    ), robots
 
-        url = f"{self.base_url}/sitemap.xml"
-        try:
-            resp = self.session.get(url, timeout=self.timeout)
-            result["details"]["http_status"] = resp.status_code
 
-            if resp.status_code == 200:
-                try:
-                    root = ET.fromstring(resp.text)
-                    # Count URLs in sitemap
-                    urls = root.findall('.//{http://www.sitemaps.org/schemas/sitemap/0.9}loc')
-                    result["details"]["url_count"] = len(urls)
-                    result["details"]["found"] = True
+def _availability(home: Fetch) -> Line:
+    """ADS-CRAWL-06 — DNS, TLS and response time, from the one request made.
 
-                    if len(urls) == 0:
-                        result["status"] = "WARNING"
-                        result["issues"].append("sitemap.xml found but contains no URLs")
-                    else:
-                        result["details"]["first_urls"] = [u.text for u in urls[:3]]
+    The requirement names four things: DNS, TLS, uptime and server response
+    times. Three are decidable from a single response and are decided here.
+    Uptime is not: reliability over time needs sampling over time, and an audit
+    run makes one request. That quarter is reported as INFO instead of being left
+    implicit, because what stood here before was a scheme test carrying the whole
+    requirement ID and printing PASS — three quarters of a requirement asserted
+    without having been looked at, which is the defect class this package exists
+    to remove.
 
-                except ET.ParseError:
-                    result["status"] = "WARNING"
-                    result["issues"].append("sitemap.xml is not valid XML")
+    INFO and not MISSING on purpose: MISSING is not a pass and would make this
+    check impossible to ever satisfy, so the script could never exit 0 and would
+    stop being usable as a gate. The gap is named in the output either way.
+    """
+    status = Status.OK
+    findings: list[str] = []
 
-            else:
-                result["status"] = "MISSING"
-                result["issues"].append(f"sitemap.xml returns {resp.status_code}")
-
-        except Exception as e:
-            result["status"] = "ERROR"
-            result["issues"].append(str(e))
-
-        return result
-
-    def check_redirects(self):
-        """Check if homepage redirects are minimal."""
-        result = {
-            "check": "redirects",
-            "status": "OK",
-            "issues": [],
-            "details": {}
-        }
-
-        try:
-            resp = self.session.head(self.url, timeout=self.timeout, allow_redirects=True)
-            history_count = len(resp.history)
-            result["details"]["redirect_count"] = history_count
-            result["details"]["final_url"] = resp.url
-
-            if history_count > 2:
-                result["status"] = "WARNING"
-                result["issues"].append(f"Excessive redirects: {history_count} hops")
-
-            if resp.status_code >= 400:
-                result["status"] = "FAIL"
-                result["issues"].append(f"Final response is {resp.status_code}")
-
-        except Exception as e:
-            result["status"] = "ERROR"
-            result["issues"].append(str(e))
-
-        return result
-
-    def check_security_headers(self):
-        """Check for security headers (informational)."""
-        result = {
-            "check": "security_headers",
-            "status": "OK",
-            "issues": [],
-            "details": {}
-        }
-
-        try:
-            resp = self.session.head(self.url, timeout=self.timeout)
-
-            headers_to_check = {
-                'Content-Security-Policy': 'CSP',
-                'X-Frame-Options': 'Clickjacking protection',
-                'X-Content-Type-Options': 'MIME-sniffing protection',
-                'Strict-Transport-Security': 'HTTPS enforcement',
-            }
-
-            for header, name in headers_to_check.items():
-                if header in resp.headers:
-                    result["details"][name] = resp.headers[header][:50] + "..."
-                else:
-                    result["issues"].append(f"Missing {name} header ({header})")
-
-            if len(result["issues"]) > 0:
-                result["status"] = "WARNING"
-
-        except Exception as e:
-            result["status"] = "ERROR"
-            result["issues"].append(str(e))
-
-        return result
-
-    def check_https(self):
-        """Check if site uses HTTPS."""
-        result = {
-            "check": "https",
-            "status": "OK",
-            "issues": []
-        }
-
-        if not self.url.startswith("https://"):
-            result["status"] = "WARNING"
-            result["issues"].append("Site does not use HTTPS")
-        else:
-            try:
-                resp = self.session.get(self.url, timeout=self.timeout, verify=True)
-                result["details"] = {"ssl_verified": True}
-            except requests.exceptions.SSLError:
-                result["status"] = "FAIL"
-                result["issues"].append("SSL certificate verification failed")
-            except requests.exceptions.RequestException as e:
-                result["status"] = "ERROR"
-                result["issues"].append(str(e))
-
-        return result
-
-    def check_dns_and_uptime(self):
-        """Quick check for DNS resolution and basic connectivity."""
-        result = {
-            "check": "dns_and_uptime",
-            "status": "OK",
-            "issues": []
-        }
-
-        try:
-            resp = self.session.get(self.url, timeout=self.timeout)
-            result["details"] = {
-                "http_status": resp.status_code,
-                "response_time_ms": round(resp.elapsed.total_seconds() * 1000, 2)
-            }
-
-            if resp.status_code >= 500:
-                result["status"] = "FAIL"
-                result["issues"].append(f"Server returned {resp.status_code}")
-
-            if result["details"]["response_time_ms"] > 5000:
-                result["status"] = "WARNING"
-                result["issues"].append(f"Slow response: {result['details']['response_time_ms']}ms")
-
-        except requests.exceptions.ConnectionError:
-            result["status"] = "FAIL"
-            result["issues"].append("DNS or connection error")
-        except Exception as e:
-            result["status"] = "ERROR"
-            result["issues"].append(str(e))
-
-        return result
-
-    def run_all_checks(self):
-        """Run all technical checks."""
-        checks = [
-            self.check_dns_and_uptime(),
-            self.check_https(),
-            self.check_robots_txt(),
-            self.check_sitemap(),
-            self.check_redirects(),
-            self.check_security_headers(),
-        ]
-        return checks
-
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python check_technical.py <URL> [--output FILE]")
-        sys.exit(1)
-
-    url = sys.argv[1]
-    output = None
-
-    for i, arg in enumerate(sys.argv[2:]):
-        if arg == '--output' and i + 1 < len(sys.argv) - 2:
-            output = sys.argv[i + 3]
-
-    print(f"Running technical checks on {url}...\n")
-
-    checker = TechnicalChecker(url)
-    results = checker.run_all_checks()
-
-    # Print results
-    for check in results:
-        status_symbol = {"OK": "✓", "WARNING": "⚠️ ", "FAIL": "❌", "ERROR": "❓", "MISSING": "⚠️ "}.get(check["status"], "?")
-        print(f"{status_symbol} {check['check']:20} | {check['status']:10}")
-
-        for issue in check.get('issues', []):
-            print(f"   → {issue}")
-
-        for key, val in check.get('details', {}).items():
-            if isinstance(val, str) and len(val) > 60:
-                val = val[:60] + "..."
-            print(f"   • {key}: {val}")
-
-        print()
-
-    # Risk summary
-    failures = sum(1 for c in results if c['status'] in ['FAIL', 'ERROR'])
-    warnings = sum(1 for c in results if c['status'] == 'WARNING')
-
-    if failures > 0:
-        print(f"⚠️  {failures} critical issues found — may impact crawlability")
-    elif warnings > 0:
-        print(f"⚠️  {warnings} warnings — review recommended")
+    # The scheme of the response, not of the string the caller typed.
+    if home.downgraded_to_http:
+        status = escalate(status, Status.FAIL)
+        findings.append(f"TLS: redirect chain ends on http: {home.final_url}")
+    elif not home.is_https:
+        status = escalate(status, Status.WARNING)
+        findings.append(f"TLS: final URL is not HTTPS: {home.final_url}")
     else:
-        print("✓ All technical checks passed")
+        findings.append("TLS: served over HTTPS")
 
-    # Save to file
-    if output:
-        with open(output, 'w', encoding='utf-8') as f:
-            f.write(f"AdSense Technical Check Report\n")
-            f.write(f"URL: {url}\n\n")
+    # DNS resolved, or `fetch` would have come back with an error and this
+    # function would not have been called. Worth stating: it is one of the four.
+    findings.append(f"DNS: host {split_url(home.final_url or home.url).netloc} resolved")
 
-            for check in results:
-                f.write(f"{check['check']}: {check['status']}\n")
-                for issue in check.get('issues', []):
-                    f.write(f"  • {issue}\n")
-                for key, val in check.get('details', {}).items():
-                    f.write(f"  {key}: {val}\n")
-                f.write("\n")
+    if home.status_code is not None and home.status_code >= 400:
+        # The timing of an error page is not the site's response time. This
+        # function runs in the `else` of `home.error is None`, which is as true
+        # for a 500 as for a 200, so it was answering three quarters of
+        # ADS-CRAWL-06 about a response the same report was failing.
+        status = escalate(status, Status.MISSING)
+        findings.append(
+            f"response time: not measured — the home page answered HTTP"
+            f" {home.status_code}, so there is no served page to time"
+        )
+    elif home.elapsed_ms is None:
+        status = escalate(status, Status.ERROR)
+        findings.append("response time: not measured")
+    elif home.elapsed_ms > SLOW_RESPONSE_MS:
+        status = escalate(status, Status.WARNING)
+        findings.append(
+            f"response time: {home.elapsed_ms:.0f}ms for the whole chain, over the"
+            f" {SLOW_RESPONSE_MS}ms review threshold"
+        )
+    else:
+        findings.append(f"response time: {home.elapsed_ms:.0f}ms for the whole chain")
 
-        print(f"\nReport saved to {output}")
+    status = escalate(status, Status.INFO)
+    findings.append(
+        "uptime: not observed — one request cannot establish reliability over time."
+        " This quarter of ADS-CRAWL-06 needs monitoring, not an audit run"
+    )
+    return Line("availability", status, findings, requirement="ADS-CRAWL-06")
 
-    return results
 
-if __name__ == '__main__':
-    main()
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("url")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    args = parser.parse_args()
+    if not 0 < args.timeout < MAX_WAIT_SECONDS:
+        # Both ends crashed the run with a bare traceback out of the socket
+        # layer. `--timeout 0` came back as urllib3's ValueError; `--timeout
+        # inf` — the plausible spelling of "no timeout", and what `Infinity` and
+        # `1e400` also become under `type=float` — came back as OverflowError
+        # from `socket.settimeout`. `fetch` forwards both on purpose (see
+        # adsense_checks/http.py) because they report a caller's bug and not an
+        # unreachable site, so the CLI is the layer that has to refuse them.
+        # Neither bound is rounded off: the floor is exclusive zero because a
+        # fraction of a second is a legitimate ask against a fast host, and the
+        # ceiling is the exact value the socket stops accepting. One chained
+        # comparison covers `--timeout nan` as well, which satisfies no
+        # comparison at all and so fails this one.
+        parser.error(f"--timeout must be greater than 0 and less than {MAX_WAIT_SECONDS}")
+
+    home = fetch(args.url, timeout=args.timeout)
+    lines: list[Line] = []
+
+    if home.error is not None:
+        lines.append(Line("reachable", Status.ERROR, [home.error], requirement="ADS-CRAWL-01"))
+        # The availability line used to live only in the `else`, so on every
+        # error path ADS-CRAWL-06 was not reported as ERROR — it was not reported
+        # at all, and a gate reconciling printed IDs against the reference read it
+        # as a requirement nobody checked. Exactly the defect `_robots` was fixed
+        # for, left standing one function over.
+        lines.append(
+            Line(
+                "availability",
+                Status.ERROR,
+                [f"nothing answered, so DNS, TLS and response time are unobserved: {home.error}"],
+                requirement="ADS-CRAWL-06",
+            )
+        )
+    else:
+        lines.append(
+            Line(
+                "reachable",
+                home.status,
+                [f"HTTP {home.status_code} in {home.elapsed_ms:.0f}ms"],
+                {"final_url": home.final_url, "redirects": len(home.redirect_chain)},
+                "ADS-CRAWL-01",
+            )
+        )
+        lines.append(_availability(home))
+
+    # One origin for every check below, resolved once: the one that actually
+    # answered. robots.txt and the sitemap both live at the root of the origin
+    # SERVING the site, and on a host sending apex to www the typed URL names a
+    # different one. Deriving the base twice is what let the two halves of a
+    # single report ask two different hosts. Same rule as crawl._load_robots;
+    # the typed URL is the fallback for when nothing answered at all.
+    base = home.final_url or args.url
+
+    robots_line, robots = _robots(base, args.timeout)
+    lines.append(robots_line)
+
+    sitemap = check_sitemap(base, robots=robots, timeout=args.timeout)
+    # ADS-CRAWL-07 asks that the advertised URLs answer 200. `verify_sample_urls`
+    # existed for it and had no caller outside the tests, so the check printed
+    # PASS having never fetched one of them — the very thing `_availability`
+    # refuses to do for ADS-CRAWL-06, one function over.
+    sample = verify_sample_urls(sitemap, timeout=args.timeout)
+    # `reasons` is empty when nothing went wrong, and a bare `[PASS] sitemap` line
+    # leaves the reader unable to tell "observed and correct" from "never ran" —
+    # the guard crawl_site.py and check_completeness.py both install, and the one
+    # script that lacked it.
+    if sample.checked:
+        bad = [f"{u} -> HTTP {c}" for u, st, c in sample.checked if st is not Status.OK]
+        sitemap.status = escalate(sitemap.status, sample.status)
+        sitemap.note(
+            f"{sample.ok_count} of {len(sample.checked)} sampled URL(s) answered 200"
+            + (f"; {', '.join(bad[:3])}" if bad else "")
+        )
+    sitemap_findings = list(sitemap.reasons) or [
+        f"{sitemap.kind} at {sitemap.sitemap_url}, found via {sitemap.discovered_via}:"
+        f" {sitemap.url_count} URL(s)"
+        + (" (lower bound, truncated)" if sitemap.url_count_is_lower_bound else "")
+    ]
+    lines.append(
+        Line(
+            "sitemap",
+            sitemap.status,
+            sitemap_findings,
+            {
+                "sitemap_url": sitemap.sitemap_url,
+                "discovered_via": sitemap.discovered_via,
+                "kind": sitemap.kind,
+                "url_count": sitemap.url_count,
+                "child_sitemaps": sitemap.child_sitemap_count,
+            },
+            "ADS-CRAWL-07",
+        )
+    )
+
+    text, overall = render(f"Technical checks — {args.url}", lines, verbose=args.verbose)
+    print(text)
+    return exit_code(overall)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
