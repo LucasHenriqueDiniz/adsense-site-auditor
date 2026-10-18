@@ -60,6 +60,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
+from typing import NamedTuple
 
 import requests
 
@@ -174,6 +175,12 @@ WHOLE_PAGE_ELEMENTS = frozenset({"#document", "body", "html"})
 # given one of these turns out to be. An `<article>`'s own `<header>` carries
 # the title and the byline, and that is the article, not the page.
 BOILERPLATE_ELEMENTS = frozenset({"aside", "footer", "header", "nav"})
+
+# A heading names a section of the page's outline. Inside a region widened to
+# reach the title, a branch that holds one is a section of the page; a plain
+# branch before the title or after the block could be content or page, and
+# `_beside_the_content` does not pretend to know which.
+HEADING_ELEMENTS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
 
 # Opening one of these implicitly closes an open sibling of the same name:
 # `<p>a<p>b` is two paragraphs, not a nested one. Only affects which container
@@ -394,24 +401,140 @@ def _ancestors(node: _Node | None):
         node = node.parent
 
 
-def _page_title(doc: _Parser) -> _Node | None:
-    """The page's own `<h1>`: the first one that has words and is not furniture.
+def _link_only(roots: list[_Node]) -> frozenset[_Node]:
+    """The largest subtrees under `roots` whose every word is link text.
 
-    A logo wrapped in `<h1>` inside the site header names the site, not the
-    page. Anchoring on it would stretch the region up to whatever wraps the
-    header, which is the page wrapper this module keeps refusing to measure.
+    Link text is navigation by another name. A menu, a widget list, a grid of
+    related-tool cards and a logo linked to the home page are text a reader
+    clicks rather than reads, and none of them needs a `<nav>` around it to be
+    that. The rule is all or nothing on purpose: a share of link text —
+    readability's link density — needs a cutoff, and any cutoff here would be
+    invented, while "every word" needs none. "Hyper<a>text</a>" has a word
+    outside the link, so its subtree is not link-only.
+
+    One walk down records which text sits inside an `<a>`; one walk back up
+    says, per subtree, whether it has words inside links and words outside
+    them. Both iterative, for the same malformed pages `_collect` is.
+    """
+    order: list[tuple[_Node, bool]] = []
+    stack = [(root, any(above.tag == "a" for above in _ancestors(root))) for root in roots]
+    while stack:
+        node, linked = stack.pop()
+        order.append((node, linked))
+        stack.extend(
+            (child, linked or child.tag == "a")
+            for child in node.content
+            if isinstance(child, _Node) and not child.dropped
+        )
+    # Reversed pre-order visits every child before its parent.
+    in_links: dict[_Node, bool] = {}
+    outside_links: dict[_Node, bool] = {}
+    for node, linked in reversed(order):
+        worded = any(isinstance(item, str) and _WORD.search(item) for item in node.content)
+        children = [c for c in node.content if isinstance(c, _Node) and c in in_links]
+        in_links[node] = (linked and worded) or any(in_links[c] for c in children)
+        outside_links[node] = (not linked and worded) or any(outside_links[c] for c in children)
+
+    found: set[_Node] = set()
+    pending = list(roots)
+    while pending:
+        node = pending.pop()
+        if in_links[node] and not outside_links[node]:
+            found.add(node)
+            continue
+        pending.extend(c for c in node.content if isinstance(c, _Node) and c in in_links)
+    return frozenset(found)
+
+
+def _page_title(doc: _Parser) -> _Node | None:
+    """The page's own `<h1>`: the first one with words that is neither furniture
+    nor a link.
+
+    A logo wrapped in `<h1>` names the site, not the page. Anchoring on it
+    stretches the region up to whatever wraps the header, which is the page
+    wrapper this module keeps refusing to measure. Inside a `<header>` the
+    furniture says so. Inside `<div id="header">` nothing does, except that a
+    logo is a link home: `<h1><a href="/">Brand</a></h1>` is link-only, and a
+    page's title is not.
     """
     body = _find_body(doc)
     furniture = _furniture(body)
     for node in _iter_elements(body):
         if node.tag != "h1" or word_count(_collect(node)) == 0:
             continue
-        if not any(above in furniture for above in _ancestors(node)):
-            return node
+        if any(above in furniture for above in _ancestors(node)):
+            continue
+        if node in _link_only([node]):
+            continue
+        return node
     return None
 
 
-def _titled_region(doc: _Parser, block: _Node) -> _Node:
+def _has_heading(node: _Node, skip: frozenset[_Node]) -> bool:
+    """Whether `node`, or anything in it outside `skip`, is a heading with words."""
+    stack = [node]
+    while stack:
+        item = stack.pop()
+        if item.dropped or item in skip:
+            continue
+        if item.tag in HEADING_ELEMENTS and word_count(_collect(item, skip)) > 0:
+            return True
+        stack.extend(child for child in item.content if isinstance(child, _Node))
+    return False
+
+
+def _beside_the_content(
+    region: _Node, title: _Node, block: _Node
+) -> tuple[frozenset[_Node], frozenset[_Node]]:
+    """What a widened region holds besides its title, its block and the path
+    between them: what to leave out, and what nobody can say is content.
+
+    The climb from the block to the title collects every branch hanging off the
+    two paths. Some are the point — the sibling sections the scoring cannot
+    see. Others are the page, spelled in `<div>`s the furniture tags never name.
+    Measured on 2026-10-18 against the code before this function existed: a
+    Twenty-Ten-style theme (logo `<h1><a>` in `div#header`, a `div` menu and
+    sidebar) measured 489 words, OK, around a 120-word post, and an `<h1>` hung
+    straight in the wrapper beside a plain-text `div` measured 521, OK. Both
+    read 120, WARNING, before the widening existed.
+
+    Left out, like furniture:
+      * the region's furniture (`_furniture`);
+      * every link-only subtree in those branches (`_link_only`): menus, widget
+        lists, related-tool grids, however they are tagged.
+
+    Undecided: a branch with no heading that sits before the title or after the
+    block. A heading makes a branch a section of the page's outline, and the
+    stretch between the title and the block is what the climb was taken to
+    collect. Outside both, a `<div>` of plain text is a sidebar or a list of use
+    cases, and structure cannot say which. It stays in the count;
+    `measure_depth` refuses the count when the verdict depends on it.
+    """
+    paths = set(_ancestors(title)) | set(_ancestors(block))
+    # The region is in the order too: a title left unclosed swallows the rest of
+    # the page, and is then the region itself.
+    order = {node: i for i, node in enumerate([region, *_iter_elements(region)])}
+    first, last = sorted((order[title], order[block]))
+    branches: list[_Node] = []
+    stack = [region]
+    while stack:
+        for child in stack.pop().content:
+            if not isinstance(child, _Node) or child.dropped or child is title or child is block:
+                continue
+            (stack if child in paths else branches).append(child)
+    furniture = _furniture(region)
+    left_out = furniture | _link_only([b for b in branches if b not in furniture])
+    undecided = frozenset(
+        branch
+        for branch in branches
+        if branch not in left_out
+        and not first < order[branch] < last
+        and not _has_heading(branch, left_out)
+    )
+    return left_out, undecided
+
+
+def _titled_region(title: _Node | None, block: _Node) -> _Node:
     """The smallest element holding both `block` and the page's `<h1>`.
 
     The paragraph scoring finds one block — the densest run of `<p>` — and on a
@@ -432,13 +555,13 @@ def _titled_region(doc: _Parser, block: _Node) -> _Node:
         region, so the block comes back alone. Counting the body would be the
         menu-and-footer count `measure_depth` refuses everywhere else.
 
-    What it still gets wrong: sections the block and the title do not share a
-    wrapper with stay outside; a title inside the block itself — a hero whose
-    description is the page's densest paragraph — widens nothing; and anything
-    inside the region that is not marked as furniture — a related-links grid, a
-    cookie banner — counts.
+    What the region holds besides the title and the block is sorted by
+    `_beside_the_content`. What it still gets wrong: sections the block and the
+    title do not share a wrapper with stay outside; a title inside the block
+    itself — a hero whose description is the page's densest paragraph — widens
+    nothing; and plain text that is not content but carries a heading, or sits
+    between the title and the block, counts.
     """
-    title = _page_title(doc)
     if title is None:
         return block
     holds_block = set(_ancestors(block))
@@ -458,24 +581,31 @@ def _richest(nodes: list[_Node]) -> _Node | None:
     return best
 
 
-def _main_container(doc: _Parser) -> tuple[_Node, bool, frozenset[_Node]]:
-    """The element holding the main content, whether it was isolated, and what
-    inside it to leave out.
+class _MainContent(NamedTuple):
+    """Where `_main_container` found the main content, and how far to trust it."""
 
-    A `False` second value means the heuristic separated nothing: what comes
-    back is the whole page, chrome included. `measure_depth` turns that into
-    ERROR, because a word count over the menu and the footer is not the number
+    node: _Node
+    # False: the heuristic separated nothing, and `node` is the whole page.
+    isolated: bool
+    # Subtrees inside `node` left out of the count. Empty except for a region
+    # `_titled_region` widened — see `_beside_the_content`.
+    outside: frozenset[_Node] = frozenset()
+    # Subtrees inside `node` that are counted but could as well be the page.
+    undecided: frozenset[_Node] = frozenset()
+
+
+def _main_container(doc: _Parser) -> _MainContent:
+    """The element holding the main content, and how far it was isolated.
+
+    `isolated` False means the heuristic separated nothing: what comes back is
+    the whole page, chrome included. `measure_depth` turns that into ERROR,
+    because a word count over the menu and the footer is not the number
     ADS-CONTENT-03 asks for and must not be reported as a pass.
-
-    The third value is empty except for a region `_titled_region` widened: that
-    region was chosen for holding the title and the block, and the page
-    furniture it also holds — a breadcrumb `<nav>`, a sidebar `<aside>` — came
-    along with the climb, not because it is content.
     """
     for tag in ("main", "article"):
         found = _richest([n for n in _iter_elements(doc.root) if n.tag == tag])
         if found is not None:
-            return found, True, frozenset()
+            return _MainContent(found, True)
 
     # Readability-style scoring: a paragraph credits its container, and half of
     # itself to the container above. A nav or a sidebar has links and list
@@ -496,6 +626,12 @@ def _main_container(doc: _Parser) -> tuple[_Node, bool, frozenset[_Node]]:
         weight = float(len(_normalize(_collect(node))))
         if weight <= 0:
             continue
+        if node in _link_only([node]):
+            # A card's description inside `<a class="related-card">` is a
+            # paragraph nobody reads in place. Six of them out-scored the
+            # article on smallwebapps.com/apps/csv-to-json/ as built on
+            # 2026-08-30, and the grid of links won as the main content.
+            continue
         credit(node.parent, weight)
         credit(node.parent.parent if node.parent else None, weight / 2)
 
@@ -510,16 +646,17 @@ def _main_container(doc: _Parser) -> tuple[_Node, bool, frozenset[_Node]]:
         # whenever the parent (<footer>, <nav>) is not a container itself. When
         # the body wins, nothing was separated from anything.
         if winner.tag in WHOLE_PAGE_ELEMENTS:
-            return winner, False, frozenset()
-        region = _titled_region(doc, winner)
+            return _MainContent(winner, False)
+        title = _page_title(doc)
+        region = _titled_region(title, winner)
         if region is winner:
             # The title is inside the block, or there is none to widen to. The
             # block's own furniture stays in the count, where `measure_depth`'s
             # control can still see it.
-            return winner, True, frozenset()
-        return region, True, _furniture(region)
+            return _MainContent(winner, True)
+        return _MainContent(region, True, *_beside_the_content(region, title, winner))
 
-    return _find_body(doc), False, frozenset()
+    return _MainContent(_find_body(doc), False)
 
 
 def _furniture(container: _Node) -> frozenset[_Node]:
@@ -639,9 +776,8 @@ def main_content_text(html: str) -> str:
     for a client-rendered page there is nothing to find, which `measure_depth`
     likewise reports as ERROR rather than as a thin page.
     """
-    doc = _parse(html)
-    container, _, outside = _main_container(doc)
-    return _normalize(_collect(container, skip=outside))
+    found = _main_container(_parse(html))
+    return _normalize(_collect(found.node, skip=found.outside))
 
 
 def word_count(text: str) -> int:
@@ -714,16 +850,25 @@ class TextDepth:
 def measure_depth(html: str, *, min_words: int = DEFAULT_MIN_WORDS, url: str = "") -> TextDepth:
     """Measure main-content depth in an HTML string."""
     doc = _parse(html)
-    container, isolated, outside = _main_container(doc)
+    container, isolated, outside, undecided = _main_container(doc)
     main = _normalize(_collect(container, skip=outside))
     words = word_count(main)
     total = word_count(_visible_text(doc))
     # The same container with its page furniture removed. Never reported as
     # the count — it is only the control that says whether `words` is a
     # measurement of the article or of the menu wrapped around it. For a
-    # region `_titled_region` widened, `outside` already is that furniture,
+    # region `_titled_region` widened, `outside` already holds that furniture,
     # so the two counts agree and the control has nothing left to catch.
-    editorial_words = word_count(_normalize(_collect(container, skip=_furniture(container))))
+    editorial_words = word_count(
+        _normalize(_collect(container, skip=outside | _furniture(container)))
+    )
+    # The second control, for a widened region only: the count without the
+    # branches `_beside_the_content` could not call content or page.
+    decided_words = (
+        word_count(_normalize(_collect(container, skip=outside | undecided)))
+        if undecided
+        else words
+    )
 
     status = Status.OK
     notes: list[str] = []
@@ -779,6 +924,20 @@ def measure_depth(html: str, *, min_words: int = DEFAULT_MIN_WORDS, url: str = "
             f"still holds {words - editorial_words} words of <nav>/<header>/<footer>/"
             "<aside>, and without them this page is "
             f"{describe_depth(editorial_words, min_words=min_words)}"
+        )
+    elif classify_depth(decided_words, min_words=min_words) is not classify_depth(
+        words, min_words=min_words
+    ):
+        # The same rule as the furniture control, applied to what the climb to
+        # the title collected without a heading to vouch for it. A `<div>` of
+        # plain text after the block is a sidebar or a list of use cases; when
+        # the band depends on which, the band is not a measurement.
+        status = escalate(status, Status.ERROR)
+        notes.append(
+            "main content not separated from the page around it: "
+            f"{words - decided_words} words of the region measured sit before its <h1> "
+            "or after its main block under no heading, and without them this page is "
+            f"{describe_depth(decided_words, min_words=min_words)}"
         )
     status = escalate(status, classify_depth(words, min_words=min_words))
     notes.append(describe_depth(words, min_words=min_words))

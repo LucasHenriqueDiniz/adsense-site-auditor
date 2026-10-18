@@ -340,20 +340,33 @@ Behaviour observed in the runs above, recorded here because a reader will hit it
   A page with no `<main>` or `<article>` that *does* have a standout paragraph
   block is measured on the smallest element holding that block and the page's
   `<h1>`, with that element's `<nav>`, `<header>`, `<footer>` and `<aside>` left
-  out. Until 2026-10-18 it was measured on the block alone, and that
-  undercounted every page built from sibling `<section>`s:
-  smallwebapps.com/apps/pdf-rotate/ read 114 words where the span from its
-  `<h1>` to its related-links heading holds 589. Three shapes are still wrong.
-  When the `<h1>` and the block meet only at the `<body>`, the block is measured
-  alone — an undercount, kept because counting the body is the
-  menu-and-footer number the script refuses everywhere else. When the `<h1>`
-  sits inside the winning block itself — a hero whose description is the page's
-  densest paragraph — nothing widens either: one of the 142 tool pages in the
-  2026-08-30 reconstruction (Part 2) measures 182 where the reference holds 541.
-  And whatever sits inside that element without being marked as furniture is
-  counted: on pdf-rotate that is the "More tools in PDF" grid, so the page now
-  measures 720, not 589.
+  out, and every subtree in it whose words are all link text: a menu, a widget
+  list or a related-tools grid is navigation whatever it is tagged. An `<h1>`
+  that is entirely a link is a logo, not a title, and widens nothing. Until
+  2026-10-18 such a page was measured on the block alone, and that undercounted
+  every page built from sibling `<section>`s: smallwebapps.com/apps/pdf-rotate/
+  read 114 words where the span from its `<h1>` to its related-links heading
+  holds 589. It now reads 593.
 
+  Plain text in that element, before the `<h1>` or after the block and under no
+  heading, is counted, but it could be a sidebar as easily as a list of use
+  cases. When the band depends on it the script reports `ERROR` — "main
+  content not separated from the page around it" — rather than choosing.
+
+  Four shapes are still wrong. When the `<h1>` and the block meet only at the
+  `<body>`, the block is measured alone — an undercount, kept because counting
+  the body is the menu-and-footer number the script refuses everywhere else.
+  When the `<h1>` sits inside the winning block itself — a hero whose
+  description is the page's densest paragraph — nothing widens: one of the 142
+  tool pages in the 2026-08-30 reconstruction (Part 2) measures 182 where the
+  reference holds 541. Plain text that is not content but carries a heading, or
+  sits between the `<h1>` and the block, is counted without a doubt raised. And
+  a link list with any word outside its links — "News (15)" — is text, so it
+  stays in.
+
+  None of this applies once a page has a `<main>`, which is counted whole,
+  link grids included. smallwebapps.com added one to its tool pages on
+  2026-10-18, after the measurements above.
 ---
 
 # Part 2 — the one real outcome on record

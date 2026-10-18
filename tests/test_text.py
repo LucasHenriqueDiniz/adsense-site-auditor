@@ -374,6 +374,139 @@ def test_titulo_e_bloco_que_so_se_encontram_no_body_nao_contam_o_body():
     assert "ruido" not in d.text
 
 
+# --------------------------------------------------------------------------
+# O chrome que não usa as quatro tags de mobília. Os dois falsos PASS da
+# revisão do PR #2, medidos em 2026-10-18 contra `d5b0784`: 489 e 521 palavras,
+# OK, em volta de um post de 120 — que a base do PR media 120, WARNING.
+# --------------------------------------------------------------------------
+
+
+def _tema_de_divs(logo: str) -> str:
+    """Um tema no estilo Twenty Ten: nem <header>, nem <nav>, nem <footer>.
+
+    Cabeçalho, menu, lateral e rodapé são <div>, e o post não tem <article>.
+    O menu e a lateral são o que menu e lateral costumam ser: listas de links.
+    """
+    menu = "".join(f'<li><a href="/c{i}">{_ruido(4)}</a></li>' for i in range(60))
+    lateral = "".join(f'<li><a href="/p{i}">{_ruido(4)}</a></li>' for i in range(30))
+    return (
+        '<html><body><div id="page">'
+        f'<div id="header">{logo}<div id="access"><ul>{menu}</ul></div></div>'
+        '<div id="main"><div id="content"><div class="post"><h2>Titulo do post</h2>'
+        f'<div class="entry-content"><p>{_palavras(120)}</p></div></div></div>'
+        f'<div id="sidebar"><ul>{lateral}</ul></div></div>'
+        '<div id="footer">Todos os direitos reservados</div>'
+        "</div></body></html>"
+    )
+
+
+@pytest.mark.parametrize(
+    "logo",
+    [
+        '<h1 id="site-title"><a href="/">Meu Blog</a></h1>',
+        # O link por fora do <h1>: a palavra continua sendo texto de link.
+        '<a href="/"><h1 id="site-title">Meu Blog</h1></a>',
+    ],
+)
+def test_logo_h1_que_e_so_link_nao_ancora_a_regiao(logo):
+    """Num <div id="header">, nenhuma tag diz que o <h1> é o logo. O que diz é
+    que ele é um link para a home, e o título de uma página não é. Ancorar nele
+    subia a região até o `div#page` e contava o menu e a lateral."""
+    d = measure_depth(_tema_de_divs(logo))
+    assert d.words == 120
+    assert "ruido" not in d.text
+    assert "Meu Blog" not in d.text
+    assert d.status is Status.WARNING, d.reason
+
+
+def test_menu_e_lateral_de_links_em_div_ficam_de_fora_da_regiao():
+    """Um <h1> de verdade, pendurado direto no wrapper: a região é o wrapper, e
+    o menu antes do título e a lateral depois do bloco vêm junto. Toda palavra
+    deles é texto de link — navegação, com ou sem <nav> em volta."""
+    links = "".join(f'<li><a href="/x{i}">{_ruido(4)}</a></li>' for i in range(60))
+    html = (
+        '<html><body><div id="page">'
+        f'<div class="menu"><ul>{links}</ul></div>'
+        "<h1>Titulo</h1>"
+        f'<div class="content"><div class="entry"><p>{_palavras(120)}</p></div></div>'
+        f'<div class="sidebar"><ul>{links}</ul></div>'
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 121
+    assert "ruido" not in d.text
+    assert d.status is Status.WARNING, d.reason
+
+
+def test_texto_sem_titulo_depois_do_bloco_que_decide_a_faixa_e_ERROR():
+    """O caso que estrutura nenhuma separa: um <div> de texto puro depois do
+    bloco, sem heading. É uma lateral ou uma lista de casos de uso, e as duas
+    se escrevem igual. Quando a faixa depende disso, a faixa não é medição —
+    a mesma regra do controle de mobília."""
+    html = (
+        '<html><body><div id="page"><h1>Titulo</h1>'
+        f'<div class="content"><div class="entry"><p>{_palavras(120)}</p></div></div>'
+        f'<div class="widgets"><ul><li>{_ruido(400)}</li></ul></div>'
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.status is Status.ERROR
+    assert "not separated from the page around it" in d.reason
+    assert "below the configured threshold" in d.reason  # sem o <div>: 121 palavras
+
+
+def test_texto_sem_titulo_entre_o_titulo_e_o_bloco_conta():
+    """O trecho entre o <h1> e o bloco é o que a subida foi buscar: uma
+    introdução em lista, sem heading próprio, é conteúdo e não vira dúvida."""
+    html = (
+        '<html><body><div id="page"><h1>Titulo</h1>'
+        f'<ul class="intro"><li>{_palavras(300)}</li></ul>'
+        f'<div class="content"><div class="entry"><p>{_palavras(200)}</p></div></div>'
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 501
+    assert d.status is Status.OK, d.reason
+
+
+@pytest.mark.parametrize("por_card", [10, 100])
+def test_grade_de_cards_linkados_fica_de_fora_e_nao_vence_a_pontuacao(por_card):
+    """A grade de ferramentas relacionadas do smallwebapps: cada card é um
+    `<a>` com <h3> e <p>. Com descrições curtas ela é só um galho da região, e
+    sai por ser só link. Com descrições longas, os <p> dela somavam mais que o
+    conteúdo — em /apps/csv-to-json/ de 2026-08-30, a grade ganhava a
+    pontuação e era contada inteira como o bloco principal."""
+    cards = "".join(
+        f'<a href="/apps/t{i}" class="related-card"><h3>{_ruido(2)}</h3>'
+        f"<p>{_ruido(por_card)}</p></a>"
+        for i in range(6)
+    )
+    grade = (
+        f'<section class="related"><h2>Mais ferramentas</h2><div class="grid">{cards}</div>'
+        "</section>"
+    )
+    d = measure_depth(_pagina_de_ferramenta(extra_na_regiao=grade))
+    assert "ruido" not in d.text
+    assert d.words == _palavras_da_ferramenta() + 2  # + "Mais ferramentas"
+    assert d.status is Status.OK, d.reason
+
+
+def test_so_link_e_toda_palavra_dentro_de_link_nem_uma_a_menos():
+    """`_link_only` é tudo ou nada. Uma palavra fora do link basta para o
+    trecho ser texto; um separador sem palavra ("»") não basta."""
+    from adsense_checks.text import _iter_elements, _link_only, _parse
+
+    def so_link(html: str) -> bool:
+        doc = _parse(html)
+        div = next(n for n in _iter_elements(doc.root) if n.tag == "div")
+        return div in _link_only([div])
+
+    assert so_link('<div><a href="/">Inicio</a> » <a href="/f">Ferramentas</a></div>')
+    assert not so_link('<div>Hyper<a href="/t">texto</a></div>')
+    assert not so_link('<div><a href="/n">Noticias</a> (15)</div>')
+    assert not so_link("<div>   </div>")  # sem palavra nenhuma, não é link
+
+
 def test_sem_estrutura_nenhuma_cai_no_corpo_inteiro():
     """Fallback documentado: sem <main>, <article> nem <p>, devolve o corpo. O
     que não pode acontecer é devolver '' e a página parecer vazia."""
@@ -1299,7 +1432,7 @@ def test_todo_elemento_de_pagina_inteira_e_o_teto_da_regiao_do_titulo(abre, fech
     from adsense_checks.text import _main_container, _parse
 
     # A premissa: o <h1> e o vencedor são irmãos, então o ancestral comum é o pai.
-    vencedor, _, _ = _main_container(_parse(html))
+    vencedor = _main_container(_parse(html)).node
     assert vencedor.attrs.get("id") == "a", teto
     assert vencedor.parent.tag == teto
     assert main_content_text(html) == _palavras(200), teto
