@@ -433,8 +433,10 @@ def _titled_region(doc: _Parser, block: _Node) -> _Node:
         menu-and-footer count `measure_depth` refuses everywhere else.
 
     What it still gets wrong: sections the block and the title do not share a
-    wrapper with stay outside, and anything inside the region that is not
-    marked as furniture — a related-links grid, a cookie banner — counts.
+    wrapper with stay outside; a title inside the block itself — a hero whose
+    description is the page's densest paragraph — widens nothing; and anything
+    inside the region that is not marked as furniture — a related-links grid, a
+    cookie banner — counts.
     """
     title = _page_title(doc)
     if title is None:

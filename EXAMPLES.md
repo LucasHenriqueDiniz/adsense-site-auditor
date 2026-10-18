@@ -343,13 +343,16 @@ Behaviour observed in the runs above, recorded here because a reader will hit it
   out. Until 2026-10-18 it was measured on the block alone, and that
   undercounted every page built from sibling `<section>`s:
   smallwebapps.com/apps/pdf-rotate/ read 114 words where the span from its
-  `<h1>` to its related-links heading holds 589. Two shapes are still wrong.
+  `<h1>` to its related-links heading holds 589. Three shapes are still wrong.
   When the `<h1>` and the block meet only at the `<body>`, the block is measured
   alone — an undercount, kept because counting the body is the
-  menu-and-footer number the script refuses everywhere else. And whatever sits
-  inside that element without being marked as furniture is counted: on
-  pdf-rotate that is the "More tools in PDF" grid, so the page now measures 720,
-  not 589.
+  menu-and-footer number the script refuses everywhere else. When the `<h1>`
+  sits inside the winning block itself — a hero whose description is the page's
+  densest paragraph — nothing widens either: one of the 142 tool pages in the
+  2026-08-30 reconstruction (Part 2) measures 182 where the reference holds 541.
+  And whatever sits inside that element without being marked as furniture is
+  counted: on pdf-rotate that is the "More tools in PDF" grid, so the page now
+  measures 720, not 589.
 
 ---
 
