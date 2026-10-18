@@ -260,6 +260,120 @@ def test_sem_main_nem_article_vence_o_bloco_com_paragrafos():
     assert "Home" not in principal
 
 
+# Palavras por seção da página de ferramenta abaixo: ~600 no total, desiguais de
+# propósito, para que exista "a maior" e dê para ver quando só ela é contada.
+SECOES_DA_FERRAMENTA = (180, 150, 130, 90, 50)
+
+
+def _secoes(secoes=SECOES_DA_FERRAMENTA) -> str:
+    return "".join(
+        f'<section><h2>Secao {i}</h2><div class="body"><p>{_palavras(n)}</p></div></section>'
+        for i, n in enumerate(secoes)
+    )
+
+
+def _pagina_de_ferramenta(secoes=SECOES_DA_FERRAMENTA, extra_na_regiao: str = "") -> str:
+    """O ToolLayout do smallwebapps.com, reduzido: nenhum <main>, nenhum <article>.
+
+    O título fica num hero e cada seção leva um <h2> e um <div> com os
+    parágrafos, como o `div.deep-body` da página real. Cada <p> credita o <div>
+    dele inteiro e a <section> pela metade; o <div> que reúne as seções não
+    recebe nada, então a pontuação elege o bloco da maior seção e para nele.
+    Chrome é `ruido`, conteúdo é `palavra`.
+    """
+    menu = "".join(f'<li><a href="/c{i}">{_ruido(2)}</a></li>' for i in range(40))
+    corpo = _secoes(secoes)
+    return (
+        "<html><body>"
+        f'<header><a href="/">{_ruido(2)}</a><nav><ul>{menu}</ul></nav></header>'
+        '<div class="tool-page">'
+        f'<section class="hero"><h1>Girar paginas de PDF</h1><p>{_palavras(40)}</p></section>'
+        f'<div class="lower">{corpo}{extra_na_regiao}</div>'
+        "</div>"
+        f"<footer><p>{_ruido(20)}</p><nav>{_ruido(10)}</nav></footer>"
+        "</body></html>"
+    )
+
+
+def _palavras_da_ferramenta(secoes=SECOES_DA_FERRAMENTA) -> int:
+    """O que um leitor conta do <h1> ao fim da última seção: título, intro, e
+    cada seção com seu <h2> ("Secao N", duas palavras)."""
+    return word_count("Girar paginas de PDF") + 40 + sum(2 + n for n in secoes)
+
+
+def test_sem_main_conta_todas_as_secoes_e_nao_so_a_maior():
+    """O defeito medido em 2026-10-18 em smallwebapps.com/apps/pdf-rotate/: sem
+    <main>, a pontuação elegia um único `div.deep-body` de 114 palavras numa
+    página de 589, e a mediana das páginas de ferramenta saía abaixo do limiar
+    — o Blocker do item 4 do pre-flight disparado em falso.
+
+    O conteúdo principal é o menor ancestral que guarda o <h1> e as seções; o
+    menu e o rodapé ficam de fora."""
+    html = _pagina_de_ferramenta()
+    d = measure_depth(html)
+    assert d.words == _palavras_da_ferramenta()
+    assert d.words > max(SECOES_DA_FERRAMENTA) + 2  # não é a maior seção sozinha
+    assert "ruido" not in d.text
+    assert d.text.startswith("Girar paginas de PDF")
+    assert d.status is Status.OK, d.reason
+    assert main_content_text(html) == d.text
+
+
+def test_aside_dentro_da_regiao_do_titulo_fica_de_fora():
+    """Subir do bloco até o <h1> passa por cima do que estiver entre eles — na
+    página real, um `<aside class="tl-rail">` dentro de `div.tl-body`. A
+    mobília que a subida atravessa não entra na contagem."""
+    d = measure_depth(_pagina_de_ferramenta(extra_na_regiao=f"<aside>{_ruido(30)}</aside>"))
+    assert d.words == _palavras_da_ferramenta()
+    assert "ruido" not in d.text
+
+
+@pytest.mark.parametrize(
+    "antes",
+    [
+        # O <h1> de logo no cabeçalho do site nomeia o site, não a página.
+        "<header><h1>ruido ruido</h1></header>",
+        # Um <h1> sem palavra nenhuma não é título de nada.
+        '<div class="logo"><h1><img src="/logo.png" alt=""></h1></div>',
+    ],
+)
+def test_h1_que_nao_e_o_titulo_da_pagina_nao_ancora_a_regiao(antes):
+    """O primeiro <h1> do documento não é o título quando está na mobília ou
+    não tem texto. Ancorar nele sobe a região até o wrapper da página e traz
+    junto o que não é mobília marcada — aqui, uma faixa promocional."""
+    html = (
+        _pagina_de_ferramenta()
+        .replace(
+            "<header>",
+            f'<div id="page">{antes}<div class="promo"><p>{_ruido(30)}</p></div><header>',
+        )
+        .replace("</footer>", "</footer></div>")
+    )
+    d = measure_depth(html)
+    assert "ruido" not in d.text
+    assert d.words == _palavras_da_ferramenta()
+
+
+def test_titulo_e_bloco_que_so_se_encontram_no_body_nao_contam_o_body():
+    """Com o <h1> pendurado direto no <body>, o menor ancestral comum é a
+    página. Contar o body — mesmo sem a mobília — é a contagem que
+    `measure_depth` recusa em todo outro caminho, então o bloco volta sozinho.
+
+    É uma subcontagem conhecida, não uma medição boa: as outras seções ficam
+    de fora, como antes da correção. Registrada em EXAMPLES.md, "Known gaps"."""
+    html = (
+        "<html><body>"
+        f"<header><nav>{_ruido(20)}</nav></header>"
+        "<h1>Girar paginas de PDF</h1>"
+        f'<div class="lower">{_secoes()}</div>'
+        f"<footer><p>{_ruido(20)}</p></footer>"
+        "</body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == max(SECOES_DA_FERRAMENTA)
+    assert "ruido" not in d.text
+
+
 def test_sem_estrutura_nenhuma_cai_no_corpo_inteiro():
     """Fallback documentado: sem <main>, <article> nem <p>, devolve o corpo. O
     que não pode acontecer é devolver '' e a página parecer vazia."""
@@ -1146,14 +1260,12 @@ def test_todo_elemento_de_pagina_inteira_significa_nada_isolado():
     """Vencer a pontuação com um destes é o heurístico dizendo que não separou
     nada — e `measure_depth` reporta isso como ERROR em vez de medir o menu.
 
-    Só `body` é alcançável, e a interseção abaixo é a prova: o vencedor da
-    pontuação sai de `credit`, que só aceita tag em `CONTENT_CONTAINERS`, e o
-    outro caminho de saída de `_main_container` devolve `False` fixo sem
-    consultar este conjunto. `html` e `#document` são guarda-corpo: nenhum
-    documento chega a fazer a pergunta `winner.tag not in WHOLE_PAGE_ELEMENTS`
-    sobre eles. Não consigo fixá-los com comportamento, e inventar uma
-    asserção que só reafirma o conjunto seria a mesma auto-referência que este
-    bloco existe para tirar."""
+    Como vencedor, só `body` é alcançável, e a interseção abaixo é a prova: o
+    vencedor da pontuação sai de `credit`, que só aceita tag em
+    `CONTENT_CONTAINERS`, e o outro caminho de saída de `_main_container`
+    devolve `False` fixo sem consultar este conjunto. `html` e `#document`
+    nunca vencem; o conjunto só é perguntado sobre eles como teto de
+    `_titled_region`, e é lá que o teste seguinte os fixa por comportamento."""
     from adsense_checks.text import CONTENT_CONTAINERS, WHOLE_PAGE_ELEMENTS
 
     assert sorted(WHOLE_PAGE_ELEMENTS) == sorted(ELEMENTOS_DE_PAGINA_INTEIRA)
@@ -1164,6 +1276,33 @@ def test_todo_elemento_de_pagina_inteira_significa_nada_isolado():
     d = measure_depth(html)
     assert d.status is Status.ERROR
     assert "main content not isolated" in d.reason
+
+
+@pytest.mark.parametrize(
+    "abre,fecha,teto",
+    [
+        ("<html><body>", "</body></html>", "body"),
+        ("<html>", "</html>", "html"),
+        ("", "", "#document"),
+    ],
+)
+def test_todo_elemento_de_pagina_inteira_e_o_teto_da_regiao_do_titulo(abre, fecha, teto):
+    """Um <h1> e o bloco vencedor que só se encontram num destes dividem a
+    página, não uma região: o bloco volta sozinho. Sem `<body>` no documento o
+    ancestral comum é `html`; sem `<html>`, é o `#document` — os três têm de
+    estar no conjunto, ou a página inteira vira "região do título"."""
+    html = (
+        f"{abre}<h1>Titulo</h1>"
+        f'<div id="a"><p>{_palavras(200)}</p></div>'
+        f'<div id="b"><p>{_ruido(100)}</p></div>{fecha}'
+    )
+    from adsense_checks.text import _main_container, _parse
+
+    # A premissa: o <h1> e o vencedor são irmãos, então o ancestral comum é o pai.
+    vencedor, _, _ = _main_container(_parse(html))
+    assert vencedor.attrs.get("id") == "a", teto
+    assert vencedor.parent.tag == teto
+    assert main_content_text(html) == _palavras(200), teto
 
 
 def test_todo_id_de_mount_conhecido_identifica_uma_casca():

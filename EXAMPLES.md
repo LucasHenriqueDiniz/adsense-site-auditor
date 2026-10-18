@@ -337,6 +337,20 @@ Behaviour observed in the runs above, recorded here because a reader will hit it
   fixture wraps its content in `<main>`. On such a page the script refuses to
   report a word count rather than counting the navigation with the content.
 
+  A page with no `<main>` or `<article>` that *does* have a standout paragraph
+  block is measured on the smallest element holding that block and the page's
+  `<h1>`, with that element's `<nav>`, `<header>`, `<footer>` and `<aside>` left
+  out. Until 2026-10-18 it was measured on the block alone, and that
+  undercounted every page built from sibling `<section>`s:
+  smallwebapps.com/apps/pdf-rotate/ read 114 words where the span from its
+  `<h1>` to its related-links heading holds 589. Two shapes are still wrong.
+  When the `<h1>` and the block meet only at the `<body>`, the block is measured
+  alone — an undercount, kept because counting the body is the
+  menu-and-footer number the script refuses everywhere else. And whatever sits
+  inside that element without being marked as furniture is counted: on
+  pdf-rotate that is the "More tools in PDF" grid, so the page now measures 720,
+  not 589.
+
 ---
 
 # Part 2 — the one real outcome on record

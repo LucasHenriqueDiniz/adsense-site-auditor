@@ -157,7 +157,9 @@ CONTENT_CONTAINERS = frozenset({"article", "body", "div", "main", "section", "td
 
 # Winning the main-content heuristic with one of these means it did not run:
 # they are the page, not a part of it, so the "main content" they return is the
-# menu and the footer as well.
+# menu and the footer as well. For the same reason they are the ceiling of
+# `_titled_region`: a title and a block that only meet at one of these share
+# the page, not a content region.
 WHOLE_PAGE_ELEMENTS = frozenset({"#document", "body", "html"})
 
 # Page furniture: the regions HTML marks as explicitly *not* the prose.
@@ -385,6 +387,64 @@ def _find_body(doc: _Parser) -> _Node:
     return doc.root
 
 
+def _ancestors(node: _Node | None):
+    """`node` and every element above it, up to the document."""
+    while node is not None:
+        yield node
+        node = node.parent
+
+
+def _page_title(doc: _Parser) -> _Node | None:
+    """The page's own `<h1>`: the first one that has words and is not furniture.
+
+    A logo wrapped in `<h1>` inside the site header names the site, not the
+    page. Anchoring on it would stretch the region up to whatever wraps the
+    header, which is the page wrapper this module keeps refusing to measure.
+    """
+    body = _find_body(doc)
+    furniture = _furniture(body)
+    for node in _iter_elements(body):
+        if node.tag != "h1" or word_count(_collect(node)) == 0:
+            continue
+        if not any(above in furniture for above in _ancestors(node)):
+            return node
+    return None
+
+
+def _titled_region(doc: _Parser, block: _Node) -> _Node:
+    """The smallest element holding both `block` and the page's `<h1>`.
+
+    The paragraph scoring finds one block — the densest run of `<p>` — and on a
+    page built from sibling `<section>`s that is one section. Measured on
+    2026-10-18: smallwebapps.com/apps/pdf-rotate/ has no `<main>`, its text sits
+    in lists, FAQ `<details>` and one `div` of three paragraphs, and the scoring
+    returned that `div` — 114 words of a page a reader counts at 589 from the
+    `<h1>` to its related-links heading. Every tool page on the site measured
+    the same way, and the median fell below the threshold the pre-flight gate
+    treats as a Blocker.
+
+    The title is where the editor's content starts, so the region that holds
+    the title and the block holds the sections between and around them. Two
+    limits keep it from turning into the page:
+
+      * no title outside the page furniture (see `_page_title`), no widening;
+      * a title and a block that only meet at the `<body>` share the page, not a
+        region, so the block comes back alone. Counting the body would be the
+        menu-and-footer count `measure_depth` refuses everywhere else.
+
+    What it still gets wrong: sections the block and the title do not share a
+    wrapper with stay outside, and anything inside the region that is not
+    marked as furniture — a related-links grid, a cookie banner — counts.
+    """
+    title = _page_title(doc)
+    if title is None:
+        return block
+    holds_block = set(_ancestors(block))
+    # Always found: both walks end at the same `#document`.
+    region = next(node for node in _ancestors(title) if node in holds_block)
+    return block if region.tag in WHOLE_PAGE_ELEMENTS else region
+
+
 def _richest(nodes: list[_Node]) -> _Node | None:
     """The node with the most words, or None when they are all empty."""
     best: _Node | None = None
@@ -396,18 +456,24 @@ def _richest(nodes: list[_Node]) -> _Node | None:
     return best
 
 
-def _main_container(doc: _Parser) -> tuple[_Node, bool]:
-    """The element holding the main content, and whether it was isolated.
+def _main_container(doc: _Parser) -> tuple[_Node, bool, frozenset[_Node]]:
+    """The element holding the main content, whether it was isolated, and what
+    inside it to leave out.
 
     A `False` second value means the heuristic separated nothing: what comes
     back is the whole page, chrome included. `measure_depth` turns that into
     ERROR, because a word count over the menu and the footer is not the number
     ADS-CONTENT-03 asks for and must not be reported as a pass.
+
+    The third value is empty except for a region `_titled_region` widened: that
+    region was chosen for holding the title and the block, and the page
+    furniture it also holds — a breadcrumb `<nav>`, a sidebar `<aside>` — came
+    along with the climb, not because it is content.
     """
     for tag in ("main", "article"):
         found = _richest([n for n in _iter_elements(doc.root) if n.tag == tag])
         if found is not None:
-            return found, True
+            return found, True, frozenset()
 
     # Readability-style scoring: a paragraph credits its container, and half of
     # itself to the container above. A nav or a sidebar has links and list
@@ -441,9 +507,17 @@ def _main_container(doc: _Parser) -> tuple[_Node, bool]:
         # footer is enough for it to: the grandparent credit lands on the body
         # whenever the parent (<footer>, <nav>) is not a container itself. When
         # the body wins, nothing was separated from anything.
-        return winner, winner.tag not in WHOLE_PAGE_ELEMENTS
+        if winner.tag in WHOLE_PAGE_ELEMENTS:
+            return winner, False, frozenset()
+        region = _titled_region(doc, winner)
+        if region is winner:
+            # The title is inside the block, or there is none to widen to. The
+            # block's own furniture stays in the count, where `measure_depth`'s
+            # control can still see it.
+            return winner, True, frozenset()
+        return region, True, _furniture(region)
 
-    return _find_body(doc), False
+    return _find_body(doc), False, frozenset()
 
 
 def _furniture(container: _Node) -> frozenset[_Node]:
@@ -480,8 +554,9 @@ def _furniture(container: _Node) -> frozenset[_Node]:
     found: set[_Node] = set()
     # Each entry carries whether an <article> at or below `container` already
     # claims this node. Seeded from the container's children, so the container
-    # is never furniture itself — nor can it be: `_main_container` returns only
-    # a content container, `<main>`, `<article>` or the body.
+    # is never furniture itself — nor can it be: `_main_container` returns a
+    # content container, `<main>`, `<article>`, the body, or a `_titled_region`,
+    # which holds a title `_page_title` already proved is outside all furniture.
     claimed_by_article = container.tag == "article"
     stack: list[tuple[_Node, bool]] = [
         (child, claimed_by_article) for child in container.content if isinstance(child, _Node)
@@ -547,7 +622,10 @@ def main_content_text(html: str) -> str:
          one, not all of them concatenated, so a blog index does not add up its
          teasers into a substantial-looking page.
       3. otherwise the container scoring highest on paragraph text: each `<p>`
-         credits its parent container fully and its grandparent by half.
+         credits its parent container fully and its grandparent by half —
+         widened to the smallest element that also holds the page's `<h1>`,
+         with that element's own nav/header/footer/aside left out, and never
+         widened as far as the `<body>` (see `_titled_region`).
       4. otherwise the whole `<body>`.
 
     Limitation: this reads structure, not layout. A page whose paragraphs hang
@@ -560,8 +638,8 @@ def main_content_text(html: str) -> str:
     likewise reports as ERROR rather than as a thin page.
     """
     doc = _parse(html)
-    container, _ = _main_container(doc)
-    return _normalize(_collect(container))
+    container, _, outside = _main_container(doc)
+    return _normalize(_collect(container, skip=outside))
 
 
 def word_count(text: str) -> int:
@@ -634,13 +712,15 @@ class TextDepth:
 def measure_depth(html: str, *, min_words: int = DEFAULT_MIN_WORDS, url: str = "") -> TextDepth:
     """Measure main-content depth in an HTML string."""
     doc = _parse(html)
-    container, isolated = _main_container(doc)
-    main = _normalize(_collect(container))
+    container, isolated, outside = _main_container(doc)
+    main = _normalize(_collect(container, skip=outside))
     words = word_count(main)
     total = word_count(_visible_text(doc))
     # The same container with its page furniture removed. Never reported as
     # the count — it is only the control that says whether `words` is a
-    # measurement of the article or of the menu wrapped around it.
+    # measurement of the article or of the menu wrapped around it. For a
+    # region `_titled_region` widened, `outside` already is that furniture,
+    # so the two counts agree and the control has nothing left to catch.
     editorial_words = word_count(_normalize(_collect(container, skip=_furniture(container))))
 
     status = Status.OK
