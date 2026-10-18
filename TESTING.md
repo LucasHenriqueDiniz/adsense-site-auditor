@@ -91,7 +91,7 @@ What the run showed, in full detail in `EXAMPLES.md`:
 | | |
 | --- | --- |
 | Passed the gate on | About (742 words), Contact (820 words), 12 guides with 8 over 1200 words, no placeholders, 25 navigation links with none broken |
-| Missed | 48 tool pages with a median of 220 words; 45 of them below 300 |
+| Missed | 48 tool pages with a median of 220 words; 45 of them below 300. Withdrawn on 2026-10-18: the depth check counted one paragraph block per page, and rebuilt from that day's source no tool page was below 300 — see the correction in `EXAMPLES.md`, Part 2 |
 | Ruled out by measurement | duplication — 276 pairs compared, median similarity 0.134, maximum 0.327, none above the rubric's 0.40 safe band |
 
 The gate reads the home page, the trust pages and the guide count. On a
@@ -102,6 +102,11 @@ pre-flight item that samples the largest section instead.
 The lesson generalises past this one site: a gate that inspects only the pages a
 publisher wrote by hand will pass a site whose generated bulk is the reason for
 rejection.
+
+Both paragraphs above were written on 2026-08-30 and read the withdrawn row as
+the cause. It was not one: this outcome is still a false negative of the gate,
+but it now has no measured cause, and the fourth item stands on its argument
+alone.
 
 ## Scenarios worth turning into cases
 

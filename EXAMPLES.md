@@ -367,6 +367,48 @@ availability line, `check_completeness`'s requirement stamps and
 `check_duplicates`'s coverage line have all changed since, and the site itself
 has moved on. What follows is the measurements, not a transcript.
 
+## Correction, 2026-10-18: the tool-page row measured the checker, not the pages
+
+The tool-page row in the table below is wrong, and so is every conclusion in
+this Part that rests on it. The tool pages have no `<main>` and no `<article>`.
+On 2026-08-30 the depth check fell back to its paragraph scoring, which elects
+one block per page — the densest run of `<p>` — and most of each page's text
+sits in lists and FAQ `<details>` that the block does not hold. Commit `d5b0784`
+fixes the fallback; "Known gaps" in Part 1 says what it still gets wrong.
+
+This is a reconstruction, not a re-observation. The site's own repository at
+`f22174d`, its last commit on 2026-08-30, was built locally, and its 142 tool
+pages were measured with `adsense_checks` as of `c2df5d5`, the code that measured
+that day, and as of `d5b0784`:
+
+| 142 tool pages, built from the 2026-08-30 source | median | min | max | below 300 |
+| --- | --- | --- | --- | --- |
+| depth check as of `c2df5d5` | 239.5 | 92 | 334 | 136 |
+| depth check as of `d5b0784` | 705 | 182 | 1430 | 1 |
+| `<h1>` to the end of the FAQ, related-tools grid left out | 553 | 396 | 1268 | 0 |
+
+The reconstruction agrees with the table wherever the table can be checked. The
+minimum of 92 comes out exactly, and the maximum of 3281 is the `/apps/`
+catalogue, which the crawl counted among its 48 and which measures 3281 here.
+The median cannot be checked, because which 47 tool pages that crawl reached was
+not recorded. Over the 30 tool pages in that build's sitemap the old check reads
+a median of 163.5, and the reference 720.5 with the lowest at 576.
+
+What that leaves standing, and what it does not:
+
+- By a reader's count no tool page was below the 300-word threshold. "45 of the
+  48 sit below 300" describes the fallback, not the site.
+- So this outcome has no measured cause. Whatever Google objected to, it was not
+  tool-page length at this repo's threshold, and nothing else here measured it.
+- The trust-page and guide rows stand: those pages have `<main>`, and the
+  fallback never ran on them. The duplication figures stand: `check_duplicates`
+  compares whole-page text, not main content. "The pages are short" in that
+  section does not.
+- The fourth pre-flight item in `SKILL.md` was added on the strength of this
+  row. Its argument — a gate that reads only the hand-written pages cannot see
+  the generated bulk — is still an argument, but this outcome is no longer
+  evidence for it.
+
 ## What the gate saw, and what it missed
 
 | | |
@@ -377,7 +419,7 @@ has moved on. What follows is the measurements, not a transcript.
 | Guides | 12 published, 8 of them at or above 1200 words (`ADS-COMPLETE-02` asks for 3) |
 | Placeholders | none |
 | Navigation | 25 links followed, none broken |
-| **Not sampled by the gate** | **48 tool pages under `/apps/`: median 220 words, minimum 92, maximum 3281. 45 of the 48 sit below 300.** |
+| **Not sampled by the gate** | **48 tool pages under `/apps/`: median 220 words, minimum 92, maximum 3281. 45 of the 48 sit below 300.** Withdrawn: see the correction above. |
 
 The word counts came from running the depth check over the 48 tool pages the
 crawl found and aggregating the results by hand. No script in this repo prints
@@ -404,6 +446,9 @@ pointed at. Counting those six as substantive pages would have turned a real gap
 into a comfortable pass.
 
 ## What this outcome changed
+
+*Written on 2026-08-30. The 45 thin pages below were the fallback's, not the
+site's — see the correction at the top of this Part.*
 
 The signal was present and plainly measurable — 45 thin pages — and the gate that
 produces the go/no-go answer never looked at it. The gate read the home page, the

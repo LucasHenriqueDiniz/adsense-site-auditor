@@ -62,15 +62,16 @@ no source.
      trust pages and not the guides. Measure each with
      `scripts/analyze_text_depth.py`.
    - If the median falls below the ADS-CONTENT-03 threshold: ❌ Blocker.
-   - Why this step exists: smallwebapps.com passed items 1 through 3 — About and
-     Contact both real and substantial, twelve guides with eight above 1200
-     words, no placeholders, no broken navigation — and Google rejected the
-     application. Its 48 tool pages have a median of 220 words and 45 of them sit
-     below 300, which items 1-3 never look at. On a catalogue site the trust
-     pages and the guides are the best-written part; the catalogue is the site.
-     A gate that samples only the former passes a site whose latter half is the
-     problem. The measurements are in Part 2 of `EXAMPLES.md`; they were taken on
-     2026-08-30 and no command reproduces them.
+   - Why this step exists: on a catalogue site the trust pages and the guides
+     are the best-written part; the catalogue is the site. A gate that samples
+     only the former cannot see the latter, and items 1-3 never look at it.
+   - What it does not rest on any more: it was added after smallwebapps.com
+     passed items 1 through 3 and was rejected, because its 48 tool pages
+     measured a median of 220 words on 2026-08-30. That measurement was the
+     depth check's, not the site's — the tool pages have no `<main>`, and the
+     check counted one paragraph block per page. Rebuilt from that day's source
+     and counted correctly, none was below 300. The correction is in Part 2 of
+     `EXAMPLES.md`; that rejection has no measured cause.
 
 **Decision at pre-flight:**
 - **0 Blockers**: Proceed to the full requirement audit
