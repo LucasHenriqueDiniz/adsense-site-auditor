@@ -486,6 +486,9 @@ class Page:
     content_type: str = ""
     is_html: bool = True
     auth_challenged: bool = False
+    # The body went past `http.MAX_BODY_BYTES` and only its first part was read,
+    # the part a Google crawler reads.
+    truncated: bool = False
     redirect_chain: list[tuple[int, str]] = field(default_factory=list)
     title: str | None = None
     meta_description: str | None = None
@@ -611,6 +614,7 @@ def _record(result: CrawlResult, response: Fetch, depth: int) -> Page:
         redirect_chain=list(response.redirect_chain),
         elapsed_ms=response.elapsed_ms,
         html_chars=len(response.text),
+        truncated=response.truncated,
     )
     page.content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
     # An absent Content-Type is treated as HTML: refusing to parse would lose real

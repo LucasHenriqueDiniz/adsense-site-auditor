@@ -61,8 +61,9 @@ def _dump_pages(result) -> None:
             continue
         if page.elapsed_ms is not None or page.redirect_chain:
             hops = f", {len(page.redirect_chain)} redirect hop(s)" if page.redirect_chain else ""
+            cut = ", body cut at the 15 MiB a Google crawler reads" if page.truncated else ""
             print(f"        {page.content_type or '(no content-type)'}"
-                  f" in {page.elapsed_ms or 0:.0f}ms{hops}")
+                  f" in {page.elapsed_ms or 0:.0f}ms{hops}{cut}")
         if page.auth_challenged:
             print("        ! authentication challenged: not publicly readable")
         if not page.is_html:

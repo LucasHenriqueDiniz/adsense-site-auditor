@@ -2233,3 +2233,16 @@ def test_nenhum_elemento_void_esta_entre_os_descartados():
     for tag in ("meta", "link", "img"):
         html = f"<html><body><p>antes</p><{tag} x=1><p>depois</p></body></html>"
         assert extract_text(html) == "antes depois", tag
+
+
+def test_pagina_cortada_no_teto_diz_que_foi_cortada(server):
+    """A contagem sobre um corpo cortado é a da parte que o Google lê, que é a
+    parte certa; mas ela não pode sair como se fosse a página inteira."""
+    from adsense_checks.http import MAX_BODY_BYTES
+
+    base, routes = server
+    html = _pagina(TEXTO_PT) + "<!-- " + "x" * MAX_BODY_BYTES + " -->"
+    routes["/grande"] = (200, {"Content-Type": "text/html; charset=utf-8"}, html)
+    medido = measure_url(base + "/grande")
+    assert "body cut at the first" in medido.reason
+    assert "coração" in medido.text

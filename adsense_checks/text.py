@@ -59,14 +59,14 @@ structure check belongs elsewhere.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html.parser import HTMLParser
 from typing import NamedTuple
 from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
 
-from adsense_checks.http import DEFAULT_TIMEOUT, Fetch, decoding_loss, fetch
+from adsense_checks.http import DEFAULT_TIMEOUT, MAX_BODY_BYTES, Fetch, decoding_loss, fetch
 from adsense_checks.status import Status, escalate
 
 # No end tag exists for these, so nothing is pushed on their behalf.
@@ -1620,6 +1620,14 @@ def measure_fetch(response: Fetch, *, min_words: int = DEFAULT_MIN_WORDS) -> Tex
         )
 
     depth = measure_depth(response.text, min_words=min_words, url=url)
+    if response.truncated:
+        # Measured on the part a Google crawler reads, which is the right part
+        # to measure, and said so: a count off a cut body reads as the page's.
+        depth = replace(
+            depth,
+            reason=f"{depth.reason}; body cut at the first {MAX_BODY_BYTES:,} bytes, as"
+            " Google's crawlers read it",
+        )
     loss = decoding_loss(response, depth.text)
     if loss is not None:
         # The response names an encoding its own bytes do not honour, and the

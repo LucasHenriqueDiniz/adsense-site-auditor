@@ -1526,3 +1526,14 @@ def test_toda_tag_nao_textual_tem_o_conteudo_excluido_da_contagem():
                 "nav", "p", "section", "td"):
         html = f"<html><body><p>visivel</p><{tag}>presente</{tag}></body></html>"
         assert "presente" in parse_html(html).text, tag
+
+
+def test_pagina_cortada_no_teto_fica_marcada_no_crawl(server):
+    from adsense_checks.http import MAX_BODY_BYTES
+
+    base, routes = server
+    routes["/"] = (200, HTML, pagina("Home", "<!-- " + "x" * MAX_BODY_BYTES + " -->"))
+
+    r = varrer(base)
+
+    assert r.pages[0].truncated is True

@@ -1034,3 +1034,51 @@ def test_filho_de_indice_que_redireciona_para_host_entre_colchetes_nao_derruba(s
 
     assert r.url_count == 2
     assert any("torto.xml" in reason for reason in r.reasons)
+
+
+def test_sitemap_valido_entre_15_e_50_mb_e_lido_inteiro(server):
+    """O teto de 15 MiB do fetch é o de uma página. Um sitemap pode ter até 50 MB
+    pelo protocolo, e cortado em 15 MiB um sitemap válido virava "XML parse
+    error: no element found" — o site acusado de um corte que este cliente fez.
+    Medido em 2026-10-19 com um urlset de 23,5 MB."""
+    from adsense_checks.http import MAX_BODY_BYTES
+
+    base, rotas = server
+    urls = [f"{base}/p{i}" for i in range(1000)]
+    enchimento = "<!-- " + "x" * (MAX_BODY_BYTES + 1024 * 1024) + " -->"
+    corpo = urlset(*urls).replace("</urlset>", enchimento + "</urlset>")
+    assert len(corpo) > MAX_BODY_BYTES
+    rotas["/sitemap.xml"] = (200, XML, corpo)
+
+    r = check_sitemap(base)
+
+    assert r.kind == "urlset"
+    assert r.url_count == 1000
+    assert r.status is Status.OK, r.reasons
+
+
+def test_sitemap_acima_do_limite_do_protocolo_e_FAIL_com_o_motivo(server, monkeypatch):
+    """Acima de 50 MB o documento não é um sitemap que um crawler lê. O pedaço
+    em mão está cortado no meio do XML; o motivo é o tamanho, não a marcação."""
+    import adsense_checks.sitemap as sitemap
+
+    monkeypatch.setattr(sitemap, "MAX_SITEMAP_BYTES", 4096)
+    base, rotas = server
+    corpo = urlset(*[f"{base}/p{i}" for i in range(500)])
+    assert len(corpo) > 4096
+    rotas["/robots.txt"] = (200, {"Content-Type": "text/plain"}, f"Sitemap: {base}/grande.xml\n")
+    rotas["/grande.xml"] = (200, XML, corpo)
+
+    r = check_sitemap(base)
+
+    assert r.status is Status.FAIL
+    assert any("sitemap protocol allows" in nota for nota in r.reasons), r.reasons
+    assert not any("parse error" in nota for nota in r.reasons), r.reasons
+
+
+def test_o_limite_do_sitemap_e_o_do_protocolo():
+    """"must be no larger than 50MB (52,428,800 bytes)" — sitemaps.org,
+    conferido em 2026-10-19."""
+    from adsense_checks.sitemap import MAX_SITEMAP_BYTES
+
+    assert MAX_SITEMAP_BYTES == 52_428_800

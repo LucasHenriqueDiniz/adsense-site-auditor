@@ -73,6 +73,10 @@ MAX_INDEX_DEPTH = 2
 MAX_CHILD_SITEMAPS = 20
 # Sample kept for the report. url_count is the real total; this is evidence.
 MAX_SAMPLE_URLS = 50
+# sitemaps.org: each sitemap "must be no larger than 50MB (52,428,800 bytes)",
+# and so must an index (checked on 2026-10-19). Read to that limit and no
+# further, instead of the 15 MiB `fetch` reads of a page.
+MAX_SITEMAP_BYTES = 52_428_800
 
 _HTML_START = re.compile(r"^\s*(<!doctype\s+html|<html[\s>])", re.IGNORECASE)
 _DOCTYPE = re.compile(r"<!doctype", re.IGNORECASE)
@@ -364,10 +368,20 @@ def _fetch_doc(
         doc = SitemapDoc(url=url, status=Status.ERROR, reason="gzipped sitemap; not readable here")
         return doc, Fetch(url=url)
 
-    got = fetch(url, timeout=timeout, session=session)
+    got = fetch(url, timeout=timeout, session=session, max_bytes=MAX_SITEMAP_BYTES)
     if not got.ok:
         reason = got.error or f"HTTP {got.status_code}"
         return SitemapDoc(url=url, status=got.status, reason=reason), got
+    if got.truncated:
+        # Past the protocol's limit the document is not a sitemap a crawler
+        # reads, and the part on hand is cut mid-XML: parsing it reported
+        # "no element found", blaming a cut on the site's markup.
+        doc = SitemapDoc(
+            url=got.final_url or url,
+            status=Status.FAIL,
+            reason=f"larger than the {MAX_SITEMAP_BYTES:,} bytes the sitemap protocol allows",
+        )
+        return doc, got
 
     doc = parse_sitemap(
         got.text,

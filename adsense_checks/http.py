@@ -66,6 +66,11 @@ _UNPARSEABLE = SplitResult("", "", "", "", "")
 # and reading with no ceiling let one link exhaust the auditor: a crawl whose
 # home page linked an extensionless 300 MB download read all of it and peaked at
 # 1,382 MB of memory, measured the same day. 15 MB is taken as 15 MiB.
+#
+# It is the default, not a law of every fetch. A sitemap may be 50 MB under its
+# own protocol, and cut at 15 MiB a valid one became "XML parse error: no
+# element found" — the site blamed for a cut this client made — so a caller
+# whose document has its own documented limit passes it (see `sitemap.py`).
 MAX_BODY_BYTES = 15 * 1024 * 1024
 
 
@@ -144,8 +149,8 @@ class Fetch:
     # the web — a two-hop answer was reported as the duration of its last hop.
     elapsed_ms: float | None = None
     error: str | None = None
-    # The body went past `MAX_BODY_BYTES` and `text` holds only the part a
-    # Google crawler would read.
+    # The body went past the limit `fetch` was given — `MAX_BODY_BYTES` unless
+    # the caller said otherwise — and `text` holds only the part up to it.
     truncated: bool = False
     # Set when the header or the document names an encoding the bytes do not
     # honour. `text` is then what a browser would show, replacement characters
@@ -430,8 +435,8 @@ def _declared_charset(text: str) -> str:
     return match.group(1).lower() if match else ""
 
 
-def _read_body(resp: requests.Response) -> tuple[bytes, bool]:
-    """The body, uncompressed, up to `MAX_BODY_BYTES`; and whether it went past.
+def _read_body(resp: requests.Response, max_bytes: int) -> tuple[bytes, bool]:
+    """The body, uncompressed, up to `max_bytes`; and whether it went past.
 
     Read in chunks off a streamed response, so the bytes past the ceiling are
     never downloaded, let alone decoded.
@@ -441,10 +446,10 @@ def _read_body(resp: requests.Response) -> tuple[bytes, bool]:
     for chunk in resp.iter_content(chunk_size=64 * 1024):
         chunks.append(chunk)
         size += len(chunk)
-        if size > MAX_BODY_BYTES:
+        if size > max_bytes:
             break
     body = b"".join(chunks)
-    return body[:MAX_BODY_BYTES], size > MAX_BODY_BYTES
+    return body[:max_bytes], size > max_bytes
 
 
 def _decode(raw: bytes, content_type: str) -> tuple[str, str | None]:
@@ -549,6 +554,7 @@ def fetch(
     session: requests.Session | None = None,
     user_agent: str = ADSENSE_UA,
     method: str = "GET",
+    max_bytes: int = MAX_BODY_BYTES,
 ) -> Fetch:
     """GET a URL following redirects. Never raises; failures come back as ERROR.
 
@@ -619,7 +625,7 @@ def fetch(
         # is the whole reason for the fallback.
         try:
             if answered_with != "HEAD":
-                raw, result.truncated = _read_body(resp)
+                raw, result.truncated = _read_body(resp, max_bytes)
                 result.text, result.charset_error = _decode(
                     raw, resp.headers.get("content-type", "")
                 )
