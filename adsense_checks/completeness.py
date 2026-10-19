@@ -1307,10 +1307,12 @@ def _router_of(url: str) -> str:
     sliced path `//other-host/` back onto the page sends the probe to
     `other-host`.
 
-    Only the navigation check reads a page this way. `check_trust_pages` keeps
-    `_directory_of`, which is stricter where a verdict rides on it: a subsite
-    mounted at `/about/` serves its error template with 200 at `/about/` itself,
-    and only `/about/`'s own answer recognises it.
+    Only the navigation check reads a page this way, and only first: where the
+    router's answer is not honest, `count_broken_nav_links` asks the page's own
+    directory too. `check_trust_pages` keeps `_directory_of`, which is stricter
+    where a verdict rides on it: a subsite mounted at `/about/` serves its error
+    template with 200 at `/about/` itself, and only `/about/`'s own answer
+    recognises it.
     """
     path = split_url(url).path
     return join_url(url, ".." if path.endswith("/") else ".")
@@ -2665,7 +2667,11 @@ def count_broken_nav_links(
     actually lands in about itself, and each 200 is judged by the answer of the
     router that served it — `_router_of`, so `/apps/pdf-rotate/` is judged by
     `/apps/` and a catalogue of trailing-slash links costs one probe, not one
-    per link. Pass `not_found` to share one run's answers and one run's
+    per link. Where that router answers 200 for what it does not have, the
+    page's own directory is asked too, and an honest answer there is the one
+    that counts: it is how `/docs/` mounted under an SPA root is told from a
+    dead link the root's catch-all answers. Pass `not_found` to share one run's
+    answers and one run's
     ceiling with the other sub-check; without it the probes are sent here, and
     only when there is a menu to sort.
 
@@ -2812,6 +2818,21 @@ def count_broken_nav_links(
         # same predicate would be a branch no input can take, and a branch no
         # input can take is a comment that looks like a guard.
         probe = probes.for_url(landed, by_router=True)
+        if probe is not None and not probe.trustworthy:
+            # The router that answered serves 200 for what it does not have, so
+            # its answer cannot vouch for the page — but a subtree mounted under
+            # it can still have a router of its own. Asked about itself, an
+            # honest `/docs/` proves something other than the parent's catch-all
+            # handles `/docs/…`, so the 200 at `/docs/` is that subtree's page.
+            # Read by the router alone, an SPA at the root turned `/docs/`,
+            # `/pt/` and `/blog/`, each honest beneath, from working to
+            # unverified, measured on 2026-10-19. Only here does the page's own
+            # directory get asked, so a host whose routers answer 404 spends
+            # nothing more; and without a trailing slash the two are the same
+            # directory, so `for_url` returns the answer already in hand.
+            own = probes.for_url(landed)
+            if own is not None and own.trustworthy:
+                probe = own
         if probe is None:
             # Nothing was measured where this came from: the per-run ceiling on
             # probed directories was already spent, or the response came from

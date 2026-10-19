@@ -91,7 +91,10 @@ check:
   both `/apps/`'s answer, so a catalogue of trailing-slash links costs one probe
   and not one per link. Read by its own directory, every such link spent a slot,
   and on 2026-10-19 smallwebapps.com's 21-link menu ran out of the ceiling with
-  11 links unmeasured and the navigation line `MISS` on a healthy site.
+  11 links unmeasured and the navigation line `MISS` on a healthy site. Where
+  the router answers 200 for what it does not have — an SPA at the root — the
+  link's own directory is asked as well, and if it answers 404 honestly the
+  link counts as working: `/docs/` mounted under the SPA is its own router.
 - **A trust page** is read by its own directory, `/about/` for `/about/`. That is
   where a subsite mounted at `/about/`, serving its own error template with 200,
   is recognised; the root's honest 404 says nothing about it.

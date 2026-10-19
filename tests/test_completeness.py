@@ -3212,6 +3212,58 @@ def test_um_menu_de_links_com_barra_final_e_medido_pelo_roteador_que_respondeu(s
     assert sondados == [f"/{NOT_FOUND_PROBE_PATHS[0]}", f"/apps/{NOT_FOUND_PROBE_PATHS[0]}"]
 
 
+SUBARVORES = ["/docs/", "/pt/", "/blog/"]
+
+
+def _spa_na_raiz(rotas, montadas):
+    """Uma SPA na raiz: o que ela não tem, ela responde com a home e 200.
+
+    As subárvores em `montadas` têm roteador próprio e 404 honesto abaixo
+    delas; qualquer outro caminho cai no catch-all da raiz.
+    """
+    casa = pagina("Casa", extra=menu_de(*SUBARVORES))
+    rotas["/"] = (200, {}, casa)
+    for c in montadas:
+        rotas[c] = (200, {}, pagina(c))
+    rotas.default = lambda metodo, caminho: (
+        None if any(caminho.startswith(c) for c in montadas) else (200, {}, casa)
+    )
+
+
+def test_uma_subarvore_honesta_sob_uma_spa_na_raiz_continua_verificada(server):
+    """Achado 2 da revisão do PR #1: a leitura pelo roteador perdia cobertura.
+
+    O roteador da raiz responde 200 para o que não tem, então a resposta dele
+    não serve de prova. Lidos só por ele, `/docs/`, `/pt/` e `/blog/` — cada um
+    com 404 honesto embaixo — saíam de funcionando para sem verificação,
+    medido em 2026-10-19. Perguntado sobre si mesmo, um `/docs/` honesto prova
+    que outra coisa, que não o catch-all da raiz, atende `/docs/…`.
+    """
+    base, rotas = server
+    _spa_na_raiz(rotas, SUBARVORES)
+
+    relatorio = count_broken_nav_links(base + "/")
+
+    assert relatorio.unclassified == []
+    assert relatorio.count == 0
+    assert relatorio.status is Status.OK
+    pedidos = caminhos_pedidos(rotas)
+    for c in SUBARVORES:
+        assert f"{c}{NOT_FOUND_PROBE_PATHS[0]}" in pedidos
+
+
+def test_um_link_morto_sob_uma_spa_na_raiz_continua_sem_verificacao(server):
+    """O outro lado: sem subárvore montada, o próprio diretório também cai no
+    catch-all, a pergunta a ele não é honesta e o link não vira funcionando."""
+    base, rotas = server
+    _spa_na_raiz(rotas, ["/docs/"])
+
+    relatorio = count_broken_nav_links(base + "/")
+
+    assert [link.url for link in relatorio.unclassified] == [base + "/pt/", base + "/blog/"]
+    assert relatorio.status is Status.MISSING
+
+
 def test_o_roteador_de_um_link_com_barra_final_e_o_diretorio_pai(server):
     """O predicado, direto, nas duas leituras que o módulo usa.
 
