@@ -490,6 +490,14 @@ def _link_only(roots: list[_Node], words: _LinkWords | None = None) -> frozenset
     invented, while "every word" needs none. "Hyper<a>text</a>" has a word
     outside the link, so its subtree is not link-only.
 
+    A link inside running text is not one of them: "Leia <a>este guia</a> e
+    volte" is a sentence with a link in it, and its words are the sentence's.
+    Cutting them took 100 words out of a 220-word paragraph of a section beside
+    the block, and a reader's 475 came out 375. So an inline element whose block
+    flows with words outside links stays, whatever it holds (see
+    `_in_running_text`). Only inline elements can be in running text, so a
+    heading asked about as itself (`_page_title`) is always judged whole.
+
     `words` is `_link_words` of a tree holding every root; without it, each
     root gets its own walk.
     """
@@ -503,10 +511,33 @@ def _link_only(roots: list[_Node], words: _LinkWords | None = None) -> frozenset
         node = pending.pop()
         inside, outside = words[node]
         if inside and not outside:
-            found.add(node)
+            if not _in_running_text(node, words):
+                found.add(node)
             continue
         pending.extend(c for c in node.content if isinstance(c, _Node) and c in words)
     return frozenset(found)
+
+
+def _in_running_text(node: _Node, words: _LinkWords) -> bool:
+    """Whether `node` is inline in a block whose flow has words outside links.
+
+    The flow of a block is its own text and its inline elements, not the
+    blocks nested in it: `<div><a>Home</a><p>Texto</p></div>` is a link on a
+    line of its own above a paragraph, and the link is navigation.
+    """
+    if node.tag not in INLINE_ELEMENTS:
+        return False
+    block = node.parent
+    while block is not None and block.tag in INLINE_ELEMENTS:
+        block = block.parent
+    if block is None:
+        return False
+    return any(
+        _WORD.search(item)
+        if isinstance(item, str)
+        else item.tag in INLINE_ELEMENTS and item in words and words[item][1]
+        for item in block.content
+    )
 
 
 def _links_home(href: str) -> bool:
@@ -706,9 +737,7 @@ def _beside_the_content(
 _WordSums = dict[_Node, tuple[int, int, int]]
 
 
-def _word_sums(
-    root: _Node, prose_words: dict[_Node, int], left_out: frozenset[_Node], link_words: _LinkWords
-) -> _WordSums:
+def _word_sums(root: _Node, prose_words: dict[_Node, int], left_out: frozenset[_Node]) -> _WordSums:
     """How the words under each element split into prose, words that weigh
     nothing, and the rest.
 
@@ -720,9 +749,12 @@ def _word_sums(
     the 142 smallwebapps.com tool pages built on 2026-08-30 at their FAQ alone.
 
     `prose_words` holds each prose block's own words; `left_out` is the page
-    furniture. Totals are summed chunk by chunk, so a word an inline tag splits
-    counts twice; that only nudges a comparison, and no count the report prints
-    is taken from here.
+    furniture and the link-only subtrees that leave a count (`_link_only`). A
+    link in running text is not among them, so a paragraph's linked words are
+    prose once and weightless never: weighed as both, 40 linked words in a
+    50-word paragraph carried a climb over 80 words of chrome. Totals are
+    summed chunk by chunk, so a word an inline tag splits counts twice; that
+    only nudges a comparison, and no count the report prints is taken from here.
     """
     order: list[_Node] = []
     stack = [root]
@@ -743,8 +775,7 @@ def _word_sums(
                     prose + child_prose,
                     heading + child_heading,
                 )
-        inside, outside = link_words.get(node, (False, False))
-        if node.tag in HEADING_ELEMENTS or node in left_out or (inside and not outside):
+        if node.tag in HEADING_ELEMENTS or node in left_out:
             heading = total - prose
         sums[node] = (total, prose, heading)
     return sums
@@ -863,7 +894,8 @@ class _MainContent(NamedTuple):
     # False: the heuristic separated nothing, and `node` is the whole page.
     isolated: bool
     # Subtrees inside `node` left out of the count. Empty except for a region
-    # `_titled_region` widened — see `_beside_the_content`.
+    # widened from the block, by `_titled_region` or by `_prose_region` — see
+    # `_beside_the_content`. Non-empty does not mean a title was found.
     outside: frozenset[_Node] = frozenset()
     # Subtrees inside `node` that are counted but could as well be the page.
     undecided: frozenset[_Node] = frozenset()
@@ -925,7 +957,13 @@ def _main_container(doc: _Parser, url: str = "") -> _MainContent:
     # copyright `<p>` in its footer is no competitor: counting it as one sent
     # the page to the body and reported a thin listing as unmeasurable.
     in_furniture = _subtrees(page_furniture)
-    subheaded = _subheaded(doc.root)
+    # Built on the first question: a page with no list anywhere never walks it.
+    subheaded_cache: list[frozenset[_Node]] = []
+
+    def subheaded() -> frozenset[_Node]:
+        if not subheaded_cache:
+            subheaded_cache.append(_subheaded(doc.root))
+        return subheaded_cache[0]
 
     def headed_section(block: _Node) -> tuple[_Node | None, _Node | None] | None:
         """Where a block's credit lands once it passes through list structure —
@@ -940,7 +978,7 @@ def _main_container(doc: _Parser, url: str = "") -> _MainContent:
             if (
                 candidate is not None
                 and candidate.tag not in WHOLE_PAGE_ELEMENTS
-                and candidate in subheaded
+                and candidate in subheaded()
             ):
                 return holder, above
         return None
@@ -950,6 +988,8 @@ def _main_container(doc: _Parser, url: str = "") -> _MainContent:
     every_block = frozenset(in_order)
     targets: dict[_Node, tuple[_Node | None, _Node | None]] = {}
     text_blocks: list[tuple[_Node, float]] = []
+    # Each text block's own words, kept for `_prose_region` instead of collected twice.
+    own_words: dict[_Node, int] = {}
     for node in in_order:
         if node.tag == "p":
             # A paragraph inside a list or a `<details>` passes through it into
@@ -973,10 +1013,11 @@ def _main_container(doc: _Parser, url: str = "") -> _MainContent:
             continue
         # Each by its own words: a `<li>` holding a nested list is credited for
         # its label, and each nested item for itself.
-        weight = float(len(_normalize(_collect(node, skip=every_block))))
-        if weight > 0:
+        own = _normalize(_collect(node, skip=every_block))
+        if own:
             targets[node] = section
-            text_blocks.append((node, weight))
+            text_blocks.append((node, float(len(own))))
+            own_words[node] = word_count(own)
     competes = bool(text_blocks) or any(node not in in_furniture for node, _ in text_paragraphs)
     allowed = {n for n, _ in text_paragraphs} | {
         n for n, _ in (text_blocks if competes else link_paragraphs)
@@ -1003,17 +1044,23 @@ def _main_container(doc: _Parser, url: str = "") -> _MainContent:
         title = _page_title(body, page_furniture, link_words, url)
         region = _titled_region(title, winner)
         prose_blocks: frozenset[_Node] = frozenset()
+        if region is winner and winner in in_furniture:
+            # The scoring elected a block inside the page's furniture — the only
+            # `<p>` on the page sitting in a `<header>`. Climbing from there
+            # stopped on the header itself, weightless and so worth more than
+            # the block, and counted its `<nav>` as content: 60 words where the
+            # block alone is 40. A block in the furniture is not grown.
+            return _MainContent(winner, True)
         if region is winner:
             # No title to widen to, or none outside the block: weigh the prose
             # instead (see `_prose_region`).
-            text_paragraph_nodes = {n for n, _ in text_paragraphs}
-            text_block_nodes = {n for n, _ in text_blocks}
-            prose_words = {
-                n: word_count(_collect(n, skip=every_block))
-                for n in in_order
-                if (n in text_paragraph_nodes and n not in in_furniture) or n in text_block_nodes
-            }
-            sums = _word_sums(doc.root, prose_words, page_furniture, link_words)
+            prose_words = dict(own_words)
+            for n, _ in text_paragraphs:
+                if n not in in_furniture:
+                    prose_words[n] = word_count(_collect(n, skip=every_block))
+            sums = _word_sums(
+                doc.root, prose_words, page_furniture | _link_only([doc.root], link_words)
+            )
             region = _prose_region(winner, sums)
             if region is winner:
                 # Nothing above the block is worth more than the block. Its own

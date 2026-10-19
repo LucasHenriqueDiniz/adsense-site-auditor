@@ -343,7 +343,10 @@ Behaviour observed in the runs above, recorded here because a reader will hit it
   out. So is every subtree the widening collects beside the title and the block
   whose words are all link text — a link being an `<a>` with an `href`: a menu,
   a widget list or a related-tools grid is navigation whatever it is tagged.
-  The block and the title are taken whole, so a "Related posts" list of links
+  A link inside running text is not: "read <a>this guide</a> first" is a
+  sentence, and the linked words count with it. Until 2026-10-19 they were
+  cut, and a section beside the block with 100 linked words in a 220-word
+  paragraph read 100 words short. The block and the title are taken whole, so a "Related posts" list of links
   inside the block still counts. An `<h1>` whose words are all link text is a
   logo, not a title, and widens nothing, unless it links to the page it sits on
   — a post title linked to its own permalink. That takes the page's URL, which
@@ -367,7 +370,7 @@ Behaviour observed in the runs above, recorded here because a reader will hit it
   menus, furniture and headings weigh nothing either way, plain `<div>` text
   and tool chrome weigh against, and the climb never reaches the `<body>`.
   Measured on 2026-10-19 with the title search switched off, as on a page with
-  no `<h1>`: the 28 tool pages read a median of 729.5 words (156.5 before) and
+  no `<h1>`: the 28 tool pages read a median of 732 words (156.5 before) and
   the 142 of 2026-08-30 a median of 556 (239.5 before), against references of
   722.5 and 553. One of the 142, compress-pdf-to-1mb, kept its `<h1>` inside a
   winning hero and read 182 where the reference holds 541; it now reads 547.

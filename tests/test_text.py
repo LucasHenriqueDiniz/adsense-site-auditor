@@ -834,6 +834,81 @@ def test_sem_titulo_a_subida_para_antes_do_body():
     assert measure_depth(html).words == 200
 
 
+def _linkado(partes: int, no_link: int, fora: int) -> str:
+    """Um parágrafo de texto corrido com um link no meio de cada frase."""
+    return " ".join(
+        f'Leia <a href="/g{i}">{_palavras(no_link)}</a> e {_palavras(fora)}' for i in range(partes)
+    )
+
+
+def test_link_no_meio_da_frase_conta_com_a_frase():
+    """"Leia <a>este guia</a> e volte" é uma frase com um link, e as palavras
+    do link são da frase. A regra do só-link achava cada <a> dentro do <p> e o
+    tirava da conta: numa seção vizinha com 100 palavras em links, um leitor
+    conta 475 e a medição dava 375 — desde o caminho do título, no PR #2."""
+    html = (
+        '<html><body><div class="post"><h1>Titulo</h1>'
+        f'<section><h2>Parte um</h2><div class="b"><p>{_palavras(250)}</p></div></section>'
+        f"<section><h2>Parte dois</h2><p>{_linkado(20, 5, 4)}</p></section>"
+        "</div></body></html>"
+    )
+    assert measure_depth(html).words == 1 + 2 + 250 + 2 + 20 * 11
+
+
+def test_links_em_linha_nao_carregam_a_subida_sem_titulo():
+    """Pesadas como prosa e também como sem peso, as palavras de link de um
+    parágrafo vizinho valiam em dobro: 40 delas levaram a região por cima de
+    80 palavras de chrome, contadas em silêncio. Sem os links, a mesma página
+    não sobe — e com eles também não deve."""
+    html = (
+        '<html><body><div id="page">'
+        f'<div class="content"><div class="a"><p>{_palavras(150)}</p></div></div>'
+        f'<div class="more"><p>{_linkado(10, 4, 0)}</p></div>'
+        f'<div class="chrome">{_ruido(80)}</div>'
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 150
+    assert "ruido" not in d.text
+
+
+def test_bloco_dentro_da_mobilia_nao_sobe():
+    """O único <p> da página está num <header>, ao lado de um <nav> de texto.
+    A subida parava no próprio <header> — sem peso, então valendo mais que o
+    bloco — e contava o nav como conteúdo. Bloco na mobília fica como está."""
+    html = (
+        '<html><body><div id="page"><header><div class="intro">'
+        f"<p>{_palavras(40)}</p></div><nav>{_ruido(20)}</nav></header>"
+        f'<div class="x">{_ruido(30)}</div></div></body></html>'
+    )
+    d = measure_depth(html)
+    assert d.words == 40
+    assert "ruido" not in d.text
+
+
+@pytest.mark.parametrize(
+    "html,so_link",
+    [
+        ('<div><p>Leia <a href="/g">este guia</a> agora</p></div>', set()),
+        # A palavra fora do link pode estar num irmão inline, não no texto direto.
+        ('<div><p><em>Leia</em> <a href="/g">isto</a></p></div>', set()),
+        # Um link numa linha própria, acima de um parágrafo, é navegação: o fluxo
+        # do <div> não tem palavra fora de link, só o <p> aninhado tem.
+        ('<div><a href="/">Inicio</a><p>Texto do post</p></div>', {"a"}),
+        # Só elemento inline fica dentro de uma frase. Um <div> de link no meio
+        # do texto é um bloco à parte — um card "leia mais" — e sai.
+        ('<div>Texto do post <div><a href="/x">Leia mais</a></div></div>', {"div"}),
+    ],
+    ids=["frase", "irmao-inline", "linha-propria", "bloco-de-link"],
+)
+def test_link_em_texto_corrido_nao_e_so_link(html, so_link):
+    from adsense_checks.text import _iter_elements, _link_only, _parse
+
+    doc = _parse(html)
+    div = next(n for n in _iter_elements(doc.root) if n.tag == "div")
+    assert {n.tag for n in _link_only([div])} == so_link
+
+
 def test_texto_solto_depois_do_bloco_que_decide_a_faixa_e_ERROR():
     """Texto fora de qualquer elemento, direto no wrapper, depois do bloco. Só
     os elementos eram classificados, então ele entrava na conta sem passar por
