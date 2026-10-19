@@ -498,6 +498,66 @@ def test_grade_de_cards_linkados_fica_de_fora_e_nao_vence_a_pontuacao(por_card):
     assert d.status is Status.OK, d.reason
 
 
+def test_texto_solto_depois_do_bloco_que_decide_a_faixa_e_ERROR():
+    """Texto fora de qualquer elemento, direto no wrapper, depois do bloco. Só
+    os elementos eram classificados, então ele entrava na conta sem passar por
+    controle nenhum: 521 palavras, OK, em volta de um post de 120. É o mesmo
+    caso do <div> de texto puro, só que sem o <div>."""
+    html = (
+        '<html><body><div id="page"><h1>Titulo</h1>'
+        f'<div class="content"><div class="entry"><p>{_palavras(120)}</p></div></div>'
+        f"{_ruido(400)}"
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.status is Status.ERROR
+    assert "not separated from the page around it: 400 words" in d.reason
+    assert "below the configured threshold" in d.reason  # sem o texto solto: 121
+
+
+def test_texto_solto_entre_o_titulo_e_o_bloco_conta():
+    """A mesma regra dos elementos: o trecho entre o <h1> e o bloco é o que a
+    subida foi buscar, solto ou não."""
+    html = (
+        '<html><body><div id="page"><h1>Titulo</h1>'
+        f"{_palavras(300)}"
+        f'<div class="content"><div class="entry"><p>{_palavras(200)}</p></div></div>'
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 501
+    assert d.status is Status.OK, d.reason
+
+
+def test_ancora_sem_href_nao_e_link():
+    """`<a name="faq">` marca um lugar, não leva a lugar nenhum. Tratada como
+    link, ela tirava o <h2> da conta e o status de heading da seção, e uma
+    seção de conteúdo depois do bloco virava dúvida: 351 palavras, ERROR."""
+    html = (
+        '<html><body><div id="page"><h1>Titulo</h1>'
+        f'<div class="content"><div class="entry"><p>{_palavras(200)}</p></div></div>'
+        '<div class="more"><h2><a name="faq">Perguntas frequentes</a></h2>'
+        f"<ul><li>{_palavras(150)}</li></ul></div>"
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 353
+    assert "Perguntas frequentes" in d.text
+    assert d.status is Status.INFO, d.reason
+
+
+def test_diretorio_so_de_links_e_medido_como_lista():
+    """Uma página que é só uma lista de `<p><a>`: a lista é o conteúdo dela.
+    Parágrafos de link só deixam de pontuar quando há parágrafo de texto
+    competindo; sem nenhum, a página caía no <body> e um diretório ralo virava
+    "main content not isolated" — sem número, onde a base dizia 180, WARNING."""
+    itens = "".join(f'<p><a href="/i{i}">item numero {i}</a></p>' for i in range(60))
+    d = measure_depth(f'<html><body><div class="list">{itens}</div></body></html>')
+    assert d.words == 180
+    assert d.status is Status.WARNING, d.reason
+    assert "not isolated" not in d.reason
+
+
 def test_so_link_e_toda_palavra_dentro_de_link_nem_uma_a_menos():
     """`_link_only` é tudo ou nada. Uma palavra fora do link basta para o
     trecho ser texto; um separador sem palavra ("»") não basta."""
@@ -512,6 +572,7 @@ def test_so_link_e_toda_palavra_dentro_de_link_nem_uma_a_menos():
     assert not so_link('<div>Hyper<a href="/t">texto</a></div>')
     assert not so_link('<div><a href="/n">Noticias</a> (15)</div>')
     assert not so_link("<div>   </div>")  # sem palavra nenhuma, não é link
+    assert not so_link('<div><a name="faq">Perguntas</a></div>')  # âncora, não link
 
 
 def test_sem_estrutura_nenhuma_cai_no_corpo_inteiro():

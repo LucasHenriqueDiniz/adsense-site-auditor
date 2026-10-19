@@ -401,7 +401,51 @@ def _ancestors(node: _Node | None):
         node = node.parent
 
 
-def _link_only(roots: list[_Node]) -> frozenset[_Node]:
+def _is_link(node: _Node) -> bool:
+    """An `<a>` that goes somewhere. `<a name="faq">` marks a place; it is not a
+    link, and a heading wrapped in one is still a heading."""
+    return node.tag == "a" and "href" in node.attrs
+
+
+# Per element: (has words inside links, has words outside them).
+_LinkWords = dict[_Node, tuple[bool, bool]]
+
+
+def _link_words(root: _Node) -> _LinkWords:
+    """For `root` and every live element under it: whether it holds words inside
+    links, and whether it holds words outside them.
+
+    One walk down records which text sits inside a link; one walk back up folds
+    the two answers per subtree. Built once per document, because asking it per
+    paragraph walked every paragraph's subtree again: 2000 unclosed `<div><p>`
+    took 4.3 s that way, against 1.0 s before the question existed. Iterative,
+    for the same malformed pages `_collect` is.
+    """
+    order: list[tuple[_Node, bool]] = []
+    stack = [(root, any(_is_link(above) for above in _ancestors(root)))]
+    while stack:
+        node, linked = stack.pop()
+        order.append((node, linked))
+        stack.extend(
+            (child, linked or _is_link(child))
+            for child in node.content
+            if isinstance(child, _Node) and not child.dropped
+        )
+    words: _LinkWords = {}
+    # Reversed pre-order visits every child before its parent.
+    for node, linked in reversed(order):
+        worded = any(isinstance(item, str) and _WORD.search(item) for item in node.content)
+        inside = linked and worded
+        outside = not linked and worded
+        for child in node.content:
+            if isinstance(child, _Node) and child in words:
+                child_inside, child_outside = words[child]
+                inside, outside = inside or child_inside, outside or child_outside
+        words[node] = (inside, outside)
+    return words
+
+
+def _link_only(roots: list[_Node], words: _LinkWords | None = None) -> frozenset[_Node]:
     """The largest subtrees under `roots` whose every word is link text.
 
     Link text is navigation by another name. A menu, a widget list, a grid of
@@ -412,41 +456,26 @@ def _link_only(roots: list[_Node]) -> frozenset[_Node]:
     invented, while "every word" needs none. "Hyper<a>text</a>" has a word
     outside the link, so its subtree is not link-only.
 
-    One walk down records which text sits inside an `<a>`; one walk back up
-    says, per subtree, whether it has words inside links and words outside
-    them. Both iterative, for the same malformed pages `_collect` is.
+    `words` is `_link_words` of a tree holding every root; without it, each
+    root gets its own walk.
     """
-    order: list[tuple[_Node, bool]] = []
-    stack = [(root, any(above.tag == "a" for above in _ancestors(root))) for root in roots]
-    while stack:
-        node, linked = stack.pop()
-        order.append((node, linked))
-        stack.extend(
-            (child, linked or child.tag == "a")
-            for child in node.content
-            if isinstance(child, _Node) and not child.dropped
-        )
-    # Reversed pre-order visits every child before its parent.
-    in_links: dict[_Node, bool] = {}
-    outside_links: dict[_Node, bool] = {}
-    for node, linked in reversed(order):
-        worded = any(isinstance(item, str) and _WORD.search(item) for item in node.content)
-        children = [c for c in node.content if isinstance(c, _Node) and c in in_links]
-        in_links[node] = (linked and worded) or any(in_links[c] for c in children)
-        outside_links[node] = (not linked and worded) or any(outside_links[c] for c in children)
-
+    if words is None:
+        words = {}
+        for root in roots:
+            words.update(_link_words(root))
     found: set[_Node] = set()
     pending = list(roots)
     while pending:
         node = pending.pop()
-        if in_links[node] and not outside_links[node]:
+        inside, outside = words[node]
+        if inside and not outside:
             found.add(node)
             continue
-        pending.extend(c for c in node.content if isinstance(c, _Node) and c in in_links)
+        pending.extend(c for c in node.content if isinstance(c, _Node) and c in words)
     return frozenset(found)
 
 
-def _page_title(body: _Node, furniture: frozenset[_Node]) -> _Node | None:
+def _page_title(body: _Node, furniture: frozenset[_Node], link_words: _LinkWords) -> _Node | None:
     """The page's own `<h1>`: the first one with words that is neither furniture
     nor a link.
 
@@ -457,14 +486,15 @@ def _page_title(body: _Node, furniture: frozenset[_Node]) -> _Node | None:
     logo is a link home: `<h1><a href="/">Brand</a></h1>` is link-only, and a
     page's title is not.
 
-    `furniture` is `_furniture(body)`, which the caller already holds.
+    `furniture` is `_furniture(body)` and `link_words` is `_link_words` of the
+    document, both of which the caller already holds.
     """
     for node in _iter_elements(body):
         if node.tag != "h1" or word_count(_collect(node)) == 0:
             continue
         if any(above in furniture for above in _ancestors(node)):
             continue
-        if node in _link_only([node]):
+        if node in _link_only([node], link_words):
             continue
         return node
     return None
@@ -484,10 +514,15 @@ def _has_heading(node: _Node, skip: frozenset[_Node]) -> bool:
 
 
 def _beside_the_content(
-    region: _Node, title: _Node, block: _Node, page_furniture: frozenset[_Node]
-) -> tuple[frozenset[_Node], frozenset[_Node]]:
+    region: _Node,
+    title: _Node,
+    block: _Node,
+    page_furniture: frozenset[_Node],
+    link_words: _LinkWords,
+) -> tuple[frozenset[_Node], frozenset[_Node], int]:
     """What a widened region holds besides its title, its block and the path
-    between them: what to leave out, and what nobody can say is content.
+    between them: what to leave out, what nobody can say is content, and how
+    many words of that sit loose, outside any element.
 
     The climb from the block to the title collects every branch hanging off the
     two paths. Some are the point — the sibling sections the scoring cannot
@@ -510,6 +545,13 @@ def _beside_the_content(
     cases, and structure cannot say which. It stays in the count;
     `measure_depth` refuses the count when the verdict depends on it.
 
+    Text sitting loose in the region or in a container on the paths — outside
+    every element — is a branch too, with no heading and no link. Before the
+    title or after the block it is undecided; between them it counts. Measured
+    on 2026-10-18: 400 loose words after a 120-word post read 521, OK, because
+    only elements were sorted. A text chunk cannot be named in the skip set the
+    way a subtree can, so its words come back as a number instead.
+
     `page_furniture` is `_furniture` of the body. The region's own is the part
     of it below the region: no `<article>` with words sits above the region,
     or the article would have won `_main_container` first, so nothing between
@@ -518,27 +560,45 @@ def _beside_the_content(
     is outside all furniture.
     """
     paths = set(_ancestors(title)) | set(_ancestors(block))
-    # The region is in the order too: a title left unclosed swallows the rest of
-    # the page, and is then the region itself.
-    order = {node: i for i, node in enumerate([region, *_iter_elements(region)])}
-    first, last = sorted((order[title], order[block]))
-    branches: list[_Node] = []
-    stack = [region]
+    # Document order over what the paths hold: the branches, the loose text,
+    # and where the title and the block start. Nothing below a branch, the
+    # title or the block is numbered, and the relative order is unaffected.
+    position = 0
+    marks: dict[_Node, int] = {}
+    branches: list[tuple[int, _Node]] = []
+    loose: list[tuple[int, str]] = []
+    stack: list[_Node | str] = [region]
     while stack:
-        for child in stack.pop().content:
-            if not isinstance(child, _Node) or child.dropped or child is title or child is block:
+        item = stack.pop()
+        position += 1
+        if isinstance(item, str):
+            loose.append((position, item))
+            continue
+        if item.dropped:
+            continue
+        if item is title or item is block:
+            marks[item] = position
+            # A title left unclosed swallows the rest of the page and is then
+            # the region itself; only then is there anything inside it to sort.
+            if item is not region:
                 continue
-            (stack if child in paths else branches).append(child)
+        elif item not in paths:
+            branches.append((position, item))
+            continue
+        stack.extend(reversed(item.content))
+    first, last = sorted((marks[title], marks[block]))
+
     furniture = frozenset(f for f in page_furniture if region in _ancestors(f.parent))
-    left_out = furniture | _link_only([b for b in branches if b not in furniture])
+    left_out = furniture | _link_only([b for _, b in branches if b not in furniture], link_words)
     undecided = frozenset(
         branch
-        for branch in branches
-        if branch not in left_out
-        and not first < order[branch] < last
-        and not _has_heading(branch, left_out)
+        for at, branch in branches
+        if branch not in left_out and not first < at < last and not _has_heading(branch, left_out)
     )
-    return left_out, undecided
+    # Joined with a separator so two chunks cannot weld into one word that is
+    # on no page; the same reason `_collect` writes one at element boundaries.
+    loose_words = word_count(_SEPARATOR.join(text for at, text in loose if not first < at < last))
+    return left_out, undecided, loose_words
 
 
 def _titled_region(title: _Node | None, block: _Node) -> _Node:
@@ -599,6 +659,8 @@ class _MainContent(NamedTuple):
     outside: frozenset[_Node] = frozenset()
     # Subtrees inside `node` that are counted but could as well be the page.
     undecided: frozenset[_Node] = frozenset()
+    # Words of loose text in the same position: counted, and as doubtful.
+    undecided_loose_words: int = 0
 
 
 def _main_container(doc: _Parser) -> _MainContent:
@@ -627,18 +689,25 @@ def _main_container(doc: _Parser) -> _MainContent:
         nodes[key] = node
         scores[key] = scores.get(key, 0.0) + weight
 
+    link_words = _link_words(doc.root)
+    text_paragraphs: list[tuple[_Node, float]] = []
+    link_paragraphs: list[tuple[_Node, float]] = []
     for node in _iter_elements(doc.root):
         if node.tag != "p":
             continue
         weight = float(len(_normalize(_collect(node))))
         if weight <= 0:
             continue
-        if node in _link_only([node]):
-            # A card's description inside `<a class="related-card">` is a
-            # paragraph nobody reads in place. Six of them out-scored the
-            # article on smallwebapps.com/apps/csv-to-json/ as built on
-            # 2026-08-30, and the grid of links won as the main content.
-            continue
+        inside, outside = link_words[node]
+        (link_paragraphs if inside and not outside else text_paragraphs).append((node, weight))
+    # A card's description inside `<a class="related-card">` is a paragraph
+    # nobody reads in place: six of them out-scored the article on
+    # smallwebapps.com/apps/csv-to-json/ as built on 2026-08-30, and the grid of
+    # links won as the main content. So link paragraphs score only when no
+    # paragraph of text does. On a directory whose every `<p>` is a link, the
+    # list is the page; leaving it unscored sent the page to the body and
+    # reported a thin listing as unmeasurable.
+    for node, weight in text_paragraphs or link_paragraphs:
         credit(node.parent, weight)
         credit(node.parent.parent if node.parent else None, weight / 2)
 
@@ -657,7 +726,7 @@ def _main_container(doc: _Parser) -> _MainContent:
         body = _find_body(doc)
         # Computed once: the title search and the region both read it.
         page_furniture = _furniture(body)
-        title = _page_title(body, page_furniture)
+        title = _page_title(body, page_furniture, link_words)
         region = _titled_region(title, winner)
         if region is winner:
             # The title is inside the block, or there is none to widen to. The
@@ -665,7 +734,9 @@ def _main_container(doc: _Parser) -> _MainContent:
             # control can still see it.
             return _MainContent(winner, True)
         return _MainContent(
-            region, True, *_beside_the_content(region, title, winner, page_furniture)
+            region,
+            True,
+            *_beside_the_content(region, title, winner, page_furniture, link_words),
         )
 
     return _MainContent(_find_body(doc), False)
@@ -862,7 +933,7 @@ class TextDepth:
 def measure_depth(html: str, *, min_words: int = DEFAULT_MIN_WORDS, url: str = "") -> TextDepth:
     """Measure main-content depth in an HTML string."""
     doc = _parse(html)
-    container, isolated, outside, undecided = _main_container(doc)
+    container, isolated, outside, undecided, undecided_loose = _main_container(doc)
     main = _normalize(_collect(container, skip=outside))
     words = word_count(main)
     total = word_count(_visible_text(doc))
@@ -876,11 +947,12 @@ def measure_depth(html: str, *, min_words: int = DEFAULT_MIN_WORDS, url: str = "
         if outside
         else word_count(_normalize(_collect(container, skip=_furniture(container))))
     )
-    # The second control, for a widened region only: the count without the
-    # branches `_beside_the_content` could not call content or page.
+    # The second control, for a widened region only: the count without what
+    # `_beside_the_content` could not call content or page — the subtrees,
+    # skipped, and the loose text, subtracted.
     decided_words = (
-        word_count(_normalize(_collect(container, skip=outside | undecided)))
-        if undecided
+        word_count(_normalize(_collect(container, skip=outside | undecided))) - undecided_loose
+        if undecided or undecided_loose
         else words
     )
 
