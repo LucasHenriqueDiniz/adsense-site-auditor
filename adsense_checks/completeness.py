@@ -2625,7 +2625,9 @@ def count_broken_nav_links(
     WARNING or MISSING for the same dead menu depending on the run.
 
     A 4xx/5xx is untouched by any of this and still feeds the threshold in every
-    directory: that one was observed, not inferred. It also costs no probe —
+    directory: that one was observed, not inferred. 429 is the exception: it is
+    the host refusing this audit's pace, so the link is `unresolved`, like a
+    connection that failed. It also costs no probe —
     a dead link needs no oracle — which is why the documented fixture's
     `/pricing/` adds nothing to the invented-request count. Links that fail at
     the transport layer stay `unresolved` and ERROR.
@@ -2696,6 +2698,20 @@ def count_broken_nav_links(
             report.unresolved.append(NavLink(url=url, text=text, reason=response.error))
             continue
         code = response.status_code
+        if code == 429:
+            # Too Many Requests answers the auditor, not the visitor: this check
+            # sends its requests back to back, and a host that rate-limits the
+            # burst said "not now" about a link it never looked up. Counted as
+            # broken, a 429 drew the abandoned-site verdict from the audit's own
+            # pace, while the probe a few lines down already read the same code
+            # as a refusal rather than an answer.
+            report.unresolved.append(
+                NavLink(
+                    url=url, text=text, status_code=code,
+                    reason="HTTP 429: rate limited, so the link was not observed",
+                )
+            )
+            continue
         if code is not None and code >= 400:
             # Observed off the wire, in any directory. This is the only branch
             # that is allowed to call a link broken — and it runs BEFORE any

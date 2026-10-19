@@ -741,6 +741,27 @@ def test_link_que_derruba_a_conexao_nunca_conta_como_link_bom(server):
     assert relatorio.passed is False
 
 
+def test_429_no_menu_nao_e_link_quebrado(server):
+    """O completeness manda as requisições em sequência, sem pausa, e um host que
+    limita a rajada responde 429. Contado como quebrado, cada 429 empurrava o
+    menu rumo ao veredito de site abandonado, no mesmo relatório que lia o 429
+    do probe como recusa e não como resposta. Medido em 2026-10-19: um host que
+    limita depois de 9 requisições dava WARN com dois links "quebrados"."""
+    base, rotas = server
+    menu = "".join(f"<a href='/p{i}'>p{i}</a>" for i in range(BROKEN_NAV_FAIL_THRESHOLD))
+    rotas["/"] = (200, {}, f"<html><body><nav>{menu}</nav></body></html>")
+    for i in range(BROKEN_NAV_FAIL_THRESHOLD):
+        rotas[f"/p{i}"] = (429, {"Retry-After": "60"}, "Too Many Requests")
+
+    relatorio = count_broken_nav_links(base)
+
+    assert relatorio.count == 0
+    assert relatorio.broken == []
+    assert [link.status_code for link in relatorio.unresolved] == [429] * BROKEN_NAV_FAIL_THRESHOLD
+    assert relatorio.status is Status.ERROR
+    assert "rate limited" in frases(relatorio)
+
+
 def test_sem_nav_nem_footer_usa_todos_os_links_internos_e_avisa(server):
     """Página escrita à mão sem <nav>: reportar zero links olhados como zero
     links quebrados seria a mesma mentira de sempre.
