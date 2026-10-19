@@ -733,32 +733,59 @@ def _first_segment(shape: str, *routes: str) -> str:
 # (`github.com/intent`), rejected the follow buttons X and Threads build on
 # `/intent/`, which name an account, and passed whatever share or media URL it
 # had not foreseen: `twitter.com/home?status=`, `youtube.com/watch?v=`.
+#
+# The first-segment networks list their own pages that appear in links on a
+# page: share and compose boxes, posts and media, hashtags, sign-in and product
+# pages. A short list let `x.com/compose/post`, `github.com/features/...` and
+# `instagram.com/accounts/login/` pass as accounts, measured on 2026-10-19.
 _X_ACCOUNT = (
-    _first_segment(r"[a-z0-9_]{1,15}", "home", "intent", "share", "search", "hashtag", "i"),
+    _first_segment(
+        r"[a-z0-9_]{1,15}", "home", "intent", "share", "compose", "search", "hashtag", "i",
+        "explore", "settings", "messages", "notifications", "login", "signup", "tos", "privacy",
+    ),
     r"/intent/(?:follow|user)\?(?:[^#]*&)?(?:screen_name|user_id)=[^&#]+",
 )
-_TELEGRAM_ACCOUNT = (_first_segment(r"[a-z0-9_]{5,32}", "share"),)
+# `t.me/s/<channel>` is the public preview of a channel, and names it.
+_TELEGRAM_ACCOUNT = (
+    _first_segment(r"[a-z0-9_]{5,32}", "share"),
+    r"/s/[a-z0-9_]{5,32}(?:[/?]|$)",
+)
+# threads.net answers 301 to threads.com since 2025 (checked on 2026-10-19), and
+# links are written both ways.
+_THREADS_ACCOUNT = (r"/@[^/?#]+", r"/intent/follow\?(?:[^#]*&)?username=[^&#]+")
 _ACCOUNT_URLS: dict[str, tuple[str, ...]] = {
     "linkedin.com": (r"/(?:in|company|school|showcase)/[^/?#]+",),
-    "github.com": (_first_segment(r"[a-z0-9-]{1,39}"),),
+    "github.com": (
+        _first_segment(
+            r"[a-z0-9-]{1,39}", "features", "about", "pricing", "marketplace", "topics",
+            "trending", "explore", "collections", "enterprise", "apps", "login", "join",
+        ),
+    ),
     "twitter.com": _X_ACCOUNT,
     "x.com": _X_ACCOUNT,
     "instagram.com": (
-        _first_segment(r"[a-z0-9._]{1,30}", "p", "reel", "reels", "tv", "explore", "stories"),
+        _first_segment(
+            r"[a-z0-9._]{1,30}", "p", "reel", "reels", "tv", "explore", "stories", "accounts",
+            "direct",
+        ),
     ),
     "facebook.com": (
-        # `profile.php?id=...` is an account too, and this already matches it.
+        # Facebook's own scripts end in `.php` — the link shim `l.php` that wraps
+        # every outbound link, `photo.php`, `story.php`, `permalink.php`, the
+        # share boxes — and none of them is an account except `profile.php?id=`.
         _first_segment(
-            r"[a-z0-9.-]+", "sharer", "sharer.php", "share.php", "share", "dialog", "plugins",
-            "watch",
+            r"(?![a-z0-9.-]*\.php(?:[/?]|$))[a-z0-9.-]+", "sharer", "share", "dialog", "plugins",
+            "watch", "reel", "photo", "hashtag", "events", "login",
         ),
+        r"/profile\.php\?(?:[^#]*&)?id=\d+",
     ),
     "youtube.com": (r"/@[^/?#]+", r"/(?:channel|c|user)/[^/?#]+"),
     "bsky.app": (r"/profile/[^/?#]+",),
     "t.me": _TELEGRAM_ACCOUNT,
     "telegram.me": _TELEGRAM_ACCOUNT,
     "wa.me": (r"/\d+(?:[/?]|$)", r"/message/[a-z0-9]+"),
-    "threads.net": (r"/@[^/?#]+", r"/intent/follow\?(?:[^#]*&)?username=[^&#]+"),
+    "threads.net": _THREADS_ACCOUNT,
+    "threads.com": _THREADS_ACCOUNT,
 }
 _SOCIAL_HOSTS = tuple(_ACCOUNT_URLS)
 

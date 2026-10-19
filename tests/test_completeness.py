@@ -350,6 +350,49 @@ def test_compartilhar_post_e_video_nao_sao_conta():
         assert not find_contact_channels(f'<a href="{href}">x</a>').any_found, href
 
 
+# As páginas próprias de cada rede que aparecem em link numa página e moram onde
+# uma conta moraria. Um link por rota de `_first_segment`, e os scripts `.php` do
+# Facebook, que nenhum é conta. Medido em 2026-10-19: todos estes contavam.
+PAGINAS_DAS_REDES = (
+    "https://x.com/compose/post", "https://x.com/explore", "https://x.com/settings/account",
+    "https://x.com/messages", "https://x.com/notifications", "https://x.com/login",
+    "https://x.com/signup", "https://x.com/tos", "https://x.com/privacy",
+    "https://github.com/features/copilot", "https://github.com/about", "https://github.com/pricing",
+    "https://github.com/marketplace", "https://github.com/topics/python",
+    "https://github.com/trending", "https://github.com/explore", "https://github.com/collections",
+    "https://github.com/enterprise", "https://github.com/apps/dependabot",
+    "https://github.com/login", "https://github.com/join",
+    "https://www.instagram.com/accounts/login/", "https://www.instagram.com/direct/inbox/",
+    "https://l.facebook.com/l.php?u=https%3A%2F%2Fsite.com",
+    "https://www.facebook.com/l.php?u=https%3A%2F%2Fsite.com",
+    "https://www.facebook.com/photo.php?fbid=123", "https://www.facebook.com/story.php?story_fbid=1",
+    "https://www.facebook.com/permalink.php?story_fbid=1", "https://www.facebook.com/profile.php",
+    "https://www.facebook.com/share/p/abc123/", "https://www.facebook.com/reel/123",
+    "https://www.facebook.com/photo/?fbid=123", "https://www.facebook.com/hashtag/adsense",
+    "https://www.facebook.com/events/123", "https://www.facebook.com/login/",
+)
+
+
+def test_pagina_propria_da_rede_nao_e_conta():
+    """Nas redes em que a conta é o primeiro segmento, toda rota fora de uma
+    lista curta contava: o redirecionador `l.php`, que o Facebook põe em todo
+    link de saída, aprovava ADS-AUTHOR-02 como se fosse um perfil."""
+    for href in PAGINAS_DAS_REDES:
+        assert not find_contact_channels(f'<a href="{href}">x</a>').any_found, href
+
+
+def test_threads_com_e_canal_publico_do_telegram_sao_conta():
+    """O threads.net responde 301 para o threads.com desde 2025, e um link novo
+    vem no domínio novo. E `t.me/s/<canal>` é a prévia pública de um canal, que
+    o nomeia; o formato de usuário, de 5 a 32 caracteres, não aceitava o `s`."""
+    for href in (
+        "https://www.threads.com/@fulano",
+        "https://www.threads.com/intent/follow?username=fulano",
+        "https://t.me/s/meucanal",
+        "https://telegram.me/s/meucanal",
+    ):
+        assert find_contact_channels(f'<a href="{href}">x</a>').socials == [href], href
+
 def test_conta_em_cada_forma_que_a_rede_escreve():
     for href in (
         "https://www.facebook.com/profile.php?id=100012345",
@@ -4548,7 +4591,7 @@ def test_toda_entrada_de_ABOUT_PATHS_e_CONTACT_PATHS_vira_candidato():
 HOSTS_SOCIAIS = (
     "linkedin.com", "github.com", "twitter.com", "x.com", "instagram.com",
     "facebook.com", "youtube.com", "bsky.app", "t.me", "wa.me",
-    "telegram.me", "threads.net",
+    "telegram.me", "threads.net", "threads.com",
 )
 
 # Uma conta em cada rede, escrita como a rede escreve.
@@ -4557,6 +4600,7 @@ CONTA_POR_HOST = {
     "x.com": "/fulano", "instagram.com": "/fulano", "facebook.com": "/fulano",
     "youtube.com": "/@fulano", "bsky.app": "/profile/fulano.bsky.social", "t.me": "/fulano",
     "wa.me": "/5511999999999", "telegram.me": "/fulano", "threads.net": "/@fulano",
+    "threads.com": "/@fulano",
 }
 
 # As seis tags cujo conteúdo não é texto visível. `head` NÃO está aqui, e é de
@@ -4582,7 +4626,7 @@ TAGS_DE_REGIAO = ("footer", "nav", "header", "div", "section", "aside", "main", 
 def test_todo_host_social_conhecido_conta_como_canal():
     from adsense_checks.completeness import _SOCIAL_HOSTS, find_contact_channels
 
-    assert len(_SOCIAL_HOSTS) == 12
+    assert len(_SOCIAL_HOSTS) == 13
     assert set(CONTA_POR_HOST) == set(HOSTS_SOCIAIS)
     for host, caminho in CONTA_POR_HOST.items():
         canais = find_contact_channels(f'<a href="https://{host}{caminho}">eu</a>')
