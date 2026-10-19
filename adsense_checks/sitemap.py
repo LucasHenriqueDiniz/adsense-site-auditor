@@ -38,6 +38,7 @@ Requirement: ADS-CRAWL-07.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from collections import deque
 from dataclasses import dataclass, field
@@ -357,6 +358,23 @@ def discover_sitemap_urls(base_url: str, robots: Robots | None = None) -> list[s
     return candidates
 
 
+def private_address(url: str) -> bool:
+    """Whether `url` names a loopback, private, link-local or otherwise
+    non-public address: an IP literal that is not global, or `localhost`.
+
+    Names are not resolved. A public name that resolves to a private address is
+    not caught here; the literal and `localhost` are what a hostile robots.txt
+    writes to reach the machine running the audit.
+    """
+    host = (split_url(url).hostname or "").rstrip(".").lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return not ipaddress.ip_address(host).is_global
+    except ValueError:
+        return False
+
+
 def _fetch_doc(
     url: str, session: requests.Session | None, timeout: float
 ) -> tuple[SitemapDoc, Fetch]:
@@ -473,6 +491,23 @@ def check_sitemap(
     result.candidates = discover_sitemap_urls(base_url, robots)
 
     for candidate in result.candidates:
+        if (
+            private_address(candidate)
+            and not private_address(base_url)
+            and not same_site(candidate, base_url)
+        ):
+            # A `Sitemap:` line is the site's to write, and it can point
+            # anywhere: `http://169.254.169.254/...` or `http://localhost:8080/`
+            # made this auditor request them from the operator's own network.
+            # A public site's sitemap is never there, so it is not fetched; a
+            # site audited on such an address, or a sitemap on the audited site
+            # itself, is read as before.
+            result.status = escalate(result.status, Status.WARNING)
+            result.note(
+                f"sitemap {candidate} points at a loopback, private or link-local address;"
+                " not fetched"
+            )
+            continue
         doc, got = _fetch_doc(candidate, session, timeout)
         if _requested(got):
             result.documents_fetched += 1

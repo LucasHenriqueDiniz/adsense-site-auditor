@@ -15,6 +15,8 @@ protocolo.
 
 import time
 
+import pytest
+
 # parse_robots é reexportado por sitemap de propósito: o módulo já resolveu onde
 # o parser de robots mora, e o teste não deve duplicar essa decisão.
 from adsense_checks.sitemap import (
@@ -1082,3 +1084,76 @@ def test_o_limite_do_sitemap_e_o_do_protocolo():
     from adsense_checks.sitemap import MAX_SITEMAP_BYTES
 
     assert MAX_SITEMAP_BYTES == 52_428_800
+
+
+class _SemRede:
+    """Sessão que nunca vai à rede e anota o que pediram a ela."""
+
+    def __init__(self):
+        self.pedidas: list[str] = []
+
+    def request(self, method, url, **kwargs):
+        import requests
+
+        self.pedidas.append(url)
+        raise requests.ConnectionError("sem rede neste teste")
+
+
+def test_sitemap_declarado_em_endereco_interno_nao_e_buscado():
+    """O achado 9 fechou os sitemaps filhos, mas uma linha `Sitemap:` do
+    robots.txt ainda levava o auditor a qualquer endereço. Um site público não
+    tem sitemap no endereço de metadados da nuvem nem no localhost de quem roda
+    a auditoria."""
+    from adsense_checks.robots import Robots
+
+    interno = "http://169.254.169.254/latest/meta-data/"
+    local = "http://localhost:8080/admin/sitemap.xml"
+    sessao = _SemRede()
+    robots = Robots(sitemaps=[interno, local])
+
+    r = check_sitemap("https://exemplo-publico.com.br/", robots=robots, session=sessao, timeout=1)
+
+    assert interno not in sessao.pedidas
+    assert local not in sessao.pedidas
+    assert sessao.pedidas, "os caminhos convencionais do próprio site continuam sendo pedidos"
+    assert sum("loopback, private or link-local" in nota for nota in r.reasons) == 2
+    assert r.status >= Status.WARNING
+
+
+def test_site_auditado_em_endereco_interno_continua_lendo_os_proprios_sitemaps(server):
+    """O mesmo endereço é legítimo quando é o do site auditado: os testes e a
+    fixture do EXAMPLES rodam em 127.0.0.1."""
+    base, rotas = server
+    rotas["/robots.txt"] = (200, {"Content-Type": "text/plain"}, f"Sitemap: {base}/meu.xml\n")
+    rotas["/meu.xml"] = (200, XML, urlset(f"{base}/a"))
+
+    r = check_sitemap(base)
+
+    assert r.sitemap_url == f"{base}/meu.xml"
+    assert r.url_count == 1
+
+
+@pytest.mark.parametrize(
+    "url, interno",
+    [
+        ("http://169.254.169.254/latest/meta-data/", True),
+        ("http://10.0.0.5/s.xml", True),
+        ("http://192.168.1.1/s.xml", True),
+        ("http://127.0.0.1:8080/s.xml", True),
+        ("http://[::1]/s.xml", True),
+        ("http://[fe80::1]/s.xml", True),
+        ("http://localhost/s.xml", True),
+        ("http://admin.localhost/s.xml", True),
+        ("http://0.0.0.0/s.xml", True),
+        # Espaço compartilhado de CGNAT: não é global e, para o Python, nem
+        # "privado" — `is_private` deixaria passar.
+        ("http://100.64.0.1/s.xml", True),
+        ("https://8.8.8.8/s.xml", False),
+        ("https://cdn.exemplo.com.br/sitemap.xml", False),
+        ("https://exemplo.com.br/sitemap.xml", False),
+    ],
+)
+def test_o_que_conta_como_endereco_interno(url, interno):
+    from adsense_checks.sitemap import private_address
+
+    assert private_address(url) is interno
