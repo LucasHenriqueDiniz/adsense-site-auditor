@@ -340,9 +340,13 @@ Behaviour observed in the runs above, recorded here because a reader will hit it
   A page with no `<main>` or `<article>` that *does* have a standout paragraph
   block is measured on the smallest element holding that block and the page's
   `<h1>`, with that element's `<nav>`, `<header>`, `<footer>` and `<aside>` left
-  out, and every subtree in it whose words are all link text: a menu, a widget
-  list or a related-tools grid is navigation whatever it is tagged. An `<h1>`
-  that is entirely a link is a logo, not a title, and widens nothing. Until
+  out. So is every subtree the widening collects beside the title and the block
+  whose words are all link text — a link being an `<a>` with an `href`: a menu,
+  a widget list or a related-tools grid is navigation whatever it is tagged.
+  The block and the title are taken whole, so a "Related posts" list of links
+  inside the block still counts. An `<h1>` whose words are all link text and
+  whose links all lead to the site root is a logo, not a title, and widens
+  nothing; one linked to its own post is a title. Until
   2026-10-18 such a page was measured on the block alone, and that undercounted
   every page built from sibling `<section>`s: smallwebapps.com/apps/pdf-rotate/
   read 114 words where the span from its `<h1>` to its related-links heading

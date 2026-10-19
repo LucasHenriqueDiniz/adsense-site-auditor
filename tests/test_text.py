@@ -413,6 +413,8 @@ def _tema_de_divs(logo: str) -> str:
         '<h1 id="site-title"><a href="/">Meu Blog</a></h1>',
         # O link por fora do <h1>: a palavra continua sendo texto de link.
         '<a href="/"><h1 id="site-title">Meu Blog</h1></a>',
+        # A raiz escrita com o domínio: um host sem caminho também é a home.
+        '<h1 id="site-title"><a href="https://exemplo.com">Meu Blog</a></h1>',
     ],
 )
 def test_logo_h1_que_e_so_link_nao_ancora_a_regiao(logo):
@@ -424,6 +426,34 @@ def test_logo_h1_que_e_so_link_nao_ancora_a_regiao(logo):
     assert "ruido" not in d.text
     assert "Meu Blog" not in d.text
     assert d.status is Status.WARNING, d.reason
+
+
+@pytest.mark.parametrize(
+    "titulo",
+    [
+        '<h1><a href="/post">Titulo</a></h1>',
+        '<h1><a href="#topo">Titulo</a></h1>',
+        '<h1><a href="https://exemplo.com/2026/titulo">Titulo</a></h1>',
+        # O link por fora: a pergunta é para onde ele leva, não de que lado está.
+        '<a href="/post"><h1>Titulo</h1></a>',
+    ],
+)
+def test_titulo_linkado_ao_proprio_post_e_titulo_e_nao_logo(titulo):
+    """Alguns temas imprimem `<h1><a href="/post">` no próprio post. É texto de
+    link, como um logo, mas não leva à home — e era rejeitado como logo, e a
+    página ficava com a subcontagem que este PR existe para corrigir: 100
+    palavras, WARNING, onde um leitor conta 562."""
+    html = (
+        '<html><body><div id="page"><div class="post">'
+        f"{titulo}"
+        f'<div class="intro"><p>{_palavras(60)}</p></div>'
+        f"<section><h2>Parte</h2><ul><li>{_palavras(400)}</li></ul></section>"
+        f'<div class="entry"><p>{_palavras(100)}</p></div>'
+        "</div></div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 562
+    assert d.status is Status.OK, d.reason
 
 
 def test_menu_e_lateral_de_links_em_div_ficam_de_fora_da_regiao():
@@ -877,6 +907,26 @@ def test_wrapper_da_pagina_inteira_nao_e_medido_como_conteudo_principal():
     # O menu inteiro entrou na contagem, e sozinho já limpa a barra de OK.
     assert d.words >= borderline_ceiling(300)
     assert d.main_ratio == 1.0  # nada foi separado de nada
+    assert d.status is Status.ERROR
+    assert "not separated from page furniture" in d.reason
+
+
+def test_controle_de_mobilia_nao_depende_de_quem_preencheu_outside(monkeypatch):
+    """O controle de mobília era pulado sempre que `outside` não vinha vazio —
+    certo só porque hoje o único caminho que o preenche também põe a mobília
+    nele. Um caminho que um dia deixe algo de fora sem a mobília não pode
+    desligar o controle e devolver o wrapper de menu como aprovação."""
+    import adsense_checks.text as texto
+
+    original = texto._main_container
+
+    def com_algo_de_fora(doc):
+        achado = original(doc)
+        paragrafo = next(n for n in texto._iter_elements(achado.node) if n.tag == "p")
+        return achado._replace(outside=achado.outside | {paragrafo})
+
+    monkeypatch.setattr(texto, "_main_container", com_algo_de_fora)
+    d = measure_depth(_pagina_com_wrapper("Este e o unico paragrafo editorial."))
     assert d.status is Status.ERROR
     assert "not separated from page furniture" in d.reason
 

@@ -61,6 +61,7 @@ import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import NamedTuple
+from urllib.parse import urlsplit
 
 import requests
 
@@ -475,16 +476,29 @@ def _link_only(roots: list[_Node], words: _LinkWords | None = None) -> frozenset
     return frozenset(found)
 
 
+def _links_home(href: str) -> bool:
+    """Whether `href` points at the site root: `/`, or a host with no path.
+
+    Relative to nothing on purpose. `#top`, `?page=2` and `post.html` resolve
+    against the page they sit on, and none of them is the root unless the page
+    is; without the page's URL, only a root written as a root counts.
+    """
+    parts = urlsplit(href.strip())
+    return parts.path == "/" or (bool(parts.netloc) and parts.path == "")
+
+
 def _page_title(body: _Node, furniture: frozenset[_Node], link_words: _LinkWords) -> _Node | None:
     """The page's own `<h1>`: the first one with words that is neither furniture
-    nor a link.
+    nor a logo.
 
     A logo wrapped in `<h1>` names the site, not the page. Anchoring on it
     stretches the region up to whatever wraps the header, which is the page
     wrapper this module keeps refusing to measure. Inside a `<header>` the
-    furniture says so. Inside `<div id="header">` nothing does, except that a
-    logo is a link home: `<h1><a href="/">Brand</a></h1>` is link-only, and a
-    page's title is not.
+    furniture says so. Inside `<div id="header">` nothing does, except what a
+    logo is: link text, every word of it, and every link pointing home. A post
+    title linked to its own permalink — some themes print
+    `<h1><a href="/post">` on the post itself — is link text too, but it does
+    not lead home, and it is the page's title.
 
     `furniture` is `_furniture(body)` and `link_words` is `_link_words` of the
     document, both of which the caller already holds.
@@ -494,10 +508,17 @@ def _page_title(body: _Node, furniture: frozenset[_Node], link_words: _LinkWords
             continue
         if any(above in furniture for above in _ancestors(node)):
             continue
-        if node in _link_only([node], link_words):
+        if node in _link_only([node], link_words) and _is_logo(node):
             continue
         return node
     return None
+
+
+def _is_logo(heading: _Node) -> bool:
+    """Whether every link a link-only heading sits in, or holds, leads home."""
+    links = [above for above in _ancestors(heading) if _is_link(above)]
+    links += [node for node in _iter_elements(heading) if _is_link(node)]
+    return all(_links_home(link.attrs["href"]) for link in links)
 
 
 def _has_heading(node: _Node, skip: frozenset[_Node]) -> bool:
@@ -517,7 +538,7 @@ def _beside_the_content(
     region: _Node,
     title: _Node,
     block: _Node,
-    page_furniture: frozenset[_Node],
+    furniture: frozenset[_Node],
     link_words: _LinkWords,
 ) -> tuple[frozenset[_Node], frozenset[_Node], int]:
     """What a widened region holds besides its title, its block and the path
@@ -552,12 +573,7 @@ def _beside_the_content(
     only elements were sorted. A text chunk cannot be named in the skip set the
     way a subtree can, so its words come back as a number instead.
 
-    `page_furniture` is `_furniture` of the body. The region's own is the part
-    of it below the region: no `<article>` with words sits above the region,
-    or the article would have won `_main_container` first, so nothing between
-    the body and the region can claim a piece of furniture differently. The
-    region itself is never in it, since it holds a title `_page_title` proved
-    is outside all furniture.
+    `furniture` is `_furniture(region)`, which the caller already holds.
     """
     paths = set(_ancestors(title)) | set(_ancestors(block))
     # Document order over what the paths hold: the branches, the loose text,
@@ -588,7 +604,6 @@ def _beside_the_content(
         stack.extend(reversed(item.content))
     first, last = sorted((marks[title], marks[block]))
 
-    furniture = frozenset(f for f in page_furniture if region in _ancestors(f.parent))
     left_out = furniture | _link_only([b for _, b in branches if b not in furniture], link_words)
     undecided = frozenset(
         branch
@@ -661,6 +676,8 @@ class _MainContent(NamedTuple):
     undecided: frozenset[_Node] = frozenset()
     # Words of loose text in the same position: counted, and as doubtful.
     undecided_loose_words: int = 0
+    # `_furniture(node)`, when `_main_container` already computed it.
+    furniture: frozenset[_Node] | None = None
 
 
 def _main_container(doc: _Parser) -> _MainContent:
@@ -733,11 +750,15 @@ def _main_container(doc: _Parser) -> _MainContent:
             # block's own furniture stays in the count, where `measure_depth`'s
             # control can still see it.
             return _MainContent(winner, True)
-        return _MainContent(
-            region,
-            True,
-            *_beside_the_content(region, title, winner, page_furniture, link_words),
+        # The region's furniture is the body's, below the region. No `<article>`
+        # with words sits above the region, or it would have won above, so
+        # nothing between the body and the region claims a piece differently;
+        # and the region is never in it, holding a title proved outside all.
+        region_furniture = frozenset(f for f in page_furniture if region in _ancestors(f.parent))
+        left_out, undecided, loose_words = _beside_the_content(
+            region, title, winner, region_furniture, link_words
         )
+        return _MainContent(region, True, left_out, undecided, loose_words, region_furniture)
 
     return _MainContent(_find_body(doc), False)
 
@@ -844,10 +865,16 @@ def main_content_text(html: str) -> str:
          one, not all of them concatenated, so a blog index does not add up its
          teasers into a substantial-looking page.
       3. otherwise the container scoring highest on paragraph text: each `<p>`
-         credits its parent container fully and its grandparent by half —
-         widened to the smallest element that also holds the page's `<h1>`,
-         with that element's own nav/header/footer/aside left out, and never
-         widened as far as the `<body>` (see `_titled_region`).
+         credits its parent container fully and its grandparent by half, and a
+         `<p>` that is all link text scores only when no other does. The
+         winner is widened to the smallest element that also holds the page's
+         `<h1>`, never as far as the `<body>` (see `_titled_region`). What the
+         widening collects beside the title and the block loses its
+         nav/header/footer/aside and every subtree that is all link text; the
+         block and the title themselves are taken whole. Text the widening
+         cannot place — no heading, before the title or after the block — is
+         returned like the rest: only `measure_depth` says it is in doubt
+         (see `_beside_the_content`).
       4. otherwise the whole `<body>`.
 
     Limitation: this reads structure, not layout. A page whose paragraphs hang
@@ -933,19 +960,29 @@ class TextDepth:
 def measure_depth(html: str, *, min_words: int = DEFAULT_MIN_WORDS, url: str = "") -> TextDepth:
     """Measure main-content depth in an HTML string."""
     doc = _parse(html)
-    container, isolated, outside, undecided, undecided_loose = _main_container(doc)
+    found = _main_container(doc)
+    container, isolated, outside, undecided = (
+        found.node,
+        found.isolated,
+        found.outside,
+        found.undecided,
+    )
+    undecided_loose = found.undecided_loose_words
     main = _normalize(_collect(container, skip=outside))
     words = word_count(main)
     total = word_count(_visible_text(doc))
     # The same container with its page furniture removed. Never reported as
     # the count — it is only the control that says whether `words` is a
-    # measurement of the article or of the menu wrapped around it. A region
-    # `_titled_region` widened has its furniture in `outside` already, so the
-    # recount would only reproduce `words`, and is skipped.
+    # measurement of the article or of the menu wrapped around it. Furniture
+    # already in `outside` was never counted, so when all of it is, the
+    # recount would only reproduce `words` and is skipped. Decided by the sets
+    # themselves, not by which path filled `outside`: a path that one day
+    # leaves something out without the furniture still gets its control.
+    furniture = found.furniture if found.furniture is not None else _furniture(container)
     editorial_words = (
         words
-        if outside
-        else word_count(_normalize(_collect(container, skip=_furniture(container))))
+        if furniture <= outside
+        else word_count(_normalize(_collect(container, skip=outside | furniture)))
     )
     # The second control, for a widened region only: the count without what
     # `_beside_the_content` could not call content or page — the subtrees,
