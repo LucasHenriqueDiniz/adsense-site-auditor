@@ -456,6 +456,57 @@ def test_titulo_linkado_ao_proprio_post_e_titulo_e_nao_logo(titulo):
     assert d.status is Status.OK, d.reason
 
 
+def test_bloco_dentro_da_mobilia_nao_desconta_o_que_nao_contou():
+    """Conteúdo só em listas; o único <p> da página está num <footer> dentro do
+    wrapper, e ganha a pontuação. O rodapé inteiro fica fora da conta — e o
+    texto solto dele era descontado mesmo assim, como dúvida: 402 contadas,
+    202 "decididas", ERROR. O que não entrou na conta não sai dela."""
+    html = (
+        '<html><body><div id="page"><h1>Titulo</h1>'
+        f"<section><h2>Passos</h2><ul><li>{_palavras(400)}</li></ul></section>"
+        f'<footer><div class="brand"><p>{_ruido(30)}</p></div>{_ruido(200)}</footer>'
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 402
+    assert "ruido" not in d.text
+    assert d.status is Status.INFO, d.reason
+
+
+@pytest.mark.parametrize(
+    "logo,url",
+    [
+        # A home localizada: sem a URL, `/pt-br/` não se distingue de um título.
+        ('<h1 id="site-title"><a href="/pt-br/">Meu Blog</a></h1>', "https://exemplo.com/pt-br/um/"),
+        # Na raiz do site, o logo aponta para a própria página e continua logo.
+        ('<h1 id="site-title"><a href="/">Meu Blog</a></h1>', "https://exemplo.com/"),
+    ],
+)
+def test_com_a_url_da_pagina_logo_e_o_link_que_leva_a_outro_lugar(logo, url):
+    """Com a URL, um <h1> só de link é título quando leva à própria página, e
+    logo em qualquer outro caso — a home em `/`, em `/pt-br/`, em `/blog/`."""
+    d = measure_depth(_tema_de_divs(logo), url=url)
+    assert d.words == 120
+    assert "Meu Blog" not in d.text
+    assert d.status is Status.WARNING, d.reason
+
+
+def test_com_a_url_da_pagina_titulo_linkado_a_ela_mesma_e_titulo():
+    """O outro lado da regra: `/post` numa página servida em `/post/` é a mesma
+    página — a barra final é a única diferença, e não conta."""
+    html = (
+        '<html><body><div id="page"><div class="post">'
+        '<h1><a href="/post">Titulo</a></h1>'
+        f'<div class="intro"><p>{_palavras(60)}</p></div>'
+        f"<section><h2>Parte</h2><ul><li>{_palavras(400)}</li></ul></section>"
+        f'<div class="entry"><p>{_palavras(100)}</p></div>'
+        "</div></div></body></html>"
+    )
+    d = measure_depth(html, url="https://exemplo.com/post/")
+    assert d.words == 562
+    assert d.status is Status.OK, d.reason
+
+
 def test_menu_e_lateral_de_links_em_div_ficam_de_fora_da_regiao():
     """Um <h1> de verdade, pendurado direto no wrapper: a região é o wrapper, e
     o menu antes do título e a lateral depois do bloco vêm junto. Toda palavra
@@ -576,13 +627,18 @@ def test_ancora_sem_href_nao_e_link():
     assert d.status is Status.INFO, d.reason
 
 
-def test_diretorio_so_de_links_e_medido_como_lista():
+@pytest.mark.parametrize("rodape", ["", "<footer><p>Copyright 2026 Exemplo</p></footer>"])
+def test_diretorio_so_de_links_e_medido_como_lista(rodape):
     """Uma página que é só uma lista de `<p><a>`: a lista é o conteúdo dela.
     Parágrafos de link só deixam de pontuar quando há parágrafo de texto
     competindo; sem nenhum, a página caía no <body> e um diretório ralo virava
-    "main content not isolated" — sem número, onde a base dizia 180, WARNING."""
+    "main content not isolated" — sem número, onde a base dizia 180, WARNING.
+
+    O `<p>` de copyright do rodapé não compete: só parágrafo de texto fora da
+    mobília tira a vez dos links. Sem essa ressalva, o conserto valia apenas
+    para diretório sem rodapé, quase nenhum."""
     itens = "".join(f'<p><a href="/i{i}">item numero {i}</a></p>' for i in range(60))
-    d = measure_depth(f'<html><body><div class="list">{itens}</div></body></html>')
+    d = measure_depth(f'<html><body><div class="list">{itens}</div>{rodape}</body></html>')
     assert d.words == 180
     assert d.status is Status.WARNING, d.reason
     assert "not isolated" not in d.reason
@@ -920,8 +976,8 @@ def test_controle_de_mobilia_nao_depende_de_quem_preencheu_outside(monkeypatch):
 
     original = texto._main_container
 
-    def com_algo_de_fora(doc):
-        achado = original(doc)
+    def com_algo_de_fora(*args, **kwargs):
+        achado = original(*args, **kwargs)
         paragrafo = next(n for n in texto._iter_elements(achado.node) if n.tag == "p")
         return achado._replace(outside=achado.outside | {paragrafo})
 

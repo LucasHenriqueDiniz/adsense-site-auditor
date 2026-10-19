@@ -344,13 +344,17 @@ Behaviour observed in the runs above, recorded here because a reader will hit it
   whose words are all link text — a link being an `<a>` with an `href`: a menu,
   a widget list or a related-tools grid is navigation whatever it is tagged.
   The block and the title are taken whole, so a "Related posts" list of links
-  inside the block still counts. An `<h1>` whose words are all link text and
-  whose links all lead to the site root is a logo, not a title, and widens
-  nothing; one linked to its own post is a title. Until
-  2026-10-18 such a page was measured on the block alone, and that undercounted
-  every page built from sibling `<section>`s: smallwebapps.com/apps/pdf-rotate/
-  read 114 words where the span from its `<h1>` to its related-links heading
-  holds 589. It now reads 593.
+  inside the block still counts. An `<h1>` whose words are all link text is a
+  logo, not a title, and widens nothing, unless it links to the page it sits on
+  — a post title linked to its own permalink. That takes the page's URL, which
+  the script always has; without it, only a link to `/` or to a bare host is
+  recognised as a logo, and one pointing at `/pt-br/` passes for a title. On a
+  localised home page itself (`/pt-br/`), the logo links to the page it sits on
+  and passes for a title even with the URL; only the root is known to be a
+  home. Until 2026-10-18 such a page was measured on the block alone, and that
+  undercounted every page built from sibling `<section>`s:
+  smallwebapps.com/apps/pdf-rotate/ read 114 words where the span from its
+  `<h1>` to its related-links heading holds 589. It now reads 593.
 
   Plain text in that element, before the `<h1>` or after the block and under no
   heading, is counted, but it could be a sidebar as easily as a list of use

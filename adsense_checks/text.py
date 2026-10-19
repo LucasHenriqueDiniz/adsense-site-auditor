@@ -61,7 +61,7 @@ import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import NamedTuple
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -446,6 +446,20 @@ def _link_words(root: _Node) -> _LinkWords:
     return words
 
 
+def _subtrees(roots: frozenset[_Node]) -> frozenset[_Node]:
+    """Every live element at or below `roots`. One walk for all of them, so a
+    membership test costs nothing per element asked about."""
+    found: set[_Node] = set()
+    stack = list(roots)
+    while stack:
+        node = stack.pop()
+        if node.dropped or node in found:
+            continue
+        found.add(node)
+        stack.extend(child for child in node.content if isinstance(child, _Node))
+    return frozenset(found)
+
+
 def _link_only(roots: list[_Node], words: _LinkWords | None = None) -> frozenset[_Node]:
     """The largest subtrees under `roots` whose every word is link text.
 
@@ -487,7 +501,9 @@ def _links_home(href: str) -> bool:
     return parts.path == "/" or (bool(parts.netloc) and parts.path == "")
 
 
-def _page_title(body: _Node, furniture: frozenset[_Node], link_words: _LinkWords) -> _Node | None:
+def _page_title(
+    body: _Node, furniture: frozenset[_Node], link_words: _LinkWords, url: str = ""
+) -> _Node | None:
     """The page's own `<h1>`: the first one with words that is neither furniture
     nor a logo.
 
@@ -501,24 +517,46 @@ def _page_title(body: _Node, furniture: frozenset[_Node], link_words: _LinkWords
     not lead home, and it is the page's title.
 
     `furniture` is `_furniture(body)` and `link_words` is `_link_words` of the
-    document, both of which the caller already holds.
+    document, both of which the caller already holds; `url` is the page's, when
+    known (see `_is_logo`).
     """
     for node in _iter_elements(body):
         if node.tag != "h1" or word_count(_collect(node)) == 0:
             continue
         if any(above in furniture for above in _ancestors(node)):
             continue
-        if node in _link_only([node], link_words) and _is_logo(node):
+        if node in _link_only([node], link_words) and _is_logo(node, url):
             continue
         return node
     return None
 
 
-def _is_logo(heading: _Node) -> bool:
-    """Whether every link a link-only heading sits in, or holds, leads home."""
+def _is_logo(heading: _Node, url: str = "") -> bool:
+    """Whether a link-only heading is a logo rather than a title linked to itself.
+
+    With the page's URL the question has an answer: a title links to the page
+    it titles, a logo links somewhere else — the root, `/pt-br/`, `/blog/`,
+    wherever the site keeps its home. On the root page itself the logo links to
+    the page, and is still the logo. Without the URL, only a link to a root
+    written as a root can be told apart (`_links_home`), and a logo pointing at
+    `/pt-br/` passes for a title: measured on 2026-10-18, a 300-word promo in a
+    `div` header then counted as content, 425 words, INFO, around a 120-word
+    post. `measure_url` always passes the URL.
+    """
     links = [above for above in _ancestors(heading) if _is_link(above)]
     links += [node for node in _iter_elements(heading) if _is_link(node)]
-    return all(_links_home(link.attrs["href"]) for link in links)
+    if not url:
+        return all(_links_home(link.attrs["href"]) for link in links)
+    page = _page_path(url)
+    if page == "":
+        return True
+    return not all(_page_path(urljoin(url, link.attrs["href"])) == page for link in links)
+
+
+def _page_path(url: str) -> str:
+    """The path `url` names, without the trailing slash that `/post` and `/post/`
+    disagree on. The root comes back empty."""
+    return urlsplit(url.strip()).path.rstrip("/")
 
 
 def _has_heading(node: _Node, skip: frozenset[_Node]) -> bool:
@@ -601,6 +639,14 @@ def _beside_the_content(
         elif item not in paths:
             branches.append((position, item))
             continue
+        elif item in furniture:
+            # The block won the scoring from inside the page's furniture — a
+            # `<footer>` holding the only `<p>` on the page. The whole subtree
+            # is out of the count, so nothing in it is content, doubt or a
+            # branch; sorting its loose text subtracted 200 words that were
+            # never counted from a count of 402, and reported ERROR.
+            marks[block] = position
+            continue
         stack.extend(reversed(item.content))
     first, last = sorted((marks[title], marks[block]))
 
@@ -680,7 +726,7 @@ class _MainContent(NamedTuple):
     furniture: frozenset[_Node] | None = None
 
 
-def _main_container(doc: _Parser) -> _MainContent:
+def _main_container(doc: _Parser, url: str = "") -> _MainContent:
     """The element holding the main content, and how far it was isolated.
 
     `isolated` False means the heuristic separated nothing: what comes back is
@@ -707,6 +753,9 @@ def _main_container(doc: _Parser) -> _MainContent:
         scores[key] = scores.get(key, 0.0) + weight
 
     link_words = _link_words(doc.root)
+    body = _find_body(doc)
+    # Computed once: the scoring, the title search and the region all read it.
+    page_furniture = _furniture(body)
     text_paragraphs: list[tuple[_Node, float]] = []
     link_paragraphs: list[tuple[_Node, float]] = []
     for node in _iter_elements(doc.root):
@@ -720,11 +769,14 @@ def _main_container(doc: _Parser) -> _MainContent:
     # A card's description inside `<a class="related-card">` is a paragraph
     # nobody reads in place: six of them out-scored the article on
     # smallwebapps.com/apps/csv-to-json/ as built on 2026-08-30, and the grid of
-    # links won as the main content. So link paragraphs score only when no
-    # paragraph of text does. On a directory whose every `<p>` is a link, the
-    # list is the page; leaving it unscored sent the page to the body and
-    # reported a thin listing as unmeasurable.
-    for node, weight in text_paragraphs or link_paragraphs:
+    # links won as the main content. So link paragraphs stand aside when a
+    # paragraph of text competes — one outside the page furniture. On a
+    # directory whose every `<p>` is a link, the list is the page, and the
+    # copyright `<p>` in its footer is no competitor: counting it as one sent
+    # the page to the body and reported a thin listing as unmeasurable.
+    in_furniture = _subtrees(page_furniture)
+    competes = any(node not in in_furniture for node, _ in text_paragraphs)
+    for node, weight in text_paragraphs if competes else text_paragraphs + link_paragraphs:
         credit(node.parent, weight)
         credit(node.parent.parent if node.parent else None, weight / 2)
 
@@ -740,10 +792,7 @@ def _main_container(doc: _Parser) -> _MainContent:
         # the body wins, nothing was separated from anything.
         if winner.tag in WHOLE_PAGE_ELEMENTS:
             return _MainContent(winner, False)
-        body = _find_body(doc)
-        # Computed once: the title search and the region both read it.
-        page_furniture = _furniture(body)
-        title = _page_title(body, page_furniture, link_words)
+        title = _page_title(body, page_furniture, link_words, url)
         region = _titled_region(title, winner)
         if region is winner:
             # The title is inside the block, or there is none to widen to. The
@@ -960,7 +1009,7 @@ class TextDepth:
 def measure_depth(html: str, *, min_words: int = DEFAULT_MIN_WORDS, url: str = "") -> TextDepth:
     """Measure main-content depth in an HTML string."""
     doc = _parse(html)
-    found = _main_container(doc)
+    found = _main_container(doc, url)
     container, isolated, outside, undecided = (
         found.node,
         found.isolated,
