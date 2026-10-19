@@ -890,23 +890,48 @@ def test_bloco_dentro_da_mobilia_nao_sobe():
     "html,so_link",
     [
         ('<div><p>Leia <a href="/g">este guia</a> agora</p></div>', set()),
+        # O link no começo da frase: a palavra ao lado está à direita.
+        ('<div><p><a href="/g">Baixe</a> o arquivo agora</p></div>', set()),
         # A palavra fora do link pode estar num irmão inline, não no texto direto.
         ('<div><p><em>Leia</em> <a href="/g">isto</a></p></div>', set()),
         # Um link numa linha própria, acima de um parágrafo, é navegação: o fluxo
         # do <div> não tem palavra fora de link, só o <p> aninhado tem.
-        ('<div><a href="/">Inicio</a><p>Texto do post</p></div>', {"a"}),
+        ('<div><a href="/">Inicio</a><p>Texto do post</p></div>', {"Inicio"}),
         # Só elemento inline fica dentro de uma frase. Um <div> de link no meio
         # do texto é um bloco à parte — um card "leia mais" — e sai.
-        ('<div>Texto do post <div><a href="/x">Leia mais</a></div></div>', {"div"}),
+        ('<div>Texto do post <div><a href="/x">Leia mais</a></div></div>', {"Leia mais"}),
+        # Um rótulo não faz de uma lista de links uma frase: ele segura o link
+        # que encosta nele, e os outros, só com vírgula e link ao lado, saem.
+        (
+            '<div>Tags: <a href="/t1">pdf</a>, <a href="/t2">ferramentas</a>, '
+            '<a href="/t3">guias</a></div>',
+            {"ferramentas", "guias"},
+        ),
     ],
-    ids=["frase", "irmao-inline", "linha-propria", "bloco-de-link"],
+    ids=["frase", "inicio-da-frase", "irmao-inline", "linha-propria", "bloco-de-link", "rotulo"],
 )
 def test_link_em_texto_corrido_nao_e_so_link(html, so_link):
-    from adsense_checks.text import _iter_elements, _link_only, _parse
+    from adsense_checks.text import _collect, _iter_elements, _link_only, _normalize, _parse
 
     doc = _parse(html)
     div = next(n for n in _iter_elements(doc.root) if n.tag == "div")
-    assert {n.tag for n in _link_only([div])} == so_link
+    assert {_normalize(_collect(n)) for n in _link_only([div])} == so_link
+
+
+def test_lista_de_tags_com_rotulo_nao_vira_texto():
+    """Uma linha "Tags: <a>…</a>, <a>…</a>, …" depois do post: a palavra de
+    rótulo fazia de todo link "texto corrido", e as 160 palavras dos 80 links
+    entravam na conta — 362 palavras, ERROR, numa página de 202."""
+    tags = "Tags: " + ", ".join(f'<a href="/t{i}">{_ruido(2)}</a>' for i in range(80))
+    html = (
+        '<html><body><div class="post"><h1>Titulo</h1>'
+        f'<div class="entry"><p>{_palavras(200)}</p></div><div class="tags">{tags}</div>'
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.text.count("ruido") == 2  # o link que encosta no rótulo, e só ele
+    assert d.words == 1 + 200 + 1 + 2
+    assert d.status is Status.WARNING, d.reason
 
 
 def test_texto_solto_depois_do_bloco_que_decide_a_faixa_e_ERROR():

@@ -493,10 +493,10 @@ def _link_only(roots: list[_Node], words: _LinkWords | None = None) -> frozenset
     A link inside running text is not one of them: "Leia <a>este guia</a> e
     volte" is a sentence with a link in it, and its words are the sentence's.
     Cutting them took 100 words out of a 220-word paragraph of a section beside
-    the block, and a reader's 475 came out 375. So an inline element whose block
-    flows with words outside links stays, whatever it holds (see
-    `_in_running_text`). Only inline elements can be in running text, so a
-    heading asked about as itself (`_page_title`) is always judged whole.
+    the block, and a reader's 475 came out 375. So an inline element with a word
+    right beside it stays, whatever it holds (see `_in_running_text`). Only
+    inline elements can be in running text, so a heading asked about as itself
+    (`_page_title`) is always judged whole.
 
     `words` is `_link_words` of a tree holding every root; without it, each
     root gets its own walk.
@@ -506,38 +506,72 @@ def _link_only(roots: list[_Node], words: _LinkWords | None = None) -> frozenset
         for root in roots:
             words.update(_link_words(root))
     found: set[_Node] = set()
-    pending = list(roots)
+    # Each element travels with where it sits in its block's flow — the block,
+    # and the index there of its outermost inline ancestor — so a tag cloud of
+    # ten thousand links is not searched once per link.
+    pending: list[tuple[_Node, tuple[_Node, int] | None]] = [(root, None) for root in roots]
     while pending:
-        node = pending.pop()
+        node, at = pending.pop()
         inside, outside = words[node]
         if inside and not outside:
-            if not _in_running_text(node, words):
+            if not _in_running_text(node, words, at):
                 found.add(node)
             continue
-        pending.extend(c for c in node.content if isinstance(c, _Node) and c in words)
+        for i, child in enumerate(node.content):
+            if isinstance(child, _Node) and child in words:
+                inherits = node.tag in INLINE_ELEMENTS and at is not None
+                pending.append((child, at if inherits else (node, i)))
     return frozenset(found)
 
 
-def _in_running_text(node: _Node, words: _LinkWords) -> bool:
-    """Whether `node` is inline in a block whose flow has words outside links.
+def _in_running_text(node: _Node, words: _LinkWords, at: tuple[_Node, int] | None = None) -> bool:
+    """Whether `node` is inline with a word right beside it.
 
-    The flow of a block is its own text and its inline elements, not the
-    blocks nested in it: `<div><a>Home</a><p>Texto</p></div>` is a link on a
-    line of its own above a paragraph, and the link is navigation.
+    Right beside means the nearest thing on either side in the block's flow,
+    past spaces and punctuation: text with a word in it, or an inline element
+    with words outside links. "Leia <a>o guia</a> e volte" has one on each
+    side; "veja o <a>guia</a>." has one on the left. A block ends the flow, so
+    `<div><a>Home</a><p>Texto</p></div>` is a link on a line of its own.
+
+    Beside, not merely in the same block: any word in the flow kept a labelled
+    list whole — "Tags: <a>pdf</a>, <a>ferramentas</a>, …" counted 160 linked
+    words for one word of label. Now the label keeps the link it touches, and
+    the rest, with only commas and other links beside them, leave.
+
+    `at` is the block and the index of `node`'s outermost inline ancestor
+    there, when the caller knows it; otherwise it is found by walking up.
     """
     if node.tag not in INLINE_ELEMENTS:
         return False
-    block = node.parent
-    while block is not None and block.tag in INLINE_ELEMENTS:
-        block = block.parent
-    if block is None:
-        return False
-    return any(
-        _WORD.search(item)
-        if isinstance(item, str)
-        else item.tag in INLINE_ELEMENTS and item in words and words[item][1]
-        for item in block.content
-    )
+    if at is None:
+        item = node
+        while item.parent is not None and item.parent.tag in INLINE_ELEMENTS:
+            item = item.parent
+        if item.parent is None:
+            return False
+        block = item.parent
+        at = (block, next(i for i, c in enumerate(block.content) if c is item))
+    block, index = at
+    return _worded(block.content, index, -1, words) or _worded(block.content, index, 1, words)
+
+
+def _worded(flow: list[str | _Node], index: int, step: int, words: _LinkWords) -> bool:
+    """Whether the nearest thing to `flow[index]`, going `step`, carries a word.
+
+    Spaces and punctuation are looked past; a block or a link stops the look.
+    """
+    j = index + step
+    while 0 <= j < len(flow):
+        item = flow[j]
+        if isinstance(item, str):
+            if _WORD.search(item):
+                return True
+        elif not item.dropped:
+            if item.tag not in INLINE_ELEMENTS:
+                return False
+            return item in words and words[item][1]
+        j += step
+    return False
 
 
 def _links_home(href: str) -> bool:

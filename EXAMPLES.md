@@ -346,7 +346,9 @@ Behaviour observed in the runs above, recorded here because a reader will hit it
   A link inside running text is not: "read <a>this guide</a> first" is a
   sentence, and the linked words count with it. Until 2026-10-19 they were
   cut, and a section beside the block with 100 linked words in a 220-word
-  paragraph read 100 words short. The block and the title are taken whole, so a "Related posts" list of links
+  paragraph read 100 words short. Running text means a word right beside the
+  link, past spaces and punctuation, so a labelled list is not a sentence:
+  "Tags: <a>pdf</a>, <a>tools</a>, …" keeps the one link its label touches. The block and the title are taken whole, so a "Related posts" list of links
   inside the block still counts. An `<h1>` whose words are all link text is a
   logo, not a title, and widens nothing, unless it links to the page it sits on
   — a post title linked to its own permalink. That takes the page's URL, which
