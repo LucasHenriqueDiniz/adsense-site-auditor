@@ -70,8 +70,12 @@ no source.
      measured a median of 220 words on 2026-08-30. That measurement was the
      depth check's, not the site's — the tool pages have no `<main>`, and the
      check counted one paragraph block per page. Rebuilt from that day's source
-     and counted correctly, none was below 300. The correction is in Part 2 of
-     `EXAMPLES.md`; that rejection has no measured cause.
+     and counted from each page's `<h1>` to the end of its FAQ, none of the 142
+     was below 300. This script as it stands still puts one of them below 300 —
+     an `<h1>` inside the block its scoring elects, listed under "Known gaps" in
+     `EXAMPLES.md` — so the reference count, not a run of this step, is what
+     clears them. The correction is in Part 2 of `EXAMPLES.md`; that rejection
+     has no measured cause.
 
 **Decision at pre-flight:**
 - **0 Blockers**: Proceed to the full requirement audit

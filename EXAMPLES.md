@@ -389,25 +389,33 @@ The tool-page row in the table below is wrong, and so is every conclusion in
 this Part that rests on it. The tool pages have no `<main>` and no `<article>`.
 On 2026-08-30 the depth check fell back to its paragraph scoring, which elects
 one block per page — the densest run of `<p>` — and most of each page's text
-sits in lists and FAQ `<details>` that the block does not hold. Commit `d5b0784`
-fixes the fallback; "Known gaps" in Part 1 says what it still gets wrong.
+sits in lists and FAQ `<details>` that the block does not hold. The fallback
+was fixed on 2026-10-18; "Known gaps" in Part 1 says what it still gets wrong.
 
 This is a reconstruction, not a re-observation. The site's own repository at
 `f22174d`, its last commit on 2026-08-30, was built locally, and its 142 tool
-pages were measured with `adsense_checks` as of `c2df5d5`, the code that measured
-that day, and as of `d5b0784`:
+pages were measured with this repository's depth check twice: as it stood that
+day, and as it stands after the fix.
 
 | 142 tool pages, built from the 2026-08-30 source | median | min | max | below 300 |
 | --- | --- | --- | --- | --- |
-| depth check as of `c2df5d5` | 239.5 | 92 | 334 | 136 |
-| depth check as of `d5b0784` | 705 | 182 | 1430 | 1 |
+| depth check as it stood on 2026-08-30 | 239.5 | 92 | 334 | 136 |
+| depth check as of 2026-10-18, after the fix | 559 | 182 | 1274 | 1 |
 | `<h1>` to the end of the FAQ, related-tools grid left out | 553 | 396 | 1268 | 0 |
 
-The reconstruction agrees with the table wherever the table can be checked. The
-minimum of 92 comes out exactly, and the maximum of 3281 is the `/apps/`
-catalogue, which the crawl counted among its 48 and which measures 3281 here.
-The median cannot be checked, because which 47 tool pages that crawl reached was
-not recorded. Over the 30 tool pages in that build's sitemap the old check reads
+The page the fixed check still puts below 300 is the one "Known gaps" names: an
+`<h1>` inside the block the scoring elects.
+
+The code of 2026-08-30 is commit `c2df5d5`. A squash or rebase merge leaves that
+commit off `master`, so it is cited where GitHub keeps it whatever the merge:
+`git fetch origin pull/1/head` brings it back.
+
+The reconstruction agrees with the table where the table can be checked. The
+minimum of 92 comes out exactly. The maximum of 3281 matches too, on an
+assumption: the rebuilt `/apps/` catalogue measures exactly 3281, so the crawl
+most likely counted that page among its 48 — inferred from the number, because
+the crawl's page list was not kept. For the same reason the median cannot be
+checked: which 47 tool pages that crawl reached was not recorded. Over the 30 tool pages in that build's sitemap the old check reads
 a median of 163.5, and the reference 720.5 with the lowest at 576.
 
 What that leaves standing, and what it does not:
