@@ -495,6 +495,71 @@ def test_robots_bloqueando_o_adsense_impede_o_get(server):
     assert [p.title for p in r.pages] == ["Home", "Publico"]
 
 
+def test_redirect_para_caminho_bloqueado_pelo_robots_nao_e_seguido(server):
+    """Achado 3 da revisão do PR #1: o robots.txt valia só para a fila.
+
+    O crawler do AdSense pede o alvo de um redirect como uma URL própria, sob o
+    robots.txt. Checado só na fila, `/vai` respondendo 302 para `/privado/pagina`
+    levava o crawler até lá: a página entrava em `pages` e o ADS-CRAWL-01 saía
+    OK, medido em 2026-10-19.
+    """
+    base, routes = server
+    bloqueada = []
+    routes["/robots.txt"] = (
+        200,
+        TEXTO,
+        "User-agent: Mediapartners-Google\nDisallow: /privado/\n",
+    )
+    routes["/"] = (200, HTML, pagina("Home", '<a href="/vai">vai</a><a href="/publico">u</a>'))
+    routes["/vai"] = (302, {"Location": "/privado/pagina"}, "")
+    routes["/privado/pagina"] = rota_contada(bloqueada, (200, HTML, pagina("Privado")))
+    routes["/publico"] = (200, HTML, pagina("Publico"))
+
+    r = varrer(base)
+
+    assert bloqueada == []
+    assert r.blocked_by_robots == [base + "/privado/pagina"]
+    assert [p.title for p in r.pages] == ["Home", "Publico"]
+
+
+def test_redirect_para_caminho_bloqueado_e_seguido_sem_respeitar_o_robots(server):
+    """`respect_robots=False` é o operador pedindo para ver o que há lá."""
+    base, routes = server
+    routes["/robots.txt"] = (
+        200,
+        TEXTO,
+        "User-agent: Mediapartners-Google\nDisallow: /privado/\n",
+    )
+    routes["/"] = (200, HTML, pagina("Home", '<a href="/vai">vai</a>'))
+    routes["/vai"] = (302, {"Location": "/privado/pagina"}, "")
+    routes["/privado/pagina"] = (200, HTML, pagina("Privado"))
+
+    r = varrer(base, respect_robots=False)
+
+    assert [p.title for p in r.pages] == ["Home", "Privado"]
+    assert r.blocked_by_robots == []
+
+
+def test_redirect_para_outro_site_nao_e_julgado_pelo_robots_daqui(server, outro_servidor):
+    """O alvo noutro site responde ao robots.txt de lá, que esta varredura não
+    leu. Julgá-lo pelo daqui recusaria um caminho que só parece com o bloqueado."""
+    base, routes = server
+    outro, rotas_do_outro = outro_servidor
+    routes["/robots.txt"] = (
+        200,
+        TEXTO,
+        "User-agent: Mediapartners-Google\nDisallow: /privado/\n",
+    )
+    routes["/"] = (200, HTML, pagina("Home", '<a href="/vai">vai</a>'))
+    routes["/vai"] = (302, {"Location": outro + "/privado/pagina"}, "")
+    rotas_do_outro["/privado/pagina"] = (200, HTML, pagina("La"))
+
+    r = varrer(base)
+
+    assert [c for _m, c, _h in rotas_do_outro.received] == ["/privado/pagina"]
+    assert r.blocked_by_robots == []
+
+
 def test_regra_acentuada_do_robots_sem_charset_continua_bloqueando(server):
     """robots.txt em `text/plain` sem charset, o padrão do nginx. O requests lia
     como ISO-8859-1, `Disallow: /promoção/` virava `/promoÃ§Ã£o/`, nenhum caminho
@@ -1345,7 +1410,7 @@ def test_a_profundidade_padrao_do_crawl_e_2(server):
     routes["/n2"] = (200, HTML, pagina("N2", '<a href="/n3">n3</a>'))
     routes["/n3"] = (200, HTML, pagina("N3"))
 
-    r = crawl(base + "/", delay=0, respect_robots=False)
+    r = varrer(base, respect_robots=False)
 
     assert sorted(p.depth for p in r.pages) == [0, 1, 2]
     assert [p.title for p in r.pages] == ["N0", "N1", "N2"]
@@ -1360,7 +1425,7 @@ def test_o_teto_padrao_de_paginas_do_modulo_e_100(server):
     for i in range(120):
         routes[f"/p{i}"] = (200, HTML, pagina(f"P{i}"))
 
-    r = crawl(base + "/", delay=0, respect_robots=False)
+    r = varrer(base, respect_robots=False)
 
     assert len(r.pages) == 100
     assert r.stopped_reason == "stopped at max_pages=100"

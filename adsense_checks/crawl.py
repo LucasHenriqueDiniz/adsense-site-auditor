@@ -787,6 +787,19 @@ def crawl(
         result.stopped_reason = "robots.txt disallows the AdSense crawler at the site root"
         return result
 
+    def disallowed(target: str) -> str | None:
+        # A redirect target is a URL the AdSense crawler requests on its own,
+        # under robots.txt like any other. Checked only at the queue, `/vai`
+        # answering 302 to a disallowed `/privado/pagina` was fetched, recorded
+        # as a crawled page and counted reachable, measured on 2026-10-19.
+        # Another site's target answers to that site's robots.txt, which this
+        # crawl never read, so it is left as before.
+        if same_site(target, result.base_url) and not is_allowed(
+            result.robots, ADSENSE_CRAWLER, _path_with_query(target)
+        ):
+            return f"robots.txt disallows {ADSENSE_CRAWLER} at {target}"
+        return None
+
     seen = {normalize_url(start_url), normalize_url(root.final_url)}
     queue: list[tuple[str, int]] = []
     _enqueue(result, root_page, queue, seen)
@@ -822,7 +835,14 @@ def crawl(
         # and a negative delay is skipped by both. The comparison states intent.
         if delay > 0:
             time.sleep(delay)
-        response = fetch(url, timeout=timeout, session=sess, user_agent=user_agent)
+        # No `respect_robots` test here: without it `result.robots` is empty and
+        # `disallowed` refuses nothing.
+        response = fetch(
+            url, timeout=timeout, session=sess, user_agent=user_agent, refuse_hop=disallowed
+        )
+        if response.refused_url:
+            result.blocked_by_robots.append(response.refused_url)
+            continue
         page = _record(result, response, depth)
         # The redirect target counts as visited too, so a second spelling of the
         # same document does not cost another request.
