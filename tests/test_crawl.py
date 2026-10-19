@@ -515,6 +515,26 @@ def test_robots_bloqueando_o_adsense_impede_o_get(server):
     assert [p.title for p in r.pages] == ["Home", "Publico"]
 
 
+def test_regra_acentuada_do_robots_sem_charset_continua_bloqueando(server):
+    """robots.txt em `text/plain` sem charset, o padrão do nginx. O requests lia
+    como ISO-8859-1, `Disallow: /promoção/` virava `/promoÃ§Ã£o/`, nenhum caminho
+    casava, e o crawler entrava no diretório que o site fechou para o AdSense."""
+    base, routes = server
+    bloqueada = []
+    routes["/robots.txt"] = (
+        200,
+        {"Content-Type": "text/plain"},
+        "User-agent: Mediapartners-Google\nDisallow: /promoção/\n",
+    )
+    routes["/"] = (200, HTML, pagina("Home", '<a href="/promoção/oferta">p</a>'))
+    routes["/promo%C3%A7%C3%A3o/oferta"] = rota_contada(bloqueada, (200, HTML, pagina("Oferta")))
+
+    r = varrer(base)
+
+    assert bloqueada == []
+    assert any("oferta" in url for url in r.blocked_by_robots)
+
+
 def test_robots_ausente_libera_o_crawl(server):
     """Google trata robots.txt inalcançável como allow-all; ausência não pode
     virar bloqueio silencioso."""

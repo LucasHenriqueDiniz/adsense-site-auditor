@@ -136,6 +136,25 @@ def test_comentarios_e_linhas_malformadas_nao_quebram():
     assert is_allowed(r, INDEX_CRAWLER, "/y") is True
 
 
+@pytest.mark.parametrize(
+    "separador", ["\x85", "\u2028", "\u2029", "\x0c", "\x1c"], ids=repr
+)
+def test_so_cr_e_lf_terminam_uma_linha(separador):
+    """A RFC 9309 define EOL como CR, LF ou CRLF. `str.splitlines` corta também em
+    U+0085, U+2028, U+2029, form feed e nos separadores de arquivo, e a primeira
+    metade da regra — um caminho mais curto, portanto mais largo — era aplicada
+    no lugar dela."""
+    robots = parse_robots(f"User-agent: *\nDisallow: /a{separador}b/\n")
+    assert robots.groups[0].rules == [(False, f"/a{separador}b/")]
+    assert is_allowed(robots, "Googlebot", "/a") is True
+
+
+def test_cr_lf_e_crlf_continuam_terminando_linha():
+    for fim in ("\n", "\r", "\r\n"):
+        robots = parse_robots(f"User-agent: *{fim}Disallow: /x{fim}Disallow: /y{fim}")
+        assert robots.groups[0].rules == [(False, "/x"), (False, "/y")], repr(fim)
+
+
 def test_sitemaps_sao_extraidos():
     r = parse_robots(SAUDAVEL)
     assert r.sitemaps == ["https://exemplo.com/sitemap.xml"]

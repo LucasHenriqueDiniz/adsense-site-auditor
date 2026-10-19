@@ -255,7 +255,7 @@ Pages (7):
         title: Fixture Tools
         h1: Fixture Tools
         description: (none)
-        63 visible words in 693 chars of markup; 6 links, 0 nofollow
+        63 visible words in 691 chars of markup; 6 links, 0 nofollow
   [200] d1 http://localhost:8765/guides/local-file-tools/
         title: Why local file tools
         h1: Why local file tools

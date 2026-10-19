@@ -1249,6 +1249,35 @@ def test_placeholder_na_home_nunca_sai_como_aprovado(server):
     assert "coming soon" in frases(relatorio)
 
 
+@pytest.mark.parametrize(
+    "cabeca", ["", '<meta charset="utf-8">'], ids=["sem-declaracao", "meta-charset"]
+)
+def test_placeholder_acentuado_na_home_sem_charset_no_header_e_achado(server, cabeca):
+    """`text/html` sem charset é o padrão do Apache e do http.server do Python, e
+    o requests lê esse corpo como ISO-8859-1. O completeness lia `Fetch.text` cru:
+    "em construção" chegava "em construÃ§Ã£o", nenhum marcador casava e a home
+    saía PASS, exit 0 — inclusive com `<meta charset="utf-8">` na página, que só o
+    text.py consultava."""
+    base, rotas = server
+    rodape = "<a href='/about'>Sobre</a> <a href='/contact'>Contato</a>"
+    rotas["/"] = (
+        200,
+        {"Content-Type": "text/html"},
+        f"<html><head>{cabeca}</head><body><h1>Casa</h1>"
+        "<section><h2>Conversor</h2><p>Esta seção está em construção.</p></section>"
+        "<section><h2>Calculadora</h2><p>O conteúdo será adicionado.</p></section>"
+        f"<footer>{rodape}</footer></body></html>",
+    )
+    rotas["/about"] = (200, {}, pagina("Sobre"))
+    rotas["/contact"] = (200, {}, contato())
+
+    relatorio = check_completeness(base)
+
+    assert relatorio.status is Status.WARNING
+    assert "em construcao" in frases(relatorio)
+    assert "sera adicionado" in frases(relatorio)
+
+
 def test_o_resumo_herda_o_pior_status_das_partes(server):
     """O veredito é derivado das findings emitidas, não de uma lista de status
     escrita à mão que pode divergir do que os checks produzem.

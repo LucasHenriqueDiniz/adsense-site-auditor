@@ -19,10 +19,16 @@ different places — asking a question of the wrong response:
 
 `fetch` answers all of them from a single GET that follows redirects, and keeps
 the hop chain so callers can inspect it.
+
+It also decodes the body once, for every caller (see `_decode`). That was done
+in `text.py` alone, and the other readers of `Fetch.text` got requests'
+ISO-8859-1 fallback: Portuguese placeholders and robots.txt rules turned to
+mojibake and stopped matching anything.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from urllib.parse import SplitResult, urldefrag, urljoin, urlsplit
 
@@ -113,6 +119,10 @@ class Fetch:
     # the web — a two-hop answer was reported as the duration of its last hop.
     elapsed_ms: float | None = None
     error: str | None = None
+    # Set when the document names an encoding its own bytes do not honour.
+    # `text` is then requests' own guess, and a caller that turns it into a
+    # verdict should refuse instead (see `text.measure_fetch`).
+    charset_error: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -222,6 +232,99 @@ def _reject_unwaitable(seconds: object) -> None:
         )
 
 
+# HTML5 requires a document's encoding declaration inside the first 1024 bytes.
+# Searching further would start matching prose — an article *about* encodings
+# says "charset=utf-8" in its body without declaring anything.
+_DECLARATION_WINDOW = 1024
+
+# Both spellings HTML5 allows: the short <meta charset="utf-8"> and the legacy
+# <meta http-equiv="Content-Type" content="text/html; charset=utf-8">. The value
+# may be quoted with either quote character or left bare.
+_META_CHARSET = re.compile(
+    r"""<meta[^>]*?charset\s*=\s*["']?([A-Za-z0-9_:.+-]+)""",
+    re.IGNORECASE,
+)
+
+# The only bodies a `<meta>` can declare anything for. A robots.txt or a sitemap
+# that happens to contain the string is not declaring an encoding.
+_HTML_MEDIA_TYPES = frozenset({"text/html", "application/xhtml+xml"})
+
+
+def _header_charset(content_type: str) -> str:
+    """The charset parameter of a Content-Type, lowercased. Empty when absent."""
+    for parameter in content_type.split(";")[1:]:
+        name, _, value = parameter.partition("=")
+        if name.strip().lower() == "charset":
+            return value.strip().strip("\"'").lower()
+    return ""
+
+
+def _declared_charset(text: str) -> str:
+    """The encoding an HTML document declares about itself, lowercased.
+
+    Matches `<meta charset=...>` and the `charset=` inside a `<meta
+    http-equiv="Content-Type">`, which is where HTML5 says to look when the
+    transport does not say. Only the head is searched: HTML5 requires the
+    declaration in the first 1024 bytes, and a `charset=` further down is more
+    likely to be prose about encodings than a declaration.
+    """
+    match = _META_CHARSET.search(text[:_DECLARATION_WINDOW])
+    return match.group(1).lower() if match else ""
+
+
+def _decode(resp: requests.Response) -> tuple[str, str | None]:
+    """The body as text, and why it could not be read as declared, when it could not.
+
+    requests reads a `text/*` body with no charset parameter as ISO-8859-1:
+    RFC 2616's default, which HTML5 replaced with "read the document's own
+    declaration". The damage is not cosmetic, and it is not confined to word
+    counts:
+
+      * "coração" arrives as "coraÃ§Ã£o", which `text._WORD` reads as three
+        words, so a 240-word page measured 480 and cleared a bar it should
+        have missed;
+      * "em construção" arrives as "em construÃ§Ã£o", and the completeness
+        check's placeholder markers stopped matching: measured on 2026-10-19, a
+        home page saying "em construção" and "será adicionado" read WARN with
+        `charset=utf-8` in the header and PASS without it, exit 0;
+      * robots.txt is served as `text/plain` with no charset by nginx's default,
+        and `Disallow: /promoção/` normalized to a path no URL has, so the
+        AdSense crawler was allowed into a directory the site had closed to it.
+
+    So the bytes are decoded here, once, for every caller. A charset in the
+    header is believed. Without one, an HTML document's own `<meta>` declaration
+    is honoured, and failing that the body is read as UTF-8 if it decodes
+    strictly as UTF-8 — a multi-byte sequence that decodes strictly is UTF-8 in
+    every document not built to fool this check. What remains is a genuine
+    legacy page declaring nothing, and requests' own reading of it stands:
+    ISO-8859-1 for text, where its letters are letters.
+
+    A document that declares an encoding its bytes do not honour keeps
+    requests' reading, and says so in the second value. Any text taken from it
+    is a guess, and the caller decides whether a guess can carry a verdict.
+    """
+    content_type = resp.headers.get("content-type", "")
+    if _header_charset(content_type):
+        # The server said what it sent, and requests decoded with it.
+        return resp.text, None
+    raw = resp.content
+    media_type = content_type.split(";")[0].strip().lower()
+    declared = (
+        _declared_charset(raw[:_DECLARATION_WINDOW].decode("iso-8859-1"))
+        if media_type in _HTML_MEDIA_TYPES
+        else ""
+    )
+    if declared:
+        try:
+            return raw.decode(declared), None
+        except (LookupError, UnicodeDecodeError):
+            return resp.text, f"declared charset {declared!r} does not decode the body"
+    try:
+        return raw.decode("utf-8"), None
+    except UnicodeDecodeError:
+        return resp.text, None
+
+
 def fetch(
     url: str,
     *,
@@ -292,7 +395,8 @@ def fetch(
         # A real HEAD response has no body; guard so callers never see a stale
         # one. A GET that replaced a refused HEAD does have one, and keeping it
         # is the whole reason for the fallback.
-        result.text = "" if answered_with == "HEAD" else resp.text
+        if answered_with != "HEAD":
+            result.text, result.charset_error = _decode(resp)
     # Order matters, and this clause has to stay second: requests' own InvalidURL,
     # MissingSchema and InvalidSchema are BOTH a RequestException and a ValueError,
     # and they already carry a precise message of their own.

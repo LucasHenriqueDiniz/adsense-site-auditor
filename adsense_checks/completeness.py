@@ -1258,10 +1258,8 @@ def _probe_covers(probe: _NotFoundProbe, url: str) -> bool:
     neither toward a pass. A directory whose name is non-ASCII AND comes from the
     markup rather than from the typed URL: `probe.base` keeps the raw `<base
     href>` text while `final_url` comes back percent-encoded, so they do not
-    match. That is a decoding fault older than this gate — the parser turns `ç`
-    into `Ã§` here at every commit on this branch — and normalizing the strings
-    here would hide it rather than fix it. A directory typed as the target is
-    unaffected, because both sides are already encoded. And paths differing only
+    match. A directory typed as the target is unaffected, because both sides are
+    already encoded. And paths differing only
     in case: RFC 3986 says they are different paths, so this follows it, which
     costs a false MISSING on a case-insensitive server.
     """

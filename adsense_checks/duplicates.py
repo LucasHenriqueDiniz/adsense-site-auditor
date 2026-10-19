@@ -560,9 +560,10 @@ def fetch_page_texts(
     an identity: an unreadable url is reported under the name the caller used,
     because what that entry is for is telling the caller which input failed.
 
-    Limitation worth stating: decoding is whatever `fetch` returned. A server
-    that omits the charset leaves requests on its ISO-8859-1 fallback, and the
-    resulting mojibake changes the tokens. That belongs to the fetch layer.
+    Decoding is `fetch`'s: the header's charset, then the document's own
+    declaration, then strict UTF-8 (see `http._decode`). It used to be
+    requests' ISO-8859-1 fallback for any page served without a charset, and
+    the mojibake changed the tokens.
     """
     if extract is None:
         from adsense_checks.text import extract_text

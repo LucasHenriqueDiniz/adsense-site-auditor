@@ -53,7 +53,9 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
         if body_allowed and body:
-            self.wfile.write(body.encode())
+            # Bytes vão como estão: é como se serve uma página legada em
+            # windows-1252 ou ISO-8859-1, que `str.encode()` transformaria em UTF-8.
+            self.wfile.write(body if isinstance(body, bytes) else body.encode())
 
     def do_GET(self):
         self._respond(True)

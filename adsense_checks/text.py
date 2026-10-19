@@ -36,11 +36,12 @@ Two levels of extraction, because they answer different questions:
 Two things this module refuses to guess, because guessing them is the same
 mistake in a new place — a number reported for something nobody observed:
 
-  * A body served as `text/html` with no charset reaches `measure_fetch`
-    decoded as ISO-8859-1, requests' fallback. "coração" arrives as
-    "coraÃ§Ã£o" and counts as three words, so a 240-word page measures 480 and
-    clears a bar it should have missed. The bytes are recoverable and are
-    re-decoded here; what cannot be decoded is ERROR, not a word count.
+  * A body served as `text/html` with no charset used to reach `measure_fetch`
+    decoded as ISO-8859-1, requests' fallback. "coração" arrived as
+    "coraÃ§Ã£o" and counted as three words, so a 240-word page measured 480 and
+    cleared a bar it should have missed. `http.fetch` decodes the bytes now
+    (see `http._decode`); a page whose declared charset does not decode them is
+    ERROR here, not a word count.
   * A page whose main content the heuristic cannot isolate is measured on the
     whole `<body>`, menu and footer included. That is a different question from
     the one ADS-CONTENT-03 asks, so `measure_depth` reports it as ERROR instead
@@ -244,19 +245,6 @@ _WORD = re.compile(r"[^\W\d_]+(?:['’-][^\W\d_]+)*|\d+(?:[.,]\d+)*")
 # soft hyphen, zero-width space, BOM. Spelled as escapes on purpose — a literal
 # here is unreadable in the source and unsearchable in a diff.
 _INVISIBLE = str.maketrans({"\xad": "", "\u200b": "", "\ufeff": ""})
-
-# HTML5 requires a document's encoding declaration inside the first 1024 bytes.
-# Searching further would start matching prose — an article *about* encodings
-# says "charset=utf-8" in its body without declaring anything.
-_DECLARATION_WINDOW = 1024
-
-# Both spellings HTML5 allows: the short <meta charset="utf-8"> and the legacy
-# <meta http-equiv="Content-Type" content="text/html; charset=utf-8">. The value
-# may be quoted with either quote character or left bare.
-_META_CHARSET = re.compile(
-    r"""<meta[^>]*?charset\s*=\s*["']?([A-Za-z0-9_:.+-]+)""",
-    re.IGNORECASE,
-)
 
 
 class _Node:
@@ -1602,76 +1590,6 @@ def measure_depth(html: str, *, min_words: int = DEFAULT_MIN_WORDS, url: str = "
     )
 
 
-def _header_charset(content_type: str) -> str:
-    """The charset parameter of a Content-Type, lowercased. Empty when absent."""
-    for parameter in content_type.split(";")[1:]:
-        name, _, value = parameter.partition("=")
-        if name.strip().lower() == "charset":
-            return value.strip().strip("\"'").lower()
-    return ""
-
-
-def _declared_charset(text: str) -> str:
-    """The encoding the document declares about itself, lowercased.
-
-    Matches `<meta charset=...>` and the `charset=` inside a `<meta
-    http-equiv="Content-Type">`, which is where HTML5 says to look when the
-    transport does not say. Only the head is searched: HTML5 requires the
-    declaration in the first 1024 bytes, and a `charset=` further down is more
-    likely to be prose about encodings than a declaration.
-    """
-    match = _META_CHARSET.search(text[:_DECLARATION_WINDOW])
-    return match.group(1).lower() if match else ""
-
-
-def _decode_body(response: Fetch, content_type: str) -> tuple[str, str | None]:
-    """The body as text, and the reason it could not be read, when it could not.
-
-    `Fetch.text` is whatever requests decoded, and requests reads a `text/*`
-    body with no charset parameter as ISO-8859-1: RFC 2616's default, which
-    HTML5 replaced with "read the document's own declaration". The damage is
-    not cosmetic. "coração" arrives as "coraÃ§Ã£o", which `_WORD` reads as three
-    words, so a 240-word page measures 480 and clears a 450-word bar it should
-    have missed — a thin page reported as a clean pass, which is the defect
-    this whole module exists to stop.
-
-    ISO-8859-1 maps every byte to its own code point, so the fallback is
-    reversible and the original bytes can be decoded again here. The right home
-    for the repair is the fetch layer, which still holds the response object;
-    until it moves there, this is the last place before a number gets printed.
-    """
-    text = response.text
-    if _header_charset(content_type):
-        # The server said what it sent and the fetch layer decoded with it.
-        return text, None
-    try:
-        raw = text.encode("iso-8859-1")
-    except UnicodeEncodeError:
-        # Code points above U+00FF: this text did not come from the fallback,
-        # so re-decoding it would corrupt what somebody already got right.
-        return text, None
-
-    declared = _declared_charset(text)
-    if declared:
-        try:
-            return raw.decode(declared), None
-        except (LookupError, UnicodeDecodeError):
-            # The page names an encoding its own bytes do not honour. Any text
-            # taken from here is a guess, and a word count over a guess is the
-            # pass nobody observed.
-            return text, f"declared charset {declared!r} does not decode the body"
-
-    try:
-        # UTF-8 validates itself: a multi-byte sequence that decodes strictly
-        # is UTF-8 in every document that is not built to fool this check.
-        return raw.decode("utf-8"), None
-    except UnicodeDecodeError:
-        # A genuine legacy single-byte page, declaring nothing. ISO-8859-1 is
-        # the historical default and its letters are letters, so the count
-        # stands rather than being refused.
-        return text, None
-
-
 def measure_fetch(response: Fetch, *, min_words: int = DEFAULT_MIN_WORDS) -> TextDepth:
     """Measure depth from an already-performed fetch."""
     url = response.final_url or response.url
@@ -1701,11 +1619,15 @@ def measure_fetch(response: Fetch, *, min_words: int = DEFAULT_MIN_WORDS) -> Tex
             reason=f"{detail}: body not parsed as HTML",
         )
 
-    html, undecodable = _decode_body(response, content_type)
-    if undecodable is not None:
-        return TextDepth(url=url, status=Status.ERROR, reason=f"{undecodable}: not measured")
+    if response.charset_error is not None:
+        # The page names an encoding its own bytes do not honour, so the text
+        # `fetch` kept is requests' guess, and a word count over a guess is the
+        # pass nobody observed.
+        return TextDepth(
+            url=url, status=Status.ERROR, reason=f"{response.charset_error}: not measured"
+        )
 
-    return measure_depth(html, min_words=min_words, url=url)
+    return measure_depth(response.text, min_words=min_words, url=url)
 
 
 def measure_url(

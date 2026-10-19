@@ -3,7 +3,7 @@
 import math
 import time
 
-from adsense_checks.http import MAX_WAIT_SECONDS, fetch
+from adsense_checks.http import MAX_WAIT_SECONDS, _declared_charset, fetch
 from adsense_checks.status import Status
 
 
@@ -411,3 +411,130 @@ def test_o_maior_timeout_que_a_maquina_aguenta_continua_sendo_aceito(server):
 
     assert r.ok
     assert routes.received != []
+
+
+# ---------------------------------------------------------------------------
+# Decodificação: uma vez, no fetch, para todo mundo que lê `Fetch.text`.
+#
+# O requests lê um corpo text/* sem charset como ISO-8859-1. Só o text.py
+# consertava isso, e os outros leitores recebiam mojibake: o placeholder
+# "em construção" do completeness parava de casar e uma regra `Disallow:
+# /promoção/` do robots.txt deixava de bloquear o caminho que ela fecha.
+# ---------------------------------------------------------------------------
+
+
+def test_html_sem_charset_em_utf8_chega_decodificado(server):
+    base, routes = server
+    routes["/pt"] = (200, {"Content-Type": "text/html"}, "<p>Esta seção está em construção.</p>")
+    r = fetch(base + "/pt")
+    assert "construção" in r.text
+    assert "Ã" not in r.text
+    assert r.charset_error is None
+
+
+def test_texto_puro_sem_charset_em_utf8_chega_decodificado(server):
+    """O robots.txt do nginx: `text/plain` e nenhum charset."""
+    base, routes = server
+    routes["/robots.txt"] = (
+        200, {"Content-Type": "text/plain"}, "User-agent: *\nDisallow: /promoção/\n"
+    )
+    r = fetch(base + "/robots.txt")
+    assert "Disallow: /promoção/" in r.text
+
+
+def test_meta_charset_vale_quando_o_header_nao_diz(server):
+    """windows-1252 declarado na própria página. As aspas curvas 0x93 e 0x94 não
+    são UTF-8 nem letras em ISO-8859-1: só a declaração as lê direito."""
+    base, routes = server
+    corpo = (
+        '<html><head><meta charset="windows-1252"></head><body><p>'
+        "\u201ca\u00e7\u00e3o\u201d</p></body></html>"
+    ).encode("windows-1252")
+    routes["/legado"] = (200, {"Content-Type": "text/html"}, corpo)
+    r = fetch(base + "/legado")
+    assert "\u201ca\u00e7\u00e3o\u201d" in r.text
+
+
+def test_charset_do_header_ganha_da_meta(server):
+    """O transporte disse o que mandou. Uma meta errada não reabre a questão."""
+    base, routes = server
+    html = '<html><head><meta charset="iso-8859-1"></head><body><p>ação</p></body></html>'
+    routes["/pt"] = (200, {"Content-Type": "text/html; charset=utf-8"}, html)
+    r = fetch(base + "/pt")
+    assert "ação" in r.text
+
+
+def test_pagina_legada_sem_declaracao_continua_em_iso_8859_1(server):
+    """Bytes que não são UTF-8 e nenhuma declaração: a leitura do requests fica,
+    e as letras de um latin-1 continuam letras."""
+    base, routes = server
+    routes["/legado"] = (
+        200, {"Content-Type": "text/html"}, "<p>informação</p>".encode("iso-8859-1")
+    )
+    r = fetch(base + "/legado")
+    assert "informação" in r.text
+    assert r.charset_error is None
+
+
+def test_meta_fora_de_html_nao_declara_nada(server):
+    """Uma `<meta charset>` só declara alguma coisa num documento HTML. Num
+    robots.txt é texto, e obedecê-la decodificaria o arquivo como grego."""
+    base, routes = server
+    texto = "# <meta charset='iso-8859-7'>\nUser-agent: *\nDisallow: /ação/\n"
+    routes["/robots.txt"] = (200, {"Content-Type": "text/plain"}, texto)
+    r = fetch(base + "/robots.txt")
+    assert "Disallow: /ação/" in r.text
+
+
+def test_charset_declarado_que_nao_decodifica_fica_registrado_no_fetch(server):
+    """O texto fica o palpite do requests, e o motivo viaja junto para quem
+    for transformar o texto num veredito."""
+    base, routes = server
+    html = '<html><head><meta charset="utf-16"></head><body><p>ação</p></body></html>'
+    # Ímpar: UTF-16 lê os bytes de dois em dois e não decodifica um número ímpar.
+    assert len(html.encode()) % 2 == 1
+    routes["/ruim"] = (200, {"Content-Type": "text/html"}, html)
+    r = fetch(base + "/ruim")
+    assert r.charset_error is not None
+    assert "utf-16" in r.charset_error
+
+
+def test_o_charset_declarado_e_procurado_so_no_primeiro_kib():
+    """_DECLARATION_WINDOW. O HTML5 exige a declaração nos primeiros 1024 bytes,
+    e procurar além disso passa a casar prosa: um artigo SOBRE codificações diz
+    "charset=utf-8" no corpo sem declarar nada.
+
+    Os offsets anteriores eram 900 e 1100, uma folga de 100 de cada lado: medido,
+    `_DECLARATION_WINDOW 1024 -> 1099` sobrevivia. Aqui a declaração é posicionada
+    no byte, e o par 1023/1024 prende a janela em qualquer direção.
+    """
+    declaracao = "<meta charset='iso-8859-7'>"
+    # O casamento de `_META_CHARSET` termina no último caractere do VALOR, então
+    # ele consome os 25 primeiros caracteres da declaração e o `-7` final tem de
+    # caber dentro da janela.
+    assert len("<meta charset='iso-8859-7") == 25
+
+    def documento(inicio):
+        """Um documento em que a `<meta>` começa exatamente no índice `inicio`."""
+        enchimento = "<!-- " + "x" * (inicio - 9) + " -->"
+        assert len(enchimento) == inicio
+        return enchimento + declaracao
+
+    # A declaração termina no índice 1023, o último byte da janela: encontrada.
+    # Uma janela menor derruba esta — com 1023 o valor volta cortado.
+    assert _declared_charset(documento(999)) == "iso-8859-7"
+
+    # Deslocada 10 bytes: `charset='` acaba em 1023 e o primeiro caractere do
+    # valor cai no índice 1024, fora da janela. Sem valor não há casamento.
+    # Uma janela maior derruba esta — com 1025 o valor volta como "i".
+    assert _declared_charset(documento(1009)) == ""
+
+    # E o motivo de a janela existir: um artigo SOBRE codificações mostra a tag
+    # como exemplo no meio do texto, sem declarar nada. Sem a janela, o exemplo
+    # de outra pessoa viraria a declaração desta página.
+    artigo = ("<html><head><title>Codificacoes</title></head><body>"
+              + "<p>x</p>" * 200
+              + "<pre>&lt;meta charset=\"shift_jis\"&gt;</pre>"
+              "<p><meta charset='shift_jis'> era o exemplo acima.</p>")
+    assert artigo.index("<meta charset=") > 1024
+    assert _declared_charset(artigo) == ""

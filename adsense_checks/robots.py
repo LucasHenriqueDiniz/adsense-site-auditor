@@ -100,8 +100,10 @@ _HEX_DIGITS = frozenset(b"0123456789abcdefABCDEF")
 
 # The BOM as it arrives when the decoding went wrong. A robots.txt served as
 # `text/plain` with no charset — nginx's default for a .txt, and the commoner of
-# the two cases — leaves requests on its ISO-8859-1 fallback, and the three UTF-8
-# BOM bytes surface as these three characters instead of one.
+# the two cases — left requests on its ISO-8859-1 fallback, and the three UTF-8
+# BOM bytes surfaced as these three characters instead of one. `http.fetch`
+# decodes that file as UTF-8 now, so this spelling reaches here only from a
+# caller that decoded the bytes itself; it stays for them.
 _BOM_SPELLINGS = ("\ufeff", "\u00ef\u00bb\u00bf")
 
 
@@ -227,7 +229,11 @@ def parse_robots(text: str) -> Robots:
     # was reported as "allowed". Google documents the BOM as an ignored line.
     text = _truncate(_strip_bom(text))
 
-    for raw in text.splitlines():
+    # CR, LF and CRLF end a line, and nothing else does: RFC 9309's EOL is
+    # `%x0D / %x0A / %x0D.0A`. `str.splitlines` also breaks on U+0085, U+2028,
+    # form feed and five more, so a rule holding one of them was cut in two and
+    # its first half — a shorter, broader path — was enforced in its place.
+    for raw in re.split(r"\r\n|\r|\n", text):
         line = raw.split("#", 1)[0].strip()
         if not line or ":" not in line:
             continue
