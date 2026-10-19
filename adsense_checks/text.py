@@ -1620,9 +1620,9 @@ def measure_fetch(response: Fetch, *, min_words: int = DEFAULT_MIN_WORDS) -> Tex
         )
 
     if response.charset_error is not None:
-        # The page names an encoding its own bytes do not honour, so the text
-        # `fetch` kept is requests' guess, and a word count over a guess is the
-        # pass nobody observed.
+        # The response names an encoding its own bytes do not honour, so the
+        # text `fetch` kept has replacement characters where letters were, and
+        # a word count over it is the pass nobody observed.
         return TextDepth(
             url=url, status=Status.ERROR, reason=f"{response.charset_error}: not measured"
         )

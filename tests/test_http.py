@@ -664,3 +664,53 @@ def test_codec_do_python_que_nao_e_codificacao_da_web_nao_e_rotulo():
     for rotulo in ("undefined", "punycode", "idna", "unicode_escape", "raw_unicode_escape",
                    "utf-7", "utf-32", "hex", "rot13", "x-user-defined", "x-desconhecido", ""):
         assert _web_encoding(rotulo) == "", rotulo
+
+
+def test_charset_do_header_que_nao_decodifica_fica_registrado(server):
+    """Latin-1 sob `charset=utf-8`. O texto é o que o navegador mostra, com
+    caractere de substituição; o motivo viaja junto, como já viajava quando a
+    declaração errada estava na `<meta>`."""
+    base, routes = server
+    routes["/t"] = (
+        200, {"Content-Type": "text/html; charset=utf-8"}, "<p>informação</p>".encode("latin-1")
+    )
+    r = fetch(base + "/t")
+    assert r.charset_error is not None
+    assert "header charset 'utf-8'" in r.charset_error
+    assert "informa\ufffd\ufffdo" in r.text
+
+
+def test_meta_que_nao_decodifica_mostra_o_que_o_navegador_mostra(server):
+    """O navegador obedece à declaração e substitui o que ela não lê. O texto
+    era o palpite ISO-8859-1 do requests, que não é o que ninguém vê."""
+    base, routes = server
+    html = '<html><head><meta charset="iso-2022-jp"></head><body><p>ação</p></body></html>'
+    routes["/t"] = (200, {"Content-Type": "text/html"}, html)
+    r = fetch(base + "/t")
+    assert r.charset_error is not None
+    assert "\ufffd" in r.text
+    assert "Ã" not in r.text
+
+
+def test_sem_declaracao_e_sem_utf8_le_como_windows_1252(server):
+    """O último passo é o padrão do WHATWG, windows-1252. As aspas curvas 0x93 e
+    0x94 eram caracteres de controle no ISO-8859-1 do requests."""
+    base, routes = server
+    routes["/t"] = (
+        200, {"Content-Type": "text/html"}, "<p>\u201ca\u00e7\u00e3o\u201d</p>".encode("cp1252")
+    )
+    r = fetch(base + "/t")
+    assert "\u201ca\u00e7\u00e3o\u201d" in r.text
+
+
+def test_rotulo_desconhecido_no_header_sem_meta_cai_no_windows_1252(server):
+    """`charset=utf8mb4` sobre Latin-1, sem `<meta>`. O último passo era
+    `resp.text`, e o requests tentava o próprio rótulo desconhecido, caía em UTF-8
+    com substituição e devolvia "informa\ufffd\ufffdo"."""
+    base, routes = server
+    routes["/t"] = (
+        200, {"Content-Type": "text/html; charset=utf8mb4"}, "<p>informação</p>".encode("latin-1")
+    )
+    r = fetch(base + "/t")
+    assert "informação" in r.text
+    assert r.charset_error is None

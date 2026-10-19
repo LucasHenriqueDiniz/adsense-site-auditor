@@ -2111,7 +2111,7 @@ def _judge_page(
         return outcome(Status.ERROR, f"HTML could not be parsed: {doc.parse_error}")
     if response.charset_error is not None:
         # Same refusal as the home page's: placeholders and word counts read off
-        # a guessed decoding are a verdict on text nobody observed.
+        # a failed decoding are a verdict on text the page was not written as.
         return outcome(Status.ERROR, f"{response.charset_error}: not judged")
     strong = strong_placeholders(found)
     if strong:
@@ -2855,9 +2855,10 @@ def _why_unreadable(home: Fetch) -> str | None:
     if not home.text.strip():
         return f"HTTP {home.status_code} with an empty body"
     if home.charset_error is not None:
-        # The text is requests' guess at bytes the page's own declaration does
-        # not decode. Scanning it for placeholders read 'em construção' as
-        # mojibake and printed PASS over a page that `measure_fetch` refused.
+        # The declared encoding does not decode the bytes, so the text has
+        # replacement characters where the page's letters were. Scanning it for
+        # placeholders read 'em construção' as mojibake and printed PASS over a
+        # page that `measure_fetch` refused.
         return home.charset_error
     if looks_javascript_rendered(home.text):
         return (

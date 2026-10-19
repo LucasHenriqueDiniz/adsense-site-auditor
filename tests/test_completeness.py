@@ -1439,6 +1439,29 @@ def test_home_cujo_charset_declarado_nao_decodifica_nao_e_aprovada(server):
     assert "iso-2022-jp" in frases(relatorio)
 
 
+def test_home_latin1_sob_charset_utf8_no_header_nao_e_aprovada(server):
+    """O rótulo errado mais comum que existe: página legada em Latin-1 num
+    servidor que manda `charset=utf-8` para tudo. Os acentos viravam caractere
+    de substituição em silêncio, "em construção" sumia e a home saía PASS; a
+    mesma falha declarada numa `<meta>` já era recusada."""
+    base, rotas = server
+    rodape = "<a href='/about'>Sobre</a> <a href='/contact'>Contato</a>"
+    rotas["/"] = (
+        200,
+        {"Content-Type": "text/html; charset=utf-8"},
+        (
+            "<html><body><h1>Casa</h1><p>Esta seção está em construção.</p>"
+            f"<footer>{rodape}</footer></body></html>"
+        ).encode("latin-1"),
+    )
+    rotas["/about"] = (200, {}, pagina("Sobre"))
+    rotas["/contact"] = (200, {}, contato())
+
+    relatorio = check_completeness(base)
+
+    assert relatorio.status is Status.ERROR
+    assert "header charset 'utf-8'" in frases(relatorio)
+
 def test_pagina_de_confianca_cujo_charset_nao_decodifica_e_ERROR(server):
     base, rotas = server
     rotas["/"] = (200, {}, home(rodape="<a href='/contact'>Contato</a>"))

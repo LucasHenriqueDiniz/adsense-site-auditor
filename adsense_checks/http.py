@@ -120,9 +120,10 @@ class Fetch:
     # the web — a two-hop answer was reported as the duration of its last hop.
     elapsed_ms: float | None = None
     error: str | None = None
-    # Set when the document names an encoding its own bytes do not honour.
-    # `text` is then requests' own guess, and a caller that turns it into a
-    # verdict should refuse instead (see `text.measure_fetch`).
+    # Set when the header or the document names an encoding the bytes do not
+    # honour. `text` is then what a browser would show, replacement characters
+    # and all, and a caller that turns it into a verdict refuses it instead
+    # (see `text.measure_fetch`).
     charset_error: str | None = None
 
     @property
@@ -404,40 +405,54 @@ def _decode(resp: requests.Response) -> tuple[str, str | None]:
       4. UTF-8, when the body decodes strictly as UTF-8 — a multi-byte sequence
          that decodes strictly is UTF-8 in every document not built to fool
          this check;
-      5. otherwise requests' own reading stands: a genuine legacy page
-         declaring nothing, ISO-8859-1 for text, where its letters are letters.
+      5. otherwise windows-1252, the WHATWG default: a genuine legacy page
+         declaring nothing, where every Latin-1 letter is still that letter.
+
+    Step 5 used to be requests' own reading, which is a different thing from
+    one call to the next: ISO-8859-1 for a `text/*` body, a statistical guess
+    for any other, and UTF-8 with replacement characters when the header named
+    a label `_web_encoding` had just skipped — so a Latin-1 page under
+    `charset=utf8mb4` read "construção" as "constru\ufffd\ufffdo".
 
     A label that names no web encoding is skipped, as a browser skips it (see
-    `_WEB_ENCODINGS`). A `<meta>` naming one that the bytes do not honour keeps
-    requests' reading and says so in the second value: any text taken from it is
-    a guess, and a caller that turns text into a verdict refuses it. The BOM and
-    the header are decoded with replacement characters, as a browser does, so
-    neither can fail.
+    `_WEB_ENCODINGS`). An encoding that is declared, in the header or in the
+    `<meta>`, and that the bytes do not honour is read as a browser reads it,
+    with replacement characters, and reported in the second value: the text is
+    what a visitor sees, not what the page was written to say, and a caller
+    that turns text into a verdict refuses it. That is the commonest mislabel
+    there is — a legacy Latin-1 page under a server-wide `charset=utf-8` — and
+    it lost "em construção" to "em constru\ufffd\ufffdo" without a word, where
+    the same failure declared in a `<meta>` was refused. A BOM is the encoding
+    rather than a declaration of it, and is decoded with replacement silently.
     """
     raw = resp.content
     for bom, codec in _BOMS:
         if raw.startswith(bom):
             return raw[len(bom) :].decode(codec, "replace"), None
     content_type = resp.headers.get("content-type", "")
-    header = _web_encoding(_header_charset(content_type))
-    if header:
-        return raw.decode(header, "replace"), None
-    if content_type.split(";")[0].strip().lower() in _HTML_MEDIA_TYPES:
+    label = _header_charset(content_type)
+    declared = _web_encoding(label)
+    source = "header"
+    if not declared and content_type.split(";")[0].strip().lower() in _HTML_MEDIA_TYPES:
         label = _declared_charset(raw[:_DECLARATION_WINDOW].decode("iso-8859-1"))
         declared = _web_encoding(label)
+        source = "declared"
         if declared in ("utf-16-le", "utf-16-be"):
             # A page that reached a `<meta>` prescan is ASCII-compatible, so
             # a UTF-16 label in it is a mistake, and HTML5 reads it as UTF-8.
             declared = "utf-8"
-        if declared:
-            try:
-                return raw.decode(declared), None
-            except UnicodeDecodeError:
-                return resp.text, f"declared charset {label!r} does not decode the body"
+    if declared:
+        try:
+            return raw.decode(declared), None
+        except UnicodeDecodeError:
+            return (
+                raw.decode(declared, "replace"),
+                f"{source} charset {label!r} does not decode the body",
+            )
     try:
         return raw.decode("utf-8"), None
     except UnicodeDecodeError:
-        return resp.text, None
+        return raw.decode("cp1252", "replace"), None
 
 
 def fetch(
