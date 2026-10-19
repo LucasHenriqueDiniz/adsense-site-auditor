@@ -786,3 +786,28 @@ def test_o_teto_e_o_documentado_pelo_google():
     """"By default, Google's crawlers and fetchers only crawl the first 15MB of a
     file" — Overview of Google crawlers and fetchers, conferido em 2026-10-19."""
     assert MAX_BODY_BYTES == 15 * 1024 * 1024
+
+
+def test_corpo_de_redirect_nao_e_lido(server):
+    """Com `allow_redirects=True`, o requests lia inteiro o corpo de cada 3xx
+    antes de seguir, e o teto do corpo só valia para a resposta final. Medido em
+    2026-10-19: um 301 com 200 MB de corpo chegou a 609 MB de pico. A memória é
+    a medida: é o que um requests que volte a ler o corpo faria crescer."""
+    import tracemalloc
+
+    base, routes = server
+    corpo = b"x" * (40 * 1024 * 1024)
+    routes["/velho"] = (301, {"Location": "/novo", "Content-Type": "text/plain"}, corpo)
+    routes["/novo"] = (200, {"Content-Type": "text/html"}, "<html>novo</html>")
+
+    tracemalloc.start()
+    try:
+        r = fetch(base + "/velho")
+        _atual, pico = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert r.status_code == 200
+    assert r.final_url.endswith("/novo")
+    assert r.redirect_chain and r.redirect_chain[0][0] == 301
+    assert pico < 4 * 1024 * 1024, f"pico de {pico / 1024 / 1024:.1f} MiB"

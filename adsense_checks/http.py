@@ -452,6 +452,35 @@ def _read_body(resp: requests.Response, max_bytes: int) -> tuple[bytes, bool]:
     return body[:max_bytes], size > max_bytes
 
 
+def _drop_redirect_body(
+    resp: requests.Response, *args: object, **kwargs: object
+) -> requests.Response:
+    """Close a redirect without reading its body. A `response` hook of `fetch`.
+
+    With `allow_redirects=True`, requests reads the whole body of every 3xx
+    before following it — `Session.resolve_redirects` touches `resp.content` to
+    release the connection — so the ceiling `_read_body` puts on the final
+    response never reached a hop. Measured on 2026-10-19: a 301 carrying 200 MB
+    before a small page peaked at 609 MB. Nothing here reads a redirect's body,
+    so the hook marks it read and empty and closes the connection, and the bytes
+    stay on the server.
+
+    `_content` and `_content_consumed` are requests' own attributes: setting
+    them is how `resp.content` is made to return without touching the socket.
+    The test that pins this measures the memory, so a requests release that
+    reads the body some other way fails it rather than going unnoticed.
+    """
+    if resp.is_redirect:
+        # Close first. `Response.close` closes the socket only while the body is
+        # unread, and otherwise hands the connection back to the pool — with the
+        # rest of the 3xx body still arriving on it, for the next hop to read as
+        # its response.
+        resp.close()
+        resp._content = b""
+        resp._content_consumed = True
+    return resp
+
+
 def _decode(raw: bytes, content_type: str) -> tuple[str, str | None]:
     """The body as text, and why it could not be read as declared, when it could not.
 
@@ -591,6 +620,7 @@ def fetch(
             allow_redirects=True,
             headers={"User-Agent": user_agent},
             stream=True,
+            hooks={"response": _drop_redirect_body},
         )
         # Which method actually produced `resp`. Tracking it is the point: the
         # body guard below used to test the method REQUESTED, so the GET issued
@@ -609,6 +639,7 @@ def fetch(
                 allow_redirects=True,
                 headers={"User-Agent": user_agent},
                 stream=True,
+                hooks={"response": _drop_redirect_body},
             )
             answered_with = "GET"
         result.final_url = resp.url
