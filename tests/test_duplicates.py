@@ -577,6 +577,22 @@ def test_pagina_cujo_charset_declarado_nao_decodifica_fica_fora_da_comparacao(se
     assert list(corpus.texts) == [base + "/ok"]
     assert "iso-2022-jp" in corpus.unavailable[base + "/ruim"]
 
+def test_byte_invalido_fora_do_texto_extraido_nao_tira_a_pagina(server):
+    """O texto extraído é o que a comparação lê. Um byte inválido dentro de um
+    `<script>`, que a extração descarta, não custa nada a ele."""
+    base, rotas = server
+    rotas["/p"] = (
+        200,
+        {"Content-Type": "text/html; charset=utf-8"},
+        b"<html><head><script>// coment\xe1rio</script></head>"
+        + "<body><p>uma página inteira de texto em português</p></body></html>".encode(),
+    )
+
+    corpus = fetch_page_texts([base + "/p"])
+
+    assert list(corpus.texts) == [base + "/p"]
+    assert corpus.unavailable == {}
+
 def test_conteudo_nao_html_nao_entra_como_pagina_de_comparacao(server):
     """Defeito medium: sem checar Content-Type, um PDF servido com 200 — comum
     em crawls — era alimentado no HTMLParser e virava uma 'página' de comparação

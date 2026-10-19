@@ -79,6 +79,7 @@ from adsense_checks.crawl import (
 from adsense_checks.http import (
     DEFAULT_TIMEOUT,
     Fetch,
+    decoding_loss,
     defrag_url,
     fetch,
     join_url,
@@ -2136,10 +2137,11 @@ def _judge_page(
 
     if doc.parse_error:
         return outcome(Status.ERROR, f"HTML could not be parsed: {doc.parse_error}")
-    if response.charset_error is not None:
+    loss = decoding_loss(response, doc.text)
+    if loss is not None:
         # Same refusal as the home page's: placeholders and word counts read off
         # a failed decoding are a verdict on text the page was not written as.
-        return outcome(Status.ERROR, f"{response.charset_error}: not judged")
+        return outcome(Status.ERROR, f"{loss}: not judged")
     strong = strong_placeholders(found)
     if strong:
         phrases = ", ".join(sorted({p.phrase for p in strong}))
@@ -2881,20 +2883,20 @@ def _why_unreadable(home: Fetch) -> str | None:
         return f"Content-Type {media!r} is not HTML"
     if not home.text.strip():
         return f"HTTP {home.status_code} with an empty body"
-    if home.charset_error is not None:
-        # The declared encoding does not decode the bytes, so the text has
-        # replacement characters where the page's letters were. Scanning it for
-        # placeholders read 'em construção' as mojibake and printed PASS over a
-        # page that `measure_fetch` refused.
-        return home.charset_error
     if looks_javascript_rendered(home.text):
         return (
             "client-rendered shell: the served HTML carries no content and this "
             "audit does not execute JavaScript"
         )
-    if not parse_document(home.text).text.strip():
+    visible = parse_document(home.text).text
+    if not visible.strip():
         return f"HTTP {home.status_code} carrying markup but no visible text"
-    return None
+    # The declared encoding did not decode the bytes, and the visible text has
+    # replacement characters where the page's letters were. Scanning it for
+    # placeholders read 'em construção' as mojibake and printed PASS over a
+    # page that `measure_fetch` refused. A bad byte the visible text never
+    # reaches — inside a <script> — costs this scan nothing and refuses nothing.
+    return decoding_loss(home, visible)
 
 
 def check_completeness(

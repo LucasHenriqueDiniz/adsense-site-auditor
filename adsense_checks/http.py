@@ -122,8 +122,8 @@ class Fetch:
     error: str | None = None
     # Set when the header or the document names an encoding the bytes do not
     # honour. `text` is then what a browser would show, replacement characters
-    # and all, and a caller that turns it into a verdict refuses it instead
-    # (see `text.measure_fetch`).
+    # and all. Whether that costs a check anything depends on where the bad
+    # bytes were (see `decoding_loss`).
     charset_error: str | None = None
 
     @property
@@ -338,6 +338,33 @@ _WEB_ENCODINGS = {
 }
 
 
+def _windows_1252_table() -> str:
+    """Python's cp1252 decoding table, with each byte it leaves undefined mapped
+    to the code point of the same number, which is what WHATWG specifies."""
+    chars = []
+    for byte in range(256):
+        try:
+            chars.append(bytes([byte]).decode("cp1252"))
+        except UnicodeDecodeError:
+            chars.append(chr(byte))
+    return "".join(chars)
+
+
+# WHATWG's windows-1252. Python's cp1252 leaves 0x81, 0x8D, 0x8F, 0x90 and 0x9D
+# undefined, so strict decoding failed on bytes every browser reads. A UTF-8 "Á"
+# is C3 81: a UTF-8 page served as iso-8859-1 was refused when it said "Área"
+# and read as mojibake when it did not, measured on 2026-10-19 — the verdict
+# depended on which letters the page happened to contain.
+_WINDOWS_1252 = _windows_1252_table()
+
+
+def _decode_as(raw: bytes, codec: str, errors: str = "strict") -> str:
+    """`raw.decode(codec, errors)`, with windows-1252 read as the standard reads it."""
+    if codec == "cp1252":
+        return codecs.charmap_decode(raw, errors, _WINDOWS_1252)[0]
+    return raw.decode(codec, errors)
+
+
 def _web_encoding(label: str) -> str:
     """The codec a web page labelled `label` is read with, or "" for none.
 
@@ -418,8 +445,9 @@ def _decode(resp: requests.Response) -> tuple[str, str | None]:
     `_WEB_ENCODINGS`). An encoding that is declared, in the header or in the
     `<meta>`, and that the bytes do not honour is read as a browser reads it,
     with replacement characters, and reported in the second value: the text is
-    what a visitor sees, not what the page was written to say, and a caller
-    that turns text into a verdict refuses it. That is the commonest mislabel
+    what a visitor sees, not what the page was written to say. A caller that
+    turns text into a verdict refuses the part it reads when that part lost a
+    character (see `decoding_loss`). That is the commonest mislabel
     there is — a legacy Latin-1 page under a server-wide `charset=utf-8` — and
     it lost "em construção" to "em constru\ufffd\ufffdo" without a word, where
     the same failure declared in a `<meta>` was refused. A BOM is the encoding
@@ -443,16 +471,33 @@ def _decode(resp: requests.Response) -> tuple[str, str | None]:
             declared = "utf-8"
     if declared:
         try:
-            return raw.decode(declared), None
+            return _decode_as(raw, declared), None
         except UnicodeDecodeError:
             return (
-                raw.decode(declared, "replace"),
+                _decode_as(raw, declared, "replace"),
                 f"{source} charset {label!r} does not decode the body",
             )
     try:
         return raw.decode("utf-8"), None
     except UnicodeDecodeError:
-        return raw.decode("cp1252", "replace"), None
+        return _decode_as(raw, "cp1252"), None
+
+
+def decoding_loss(response: Fetch, text: str) -> str | None:
+    """`response.charset_error` when it cost `text` a character, else None.
+
+    `text` is what one check reads off the response: the visible text, the main
+    content, the extracted page. A declared encoding that does not decode the
+    bytes leaves replacement characters where the bad bytes were, and only a
+    check whose own text carries one has lost anything. Deciding on the bytes
+    refused too much: one Latin-1 byte inside an inline `<script>`, under
+    `charset=utf-8`, made check_completeness report a home page unreadable whose
+    visible text decoded cleanly and said "em construção", measured on
+    2026-10-19.
+    """
+    if response.charset_error is not None and "\ufffd" in text:
+        return response.charset_error
+    return None
 
 
 def fetch(

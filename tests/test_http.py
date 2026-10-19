@@ -714,3 +714,30 @@ def test_rotulo_desconhecido_no_header_sem_meta_cai_no_windows_1252(server):
     r = fetch(base + "/t")
     assert "informação" in r.text
     assert r.charset_error is None
+
+
+# Os cinco bytes que o cp1252 do Python deixa indefinidos e o WHATWG não.
+BURACOS_DO_CP1252 = bytes([0x81, 0x8D, 0x8F, 0x90, 0x9D])
+
+
+def test_windows_1252_declarado_decodifica_os_cinco_bytes_do_padrao(server):
+    """`iso-8859-1` é lido como windows-1252, e o cp1252 do Python falhava em
+    0x81, 0x8D, 0x8F, 0x90 e 0x9D. Um "Á" em UTF-8 é C3 81: a mesma página UTF-8
+    servida como iso-8859-1 virava ERROR quando dizia "Área" e passava quando
+    não dizia."""
+    base, routes = server
+    corpo = b"<p>x" + BURACOS_DO_CP1252 + b"</p>"
+    routes["/t"] = (200, {"Content-Type": "text/html; charset=iso-8859-1"}, corpo)
+    r = fetch(base + "/t")
+    assert r.charset_error is None
+    assert "x\x81\x8d\x8f\x90\x9d" in r.text
+
+
+def test_ultimo_passo_le_os_cinco_bytes_como_o_padrao(server):
+    """Sem declaração e sem UTF-8 válido, o windows-1252 do WHATWG mapeia cada
+    um desses bytes no próprio código, em vez de substituí-lo."""
+    base, routes = server
+    routes["/t"] = (200, {"Content-Type": "text/html"}, b"<p>ol\xe1" + BURACOS_DO_CP1252 + b"</p>")
+    r = fetch(base + "/t")
+    assert "ol\u00e1\x81\x8d\x8f\x90\x9d" in r.text
+    assert "\ufffd" not in r.text

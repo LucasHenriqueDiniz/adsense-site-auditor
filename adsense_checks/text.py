@@ -66,7 +66,7 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
 
-from adsense_checks.http import DEFAULT_TIMEOUT, Fetch, fetch
+from adsense_checks.http import DEFAULT_TIMEOUT, Fetch, decoding_loss, fetch
 from adsense_checks.status import Status, escalate
 
 # No end tag exists for these, so nothing is pushed on their behalf.
@@ -1619,15 +1619,14 @@ def measure_fetch(response: Fetch, *, min_words: int = DEFAULT_MIN_WORDS) -> Tex
             reason=f"{detail}: body not parsed as HTML",
         )
 
-    if response.charset_error is not None:
-        # The response names an encoding its own bytes do not honour, so the
-        # text `fetch` kept has replacement characters where letters were, and
-        # a word count over it is the pass nobody observed.
-        return TextDepth(
-            url=url, status=Status.ERROR, reason=f"{response.charset_error}: not measured"
-        )
-
-    return measure_depth(response.text, min_words=min_words, url=url)
+    depth = measure_depth(response.text, min_words=min_words, url=url)
+    loss = decoding_loss(response, depth.text)
+    if loss is not None:
+        # The response names an encoding its own bytes do not honour, and the
+        # main content has replacement characters where letters were: a word
+        # count over it is the pass nobody observed.
+        return TextDepth(url=url, status=Status.ERROR, reason=f"{loss}: not measured")
+    return depth
 
 
 def measure_url(

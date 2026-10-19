@@ -333,6 +333,12 @@ Behaviour observed in the runs above, recorded here because a reader will hit it
   links a GitHub profile, and the line still reports `MISS`. The
   requirement text says "About page, Contact page, or footer", so the check is
   narrower than the requirement it stamps.
+- A page is read the way a browser reads it, and a browser believes the
+  charset it is given. A UTF-8 page served as `charset=iso-8859-1` comes back
+  as "construÃ§Ã£o", with no replacement character to show anything was lost,
+  so an accented placeholder on it is not found. A declared charset that the
+  bytes do not decode at all leaves replacement characters instead, and a
+  check whose own text carries one reports `ERROR`.
 - `analyze_text_depth.py` reports `ERROR` — "main content not isolated" — for a
   page with no `<main>`, `<article>` or standout paragraph block. That is why the
   fixture wraps its content in `<main>`. On such a page the script refuses to

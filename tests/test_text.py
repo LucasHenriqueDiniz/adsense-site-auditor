@@ -1521,6 +1521,18 @@ def test_charset_declarado_que_nao_decodifica_vira_motivo_registrado(server):
     assert medido.reason and "iso-2022-jp" in medido.reason.lower()
 
 
+def test_byte_invalido_fora_do_conteudo_nao_recusa_a_medicao(server):
+    """O byte que o header não decodifica está num `<script>`; o conteúdo
+    principal decodifica limpo e é medido. A recusa vale para o texto que perdeu
+    letra, não para a página inteira."""
+    base, routes = server
+    html = _pagina(TEXTO_PT).encode()
+    html = html.replace(b"<title>", b"<script>// coment\xe1rio</script><title>")
+    routes["/pt"] = (200, {"Content-Type": "text/html; charset=utf-8"}, html)
+    medido = measure_url(base + "/pt")
+    assert "coração" in medido.text
+    assert "not measured" not in (medido.reason or "")
+
 def test_pagina_ascii_sem_charset_nao_e_alterada(server):
     """A correção não pode mexer em quem já estava certo."""
     base, routes = server

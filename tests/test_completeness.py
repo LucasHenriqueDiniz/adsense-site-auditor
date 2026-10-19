@@ -1505,6 +1505,44 @@ def test_home_latin1_sob_charset_utf8_no_header_nao_e_aprovada(server):
     assert relatorio.status is Status.ERROR
     assert "header charset 'utf-8'" in frases(relatorio)
 
+def test_byte_invalido_fora_do_texto_visivel_nao_recusa_a_home(server):
+    """Um byte Latin-1 num comentário de `<script>`, sob `charset=utf-8`. O texto
+    visível decodifica limpo, mas a recusa era decidida sobre os bytes e a home
+    saía como ilegível, com o "em construção" dela à vista."""
+    base, rotas = server
+    rodape = "<a href='/about'>Sobre</a> <a href='/contact'>Contato</a>"
+    rotas["/"] = (
+        200,
+        {"Content-Type": "text/html; charset=utf-8"},
+        b"<html><head><script>// coment\xe1rio</script></head><body><h1>Casa</h1>"
+        + "<p>Esta seção está em construção.</p>".encode()
+        + f"<footer>{rodape}</footer></body></html>".encode(),
+    )
+    rotas["/about"] = (200, {}, pagina("Sobre"))
+    rotas["/contact"] = (200, {}, contato())
+
+    relatorio = check_completeness(base)
+
+    assert relatorio.status is Status.WARNING
+    assert "em construcao" in frases(relatorio)
+
+def test_byte_invalido_fora_do_texto_visivel_nao_recusa_a_pagina_de_confianca(server):
+    """A mesma regra na página de contato: o byte inválido no `<script>` não
+    chega ao texto que o julgamento lê, e a página é julgada."""
+    base, rotas = server
+    rotas["/"] = (200, {}, home(rodape="<a href='/contact'>Contato</a>"))
+    rotas["/contact"] = (
+        200,
+        {"Content-Type": "text/html; charset=utf-8"},
+        b"<html><head><script>// coment\xe1rio</script></head><body><h1>Contato</h1>"
+        + f"<p>{PROSA}</p>{MAILTO}</body></html>".encode(),
+    )
+
+    relatorio = check_trust_pages(base)
+
+    assert relatorio.pages["contact"].status is Status.OK, relatorio.pages["contact"].reason
+
+
 def test_pagina_de_confianca_cujo_charset_nao_decodifica_e_ERROR(server):
     base, rotas = server
     rotas["/"] = (200, {}, home(rodape="<a href='/contact'>Contato</a>"))

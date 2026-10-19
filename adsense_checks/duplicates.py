@@ -49,7 +49,7 @@ from dataclasses import dataclass, field
 import requests
 
 from adsense_checks.crawl import normalize_url
-from adsense_checks.http import DEFAULT_TIMEOUT, fetch
+from adsense_checks.http import DEFAULT_TIMEOUT, decoding_loss, fetch
 from adsense_checks.status import Status, escalate
 
 # Five words per shingle. Below ~3 the windows are common enough in any prose of
@@ -610,12 +610,6 @@ def fetch_page_texts(
         if content_type not in HTML_CONTENT_TYPES:
             corpus.unavailable[url] = f"not HTML (Content-Type: {content_type})"
             continue
-        if result.charset_error is not None:
-            # The declared encoding does not decode the bytes; shingles taken
-            # from the replacement characters compare a failed decoding with pages.
-            corpus.unavailable[url] = result.charset_error
-            continue
-
         try:
             text = extract(result.text)
         except Exception as exc:  # noqa: BLE001 - reason is recorded, not swallowed
@@ -627,6 +621,13 @@ def fetch_page_texts(
 
         if not tokenize(text):
             corpus.unavailable[url] = "no extractable text"
+            continue
+        loss = decoding_loss(result, text)
+        if loss is not None:
+            # The declared encoding did not decode the bytes, and the extracted
+            # text has replacement characters where letters were; shingles taken
+            # from it compare a failed decoding with pages.
+            corpus.unavailable[url] = loss
             continue
 
         corpus.texts[canonical] = text
