@@ -366,23 +366,30 @@ Behaviour observed in the runs above, recorded here because a reader will hit it
   cases. When the band depends on it the script reports `ERROR` — "main
   content not separated from the page around it" — rather than choosing.
 
-  When the title cannot widen — no usable `<h1>`, an `<h1>` inside the winning
-  block, or one that meets it only at the `<body>` — the block climbs instead,
-  as far as the prose it gains outweighs the other words it would count:
-  menus, furniture and headings weigh nothing either way, plain `<div>` text
-  and tool chrome weigh against, and the climb never reaches the `<body>`.
+  When the title gives no region — no usable `<h1>`, or one that meets the
+  block only at the `<body>` — the block climbs instead, as far as the prose
+  it gains outweighs the other words it would count: menus, furniture and
+  headings weigh nothing either way, plain `<div>` text and tool chrome weigh
+  against, and the climb never reaches the `<body>`.
   Measured on 2026-10-19 with the title search switched off, as on a page with
   no `<h1>`: the 28 tool pages read a median of 732 words (156.5 before) and
   the 142 of 2026-08-30 a median of 556 (239.5 before), against references of
   722.5 and 553. One of the 142, compress-pdf-to-1mb, kept its `<h1>` inside a
-  winning hero and read 182 where the reference holds 541; it now reads 547.
+  winning hero and read 182 where the reference holds 541; it now reads 547,
+  because its FAQ, now scored through its `<details>`, takes the win from the
+  hero and the title widens from there. With the title search on, none of the 170 climbs:
+  every one has its `<h1>` outside the winning block and widens by it.
 
   Seven shapes are still wrong. A title is the ceiling as well as the floor,
-  so sections that sit beside the title's own wrapper stay out: 251 words where
-  a reader counts 555. Climbing on past the title would reach them (553), and
-  would reach a comment thread beside a post just the same, since both are
-  prose in a headed sibling wrapper: a 180-word post under 12 comments read
-  665, OK, instead of 183, WARNING. Three of the 142 still stop short with no title
+  wherever it sits, so sections beside it stay out: beside the title's own
+  wrapper, 251 words where a reader counts 555; beside a winning hero that
+  holds the `<h1>`, 82 where a reader counts 330. Climbing past the title
+  would reach them, and would reach a comment thread beside a post just the
+  same, since both are prose in a headed sibling wrapper: a 180-word post
+  under 12 comments read 665, OK, instead of 183, WARNING, with its `<h1>`
+  beside the post's block or inside it. A short count calls a page thin that
+  may not be; a counted thread calls a thin page deep, which is the error this
+  audit exists to prevent. Three of the 142 still stop short with no title
   to climb to: each has 213 to 412 words of tool interface beside its
   sections, and that outweighs the prose beyond it. Two blocks hanging straight
   off the `<body>`, with no wrapper of their own, meet only at the page, so the

@@ -837,8 +837,9 @@ def _beside_the_content(
     nothing lies between. Prose vouches for what the prose climb took: a
     branch that holds prose (`prose`, the elements with prose below them) is
     why the climb went there, and is vouched for the way a heading vouches for
-    one. A region a title set was not climbed for prose, so its caller passes
-    no `prose`, and an unheaded `<p>` sidebar after the block stays in doubt.
+    one. A region with a title in it was not climbed for prose, so `prose`
+    counts only when `title` is None, and an unheaded `<p>` sidebar after the
+    block of a titled region stays in doubt.
 
     `furniture` is `_furniture(region)`, which the caller already holds.
     """
@@ -886,7 +887,7 @@ def _beside_the_content(
         if branch not in left_out
         and not first < at < last
         and not _has_heading(branch, left_out)
-        and branch not in prose
+        and not (title is None and branch in prose)
     )
     # Joined with a separator so two chunks cannot weld into one word that is
     # on no page; the same reason `_collect` writes one at element boundaries.
@@ -946,8 +947,9 @@ def _prose_region(block: _Node, sums: _WordSums) -> _Node:
     """The element at or above `block`, below the `<body>`, whose prose most
     outweighs everything else in it.
 
-    For a page the title cannot widen — no `<h1>`, an `<h1>` inside the block,
-    or one that meets it only at the `<body>`. The paragraph scoring credits two
+    For a page whose title gives no region — no `<h1>`, or one that meets the
+    block only at the `<body>`; an `<h1>` inside the block makes the block the
+    region, and nothing climbs past it. The paragraph scoring credits two
     levels up, so on a page of sibling sections it picks one, and nothing above
     it got a vote: with no title to climb to, the 28 smallwebapps.com tool pages
     read a median of a third of what a reader counts, even with list items
@@ -1002,8 +1004,9 @@ def _titled_region(title: _Node | None, block: _Node) -> _Node:
     `_beside_the_content`. What it still gets wrong: sections the block and the
     title do not share a wrapper with stay outside; a title inside the block
     itself — a hero whose description is the page's densest paragraph — widens
-    nothing; and plain text that is not content but carries a heading, or sits
-    between the title and the block, counts.
+    nothing, and as the ceiling keeps the block from climbing too; and plain
+    text that is not content but carries a heading, or sits between the title
+    and the block, counts.
     """
     if title is None:
         return block
@@ -1212,41 +1215,45 @@ def _main_container(doc: _Parser, url: str = "") -> _MainContent:
         if winner.tag in WHOLE_PAGE_ELEMENTS:
             return _MainContent(winner, False)
         title = _page_title(body, page_furniture, link_words, url)
-        # One widening, two signals. The title sets the floor: the smallest
-        # element holding it and the block, or the block itself when it cannot
-        # widen it (none, one inside the block, or one meeting it only at the
-        # <body>). With no title above the block, the block climbs as far as
-        # its prose outweighs the rest it would count (see `_prose_region`).
+        # The title decides how far the block widens. The element it shares
+        # with the block below the <body> — the block itself, when the title is
+        # inside it — is the article: the floor, and the ceiling too. Only a
+        # page whose title gives no such element (none, or one meeting the
+        # block only at the <body>) lets the block climb, as far as its prose
+        # outweighs the rest it would count (see `_prose_region`).
         #
-        # A title is also the ceiling. Letting the climb go on above it would
-        # reach sections beside the title's own wrapper — 251 words, a reader
-        # counts 555, and the climb read 553 — but the comment thread beside a
-        # post is prose in a headed sibling wrapper too, and nothing in the
-        # markup tells the two apart: a 180-word post under 12 comments of 40
-        # words read 665, OK, where it reads 183, WARNING, capped. The title
-        # says where the article is; the climb is for pages with no such word.
-        floor = _titled_region(title, winner)
-        anchor = title if floor is not winner else None
-        if anchor is None and winner in in_furniture:
-            # The scoring elected a block inside the page's furniture — the only
-            # `<p>` on the page sitting in a `<header>`. Climbing from there
-            # stopped on the header itself, weightless and so worth more than
-            # the block, and counted its `<nav>` as content: 60 words where the
-            # block alone is 40. A block in the furniture is not grown.
-            return _MainContent(winner, True)
-        region = floor
+        # The ceiling has a price, paid wherever the title sits: sections
+        # beside the title's own wrapper stay out, 251 words where a reader
+        # counts 555, and so do sections beside a winning hero that holds the
+        # <h1>, 82 where a reader counts 330. Climbing reaches them, and reaches
+        # a comment thread beside a post just the same — prose in a headed
+        # sibling wrapper, which nothing in the markup tells from a section: a
+        # 180-word post under 12 comments of 40 words reads 665, OK, instead of
+        # 183, WARNING, with its <h1> beside the post's block or inside it. A
+        # short count calls a page thin that may not be; a thread counted calls
+        # a thin page deep, the error this audit exists to prevent (TESTING.md).
+        region = _titled_region(title, winner)
+        titled = title is not None and region in _ancestors(title)
         prose_blocks: frozenset[_Node] = frozenset()
-        if anchor is None:
+        if not titled:
+            if winner in in_furniture:
+                # The scoring elected a block inside the page's furniture — the
+                # only `<p>` on the page sitting in a `<header>`. Climbing from
+                # there stopped on the header itself, weightless and so worth
+                # more than the block, and counted its `<nav>` as content: 60
+                # words where the block alone is 40. A block in the furniture
+                # is not grown.
+                return _MainContent(winner, True)
             prose_words = dict(own_words)
             for n, _ in text_paragraphs:
                 if n not in in_furniture:
                     prose_words[n] = word_count(_collect(n, skip=not_own))
             sums = _word_sums(doc.root, prose_words, page_furniture | cut_links)
-            region = _prose_region(floor, sums)
+            region = _prose_region(winner, sums)
             prose_blocks = frozenset(n for n, (_, prose, _) in sums.items() if prose > 0)
         if region is winner:
-            # Nothing above the block is worth more than the block, and no title
-            # raised the floor. Its own furniture stays in the count, where
+            # The title is inside the block, or nothing above the block is worth
+            # more than it. Its own furniture stays in the count, where
             # `measure_depth`'s control can still see it.
             return _MainContent(winner, True)
         # The region's furniture is the body's, below the region. No `<article>`
@@ -1255,7 +1262,7 @@ def _main_container(doc: _Parser, url: str = "") -> _MainContent:
         # and the region is never in it, holding a title proved outside all.
         region_furniture = frozenset(f for f in page_furniture if region in _ancestors(f.parent))
         left_out, undecided, loose_words = _beside_the_content(
-            region, anchor, winner, region_furniture, link_words, prose_blocks
+            region, title if titled else None, winner, region_furniture, link_words, prose_blocks
         )
         return _MainContent(region, True, left_out, undecided, loose_words, region_furniture)
 

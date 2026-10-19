@@ -1079,20 +1079,33 @@ def test_lista_de_tags_com_rotulo_nao_vira_texto():
     assert d.status is Status.WARNING, d.reason
 
 
-def test_o_titulo_e_o_teto_da_subida():
+@pytest.mark.parametrize(
+    "post",
+    [
+        # O <h1> ao lado do bloco do post: o título alarga até o `div.post`.
+        '<div class="post"><h1>Titulo do post</h1>'
+        f'<div class="entry"><p>{_palavras(180)}</p></div></div>',
+        # O <h1> no mesmo <div> que os <p> do post: o bloco já é a região.
+        '<div class="post"><h1>Titulo do post</h1>'
+        f"<p>{_palavras(90)}</p><p>{_palavras(90)}</p></div>",
+    ],
+    ids=["h1-ao-lado-do-bloco", "h1-dentro-do-bloco"],
+)
+def test_o_titulo_e_o_teto_da_subida(post):
     """Um post curto e uma discussão longa: os comentários são prosa num
     contêiner irmão com heading, exatamente como seções do próprio artigo
     seriam. Deixar a subida passar do título trazia os comentários junto — 665
-    palavras, OK, num post de 180. O título diz onde está o artigo; a subida
-    pelo peso da prosa é para página sem essa palavra."""
+    palavras, OK, num post de 180 — e com o <h1> dentro do bloco ela passava:
+    o título só servia de teto quando alargava. O título diz onde está o
+    artigo, esteja onde estiver; a subida pelo peso da prosa é para a página
+    cujo título não dá região nenhuma."""
     comentarios = "".join(
         f'<li><div class="comment-body"><p>{" ".join(["comentario"] * 40)}</p></div></li>'
         for _ in range(12)
     )
     html = (
         '<html><body><div id="page"><header><nav><a href="/">Inicio</a></nav></header>'
-        '<div id="main"><div class="post"><h1>Titulo do post</h1>'
-        f'<div class="entry"><p>{_palavras(180)}</p></div></div>'
+        f'<div id="main">{post}'
         '<div id="comments"><h3>12 comentarios</h3>'
         f'<ol class="commentlist">{comentarios}</ol></div>'
         "</div><footer><p>Rodape</p></footer></div></body></html>"
@@ -1101,6 +1114,64 @@ def test_o_titulo_e_o_teto_da_subida():
     assert "comentario" not in d.text
     assert d.words == 3 + 180
     assert d.status is Status.WARNING, d.reason
+
+
+def test_o_preco_do_teto_secoes_ao_lado_do_hero_que_tem_o_titulo():
+    """O preço do teto, num lado. O hero tem o <h1> e a descrição mais densa da
+    página e ganha a pontuação; os passos estão em seções irmãs, cada um num
+    card. Um leitor conta 330 palavras, e a subida contava as 330 — mas é a
+    mesma subida que conta os comentários do teste acima. Com o título no
+    bloco, o bloco é o artigo: 82, WARNING. Contar a menos chama de raso o que
+    talvez não seja; contar os comentários chama de fundo o que é raso, e esse
+    é o erro que a auditoria existe para evitar (TESTING.md)."""
+    secoes = "".join(
+        f'<section><h2>Passo {i}</h2><div class="card"><p>{_palavras(60)}</p></div></section>'
+        for i in range(4)
+    )
+    html = (
+        '<html><body><div id="page"><header><nav><a href="/">Inicio</a></nav></header>'
+        '<div id="content"><section class="hero"><h1>Girar PDF</h1>'
+        f"<p>{_palavras(80)}</p></section>{secoes}</div>"
+        "<footer><p>Rodape</p></footer></div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 2 + 80
+    assert d.status is Status.WARNING, d.reason
+
+
+def test_o_preco_do_teto_secoes_ao_lado_do_wrapper_do_titulo():
+    """O preço do teto, no outro lado. O <h1> divide um wrapper só com o bloco,
+    e as seções do artigo estão num wrapper irmão. Um leitor conta 555; a
+    subida passando do título contava 553, e contaria os comentários do mesmo
+    jeito. O título fica como teto: 251, e o EXAMPLES.md lista esta forma
+    entre as que ainda saem erradas."""
+    html = (
+        '<html><body><div id="page">'
+        f'<div class="intro"><h1>Titulo</h1><div class="b"><p>{_palavras(250)}</p></div></div>'
+        '<div class="more">'
+        f'<section><h2>Mais</h2><div class="b"><p>{_palavras(150)}</p></div></section>'
+        f'<section><h2>Ainda</h2><div class="b"><p>{_palavras(150)}</p></div></section>'
+        "</div></div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 1 + 250
+    assert d.status is Status.WARNING, d.reason
+
+
+def test_titulo_que_so_encontra_o_bloco_no_body_nao_e_teto():
+    """O teto é a região que o título divide com o bloco. Um <h1> num <div>
+    próprio, que só encontra o bloco no <body>, não dá região nenhuma — contar
+    o body seria contar menu e rodapé —, então não serve de teto: o bloco sobe
+    pelo peso da prosa e leva a seção irmã. Sem isso, 200 de 351."""
+    html = (
+        '<html><body><div class="top"><h1>Titulo</h1></div><div id="content">'
+        f'<div class="b"><p>{_palavras(200)}</p></div>'
+        f'<section><h2>Mais</h2><div class="b"><p>{_palavras(150)}</p></div></section></div>'
+        "<footer><p>Rodape</p></footer></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 200 + 1 + 150
+    assert d.status is Status.INFO, d.reason
 
 
 def test_bloco_na_mobilia_com_titulo_ainda_alarga_pelo_titulo():
