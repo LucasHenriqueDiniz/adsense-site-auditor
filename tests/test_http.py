@@ -3,7 +3,13 @@
 import math
 import time
 
-from adsense_checks.http import MAX_WAIT_SECONDS, _declared_charset, _web_encoding, fetch
+from adsense_checks.http import (
+    MAX_BODY_BYTES,
+    MAX_WAIT_SECONDS,
+    _declared_charset,
+    _web_encoding,
+    fetch,
+)
 from adsense_checks.status import Status
 
 
@@ -741,3 +747,42 @@ def test_ultimo_passo_le_os_cinco_bytes_como_o_padrao(server):
     r = fetch(base + "/t")
     assert "ol\u00e1\x81\x8d\x8f\x90\x9d" in r.text
     assert "\ufffd" not in r.text
+
+
+# ---------------------------------------------------------------------------
+# Teto do corpo: os primeiros 15 MB, como os crawlers do Google.
+# ---------------------------------------------------------------------------
+
+
+def test_corpo_acima_do_teto_e_cortado_e_marcado(server):
+    """O fetch lia o corpo inteiro, sem teto. Medido em 2026-10-19: um crawl cuja
+    home linkava um download de 300 MB sem extensão leu tudo e chegou a 1.382 MB
+    de memória. Os crawlers do Google leem os primeiros 15 MB e ignoram o resto,
+    então ler além disso não muda o que o crawler do AdSense recebe."""
+    base, routes = server
+    routes["/grande"] = (200, {"Content-Type": "text/plain"}, b"a" * (MAX_BODY_BYTES + 1024 * 1024))
+    r = fetch(base + "/grande")
+    assert r.truncated is True
+    assert len(r.text) == MAX_BODY_BYTES
+
+
+def test_corpo_exatamente_no_teto_nao_e_marcado(server):
+    base, routes = server
+    routes["/exato"] = (200, {"Content-Type": "text/plain"}, b"a" * MAX_BODY_BYTES)
+    r = fetch(base + "/exato")
+    assert r.truncated is False
+    assert len(r.text) == MAX_BODY_BYTES
+
+
+def test_um_byte_acima_do_teto_ja_e_marcado(server):
+    base, routes = server
+    routes["/um"] = (200, {"Content-Type": "text/plain"}, b"a" * (MAX_BODY_BYTES + 1))
+    r = fetch(base + "/um")
+    assert r.truncated is True
+    assert len(r.text) == MAX_BODY_BYTES
+
+
+def test_o_teto_e_o_documentado_pelo_google():
+    """"By default, Google's crawlers and fetchers only crawl the first 15MB of a
+    file" — Overview of Google crawlers and fetchers, conferido em 2026-10-19."""
+    assert MAX_BODY_BYTES == 15 * 1024 * 1024

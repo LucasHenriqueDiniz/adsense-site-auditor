@@ -59,6 +59,14 @@ DEFAULT_TIMEOUT = 15
 
 _UNPARSEABLE = SplitResult("", "", "", "", "")
 
+# Google's crawlers and fetchers read the first 15 MB of a file, uncompressed,
+# and ignore the rest: "Overview of Google crawlers and fetchers", checked on
+# 2026-10-19. Reading further cannot change what the AdSense crawler is served,
+# and reading with no ceiling let one link exhaust the auditor: a crawl whose
+# home page linked an extensionless 300 MB download read all of it and peaked at
+# 1,382 MB of memory, measured the same day. 15 MB is taken as 15 MiB.
+MAX_BODY_BYTES = 15 * 1024 * 1024
+
 
 def split_url(url: str) -> SplitResult:
     """`urlsplit` that never raises. What it cannot parse comes back empty.
@@ -120,6 +128,9 @@ class Fetch:
     # the web — a two-hop answer was reported as the duration of its last hop.
     elapsed_ms: float | None = None
     error: str | None = None
+    # The body went past `MAX_BODY_BYTES` and `text` holds only the part a
+    # Google crawler would read.
+    truncated: bool = False
     # Set when the header or the document names an encoding the bytes do not
     # honour. `text` is then what a browser would show, replacement characters
     # and all. Whether that costs a check anything depends on where the bad
@@ -403,7 +414,24 @@ def _declared_charset(text: str) -> str:
     return match.group(1).lower() if match else ""
 
 
-def _decode(resp: requests.Response) -> tuple[str, str | None]:
+def _read_body(resp: requests.Response) -> tuple[bytes, bool]:
+    """The body, uncompressed, up to `MAX_BODY_BYTES`; and whether it went past.
+
+    Read in chunks off a streamed response, so the bytes past the ceiling are
+    never downloaded, let alone decoded.
+    """
+    chunks: list[bytes] = []
+    size = 0
+    for chunk in resp.iter_content(chunk_size=64 * 1024):
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > MAX_BODY_BYTES:
+            break
+    body = b"".join(chunks)
+    return body[:MAX_BODY_BYTES], size > MAX_BODY_BYTES
+
+
+def _decode(raw: bytes, content_type: str) -> tuple[str, str | None]:
     """The body as text, and why it could not be read as declared, when it could not.
 
     requests reads a `text/*` body with no charset parameter as ISO-8859-1:
@@ -453,11 +481,9 @@ def _decode(resp: requests.Response) -> tuple[str, str | None]:
     the same failure declared in a `<meta>` was refused. A BOM is the encoding
     rather than a declaration of it, and is decoded with replacement silently.
     """
-    raw = resp.content
     for bom, codec in _BOMS:
         if raw.startswith(bom):
             return raw[len(bom) :].decode(codec, "replace"), None
-    content_type = resp.headers.get("content-type", "")
     label = _header_charset(content_type)
     declared = _web_encoding(label)
     source = "header"
@@ -534,12 +560,15 @@ def fetch(
     method = method.upper()
     result = Fetch(url=url)
     try:
+        # Streamed, so the body is read by `_read_body` and only up to the
+        # ceiling a Google crawler reads.
         resp = sess.request(
             method,
             url,
             timeout=timeout,
             allow_redirects=True,
             headers={"User-Agent": user_agent},
+            stream=True,
         )
         # Which method actually produced `resp`. Tracking it is the point: the
         # body guard below used to test the method REQUESTED, so the GET issued
@@ -550,12 +579,14 @@ def fetch(
         refused_head = None
         if method == "HEAD" and resp.status_code >= 400:
             refused_head = resp.elapsed
+            resp.close()
             resp = sess.request(
                 "GET",
                 url,
                 timeout=timeout,
                 allow_redirects=True,
                 headers={"User-Agent": user_agent},
+                stream=True,
             )
             answered_with = "GET"
         result.final_url = resp.url
@@ -570,8 +601,16 @@ def fetch(
         # A real HEAD response has no body; guard so callers never see a stale
         # one. A GET that replaced a refused HEAD does have one, and keeping it
         # is the whole reason for the fallback.
-        if answered_with != "HEAD":
-            result.text, result.charset_error = _decode(resp)
+        try:
+            if answered_with != "HEAD":
+                raw, result.truncated = _read_body(resp)
+                result.text, result.charset_error = _decode(
+                    raw, resp.headers.get("content-type", "")
+                )
+        finally:
+            # A streamed response holds its connection until it is closed, and
+            # one cut at the ceiling still has bytes on the wire.
+            resp.close()
     # Order matters, and this clause has to stay second: requests' own InvalidURL,
     # MissingSchema and InvalidSchema are BOTH a RequestException and a ValueError,
     # and they already carry a precise message of their own.
