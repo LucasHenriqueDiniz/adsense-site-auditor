@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import socket
 from collections import deque
 from dataclasses import dataclass, field
 from urllib.parse import urlunsplit
@@ -359,20 +360,29 @@ def discover_sitemap_urls(base_url: str, robots: Robots | None = None) -> list[s
 
 
 def private_address(url: str) -> bool:
-    """Whether `url` names a loopback, private, link-local or otherwise
-    non-public address: an IP literal that is not global, or `localhost`.
+    """Whether `url` reaches a loopback, private, link-local or otherwise
+    non-global address.
 
-    Names are not resolved. A public name that resolves to a private address is
-    not caught here; the literal and `localhost` are what a hostile robots.txt
-    writes to reach the machine running the audit.
+    The host is resolved the way the request would resolve it, and every
+    address it gives is classified. Parsing the literal was not enough: the
+    socket layer also reads `127.1`, `2130706433`, `0x7f000001` and
+    `017700000001` as 127.0.0.1, and all four passed as public, measured on
+    2026-10-19; a public-looking name that resolves to a private address passed
+    the same way. A host that does not resolve reaches nothing, and is not
+    private. `localhost` and `*.localhost` are private without asking.
     """
     host = (split_url(url).hostname or "").rstrip(".").lower()
+    if not host:
+        return False
     if host == "localhost" or host.endswith(".localhost"):
         return True
     try:
-        return not ipaddress.ip_address(host).is_global
-    except ValueError:
+        infos = socket.getaddrinfo(host, None)
+    except (OSError, UnicodeError):
         return False
+    # An IPv6 address can carry a zone, `fe80::1%en0`, that ipaddress refuses.
+    addresses = {info[4][0].split("%", 1)[0] for info in infos}
+    return any(not ipaddress.ip_address(address).is_global for address in addresses)
 
 
 def _fetch_doc(
@@ -490,11 +500,13 @@ def check_sitemap(
         declared = {join_url(base_url, s.strip()) for s in robots.sitemaps}
     result.candidates = discover_sitemap_urls(base_url, robots)
 
+    # Resolved once: every candidate is compared with it.
+    base_is_private = private_address(base_url)
     for candidate in result.candidates:
         if (
-            private_address(candidate)
-            and not private_address(base_url)
+            not base_is_private
             and not same_site(candidate, base_url)
+            and private_address(candidate)
         ):
             # A `Sitemap:` line is the site's to write, and it can point
             # anywhere: `http://169.254.169.254/...` or `http://localhost:8080/`

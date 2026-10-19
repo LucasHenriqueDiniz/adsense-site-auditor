@@ -13,6 +13,7 @@ reais, do conftest). Mockar requests reproduziria a suposição errada em vez do
 protocolo.
 """
 
+import socket
 import time
 
 import pytest
@@ -1118,7 +1119,8 @@ def test_sitemap_declarado_em_endereco_interno_nao_e_buscado():
     sessao = _SemRede()
     robots = Robots(sitemaps=[interno, local])
 
-    r = check_sitemap("https://exemplo-publico.com.br/", robots=robots, session=sessao, timeout=1)
+    # Um IP público literal como base: nada aqui consulta DNS.
+    r = check_sitemap("https://8.8.8.8/", robots=robots, session=sessao, timeout=1)
 
     assert interno not in sessao.pedidas
     assert local not in sessao.pedidas
@@ -1156,11 +1158,33 @@ def test_site_auditado_em_endereco_interno_continua_lendo_os_proprios_sitemaps(s
         # "privado" — `is_private` deixaria passar.
         ("http://100.64.0.1/s.xml", True),
         ("https://8.8.8.8/s.xml", False),
-        ("https://cdn.exemplo.com.br/sitemap.xml", False),
-        ("https://exemplo.com.br/sitemap.xml", False),
+        # As outras grafias de 127.0.0.1 que o socket aceita, e que a leitura
+        # do literal deixava passar como públicas. Medido em 2026-10-19.
+        ("http://127.1/s.xml", True),
+        ("http://2130706433/s.xml", True),
+        ("http://0x7f000001/s.xml", True),
+        ("http://017700000001/s.xml", True),
     ],
 )
 def test_o_que_conta_como_endereco_interno(url, interno):
     from adsense_checks.sitemap import private_address
 
     assert private_address(url) is interno
+
+
+@pytest.mark.parametrize(
+    "resolve_para, interno", [("10.0.0.7", True), ("8.8.8.8", False), (None, False)]
+)
+def test_nome_e_classificado_pelo_endereco_que_resolve(monkeypatch, resolve_para, interno):
+    """Um nome com cara de público que resolve para a rede interna é interno; um
+    nome que não resolve não chega a lugar nenhum. O resolvedor é substituído
+    para o teste não depender de DNS."""
+    from adsense_checks.sitemap import private_address
+
+    def resolver(host, port, *args, **kwargs):
+        if resolve_para is None:
+            raise socket.gaierror("nao resolve")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (resolve_para, 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolver)
+    assert private_address("https://sitemaps.exemplo.com.br/s.xml") is interno
