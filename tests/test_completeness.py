@@ -285,6 +285,85 @@ def test_perfil_de_verdade_continua_sendo_canal():
         assert find_contact_channels(f'<a href="{href}">x</a>').socials == [href], href
 
 
+def test_botao_de_seguir_nomeia_uma_conta():
+    """X e Threads montam o botão oficial de seguir em `/intent/`, e ele nomeia
+    a conta. A lista única de endpoints de compartilhar tinha `intent` e
+    derrubava esses botões: um contato cujo canal era o botão de seguir saía
+    MISS em ADS-AUTHOR-02."""
+    for href in (
+        "https://twitter.com/intent/follow?screen_name=meublog",
+        "https://x.com/intent/user?screen_name=meublog",
+        "https://x.com/intent/follow?region=follow&screen_name=meublog",
+        "https://www.threads.net/intent/follow?username=meublog",
+    ):
+        assert find_contact_channels(f'<a href="{href}">x</a>').socials == [href], href
+    # E a intenção de postar continua sendo de compartilhar.
+    for href in ("https://twitter.com/intent/tweet?text=x", "https://www.threads.net/intent/post?text=x"):
+        assert not find_contact_channels(f'<a href="{href}">x</a>').any_found, href
+
+
+def test_a_rota_de_uma_rede_nao_recusa_conta_de_outra():
+    """Uma lista de endpoints valendo para todos os hosts recusava contas
+    chamadas como a rota de outra rede: `github.com/intent` é um usuário."""
+    for href in ("https://github.com/intent", "https://github.com/sharing", "https://github.com/share"):
+        assert find_contact_channels(f'<a href="{href}">x</a>').socials == [href], href
+
+
+# Para cada rede, o que mora onde uma conta moraria e não é uma: compartilhar,
+# a linha do tempo, um post, um vídeo. Um por rota de `_first_segment` e um por
+# forma das redes que só aceitam conta numa forma conhecida.
+NAO_E_CONTA = (
+    "https://twitter.com/home?status=Leia%20isto",
+    "https://twitter.com/intent/tweet?url=x",
+    "https://twitter.com/share?url=x",
+    "https://x.com/search?q=adsense",
+    "https://x.com/hashtag/adsense",
+    "https://x.com/i/lists/123",
+    "https://www.instagram.com/p/Cabc123/",
+    "https://www.instagram.com/reel/Cabc123/",
+    "https://www.instagram.com/reels/Cabc123/",
+    "https://www.instagram.com/tv/Cabc123/",
+    "https://www.instagram.com/explore/tags/adsense/",
+    "https://www.instagram.com/stories/fulano/123/",
+    "https://www.facebook.com/sharer/sharer.php?u=x",
+    "https://www.facebook.com/sharer.php?u=x",
+    "https://www.facebook.com/share.php?u=x",
+    "https://www.facebook.com/share?u=x",
+    "https://www.facebook.com/dialog/share?href=x",
+    "https://www.facebook.com/plugins/like.php?href=x",
+    "https://www.facebook.com/watch?v=123",
+    "https://t.me/share/url?url=x",
+    "https://telegram.me/share/url?url=x",
+    "https://www.youtube.com/watch?v=abc",
+    "https://www.youtube.com/embed/abc",
+    "https://www.linkedin.com/feed/",
+    "https://bsky.app/intent/compose?text=x",
+    "https://wa.me/?text=x",
+    "https://mastodon.social/share?text=x",
+)
+
+
+def test_compartilhar_post_e_video_nao_sao_conta():
+    """Antes a lista de endpoints deixava passar o que ela não previa — o
+    compartilhar antigo do Twitter, `/home?status=`, e o vídeo do YouTube."""
+    for href in NAO_E_CONTA:
+        assert not find_contact_channels(f'<a href="{href}">x</a>').any_found, href
+
+
+def test_conta_em_cada_forma_que_a_rede_escreve():
+    for href in (
+        "https://www.facebook.com/profile.php?id=100012345",
+        "https://www.youtube.com/channel/UCabc", "https://www.youtube.com/c/fulano",
+        "https://www.youtube.com/user/fulano",
+        "https://www.linkedin.com/company/minha-empresa", "https://www.linkedin.com/school/x",
+        "https://www.linkedin.com/showcase/x",
+        "https://wa.me/message/ABC123",
+        "https://mastodon.social/@eu", "https://mastodon.social/web/@eu",
+        "https://mastodon.social/users/eu",
+        "https://x.com/fulano/status/123",
+    ):
+        assert find_contact_channels(f'<a href="{href}">x</a>').socials == [href], href
+
 def test_endereco_de_exemplo_e_nome_de_imagem_nao_sao_caixa_postal():
     """`_EMAIL_RE` aceita qualquer x@y.zz. Dois casos comuns não são caixa
     postal de ninguém: o domínio que as RFCs 2606 e 6761 reservam para exemplo,
@@ -4449,6 +4528,14 @@ HOSTS_SOCIAIS = (
     "telegram.me", "threads.net",
 )
 
+# Uma conta em cada rede, escrita como a rede escreve.
+CONTA_POR_HOST = {
+    "linkedin.com": "/in/fulano", "github.com": "/fulano", "twitter.com": "/fulano",
+    "x.com": "/fulano", "instagram.com": "/fulano", "facebook.com": "/fulano",
+    "youtube.com": "/@fulano", "bsky.app": "/profile/fulano.bsky.social", "t.me": "/fulano",
+    "wa.me": "/5511999999999", "telegram.me": "/fulano", "threads.net": "/@fulano",
+}
+
 # As seis tags cujo conteúdo não é texto visível. `head` NÃO está aqui, e é de
 # propósito: o comentário do módulo explica que este parser é um tokenizador
 # plano, e pular `head` apagaria o documento inteiro quando falta `</head>`.
@@ -4473,12 +4560,13 @@ def test_todo_host_social_conhecido_conta_como_canal():
     from adsense_checks.completeness import _SOCIAL_HOSTS, find_contact_channels
 
     assert len(_SOCIAL_HOSTS) == 12
-    for host in HOSTS_SOCIAIS:
-        canais = find_contact_channels(f'<a href="https://{host}/eu">eu</a>')
+    assert set(CONTA_POR_HOST) == set(HOSTS_SOCIAIS)
+    for host, caminho in CONTA_POR_HOST.items():
+        canais = find_contact_channels(f'<a href="https://{host}{caminho}">eu</a>')
         assert canais.socials, host
         assert canais.any_found, host
         # E o subdomínio do mesmo serviço também.
-        assert find_contact_channels(f'<a href="https://www.{host}/eu">eu</a>').socials, host
+        assert find_contact_channels(f'<a href="https://www.{host}{caminho}">eu</a>').socials, host
 
     # O inverso: um host que não é rede social não pode virar prova de canal de
     # contato. Uma entrada errada aqui faz qualquer link de saída aprovar uma

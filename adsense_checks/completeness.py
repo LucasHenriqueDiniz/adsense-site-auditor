@@ -712,41 +712,67 @@ _OBFUSCATED_RE = re.compile(
     re.IGNORECASE,
 )
 
-_SOCIAL_HOSTS = (
-    "linkedin.com", "github.com", "twitter.com", "x.com", "instagram.com",
-    "facebook.com", "youtube.com", "bsky.app", "t.me", "wa.me",
-    "telegram.me", "threads.net",
+def _first_segment(shape: str, *routes: str) -> str:
+    """The account pattern of a network that writes the account as the first
+    path segment. `routes` are that network's own pages that sit where an
+    account would — share boxes, the timeline, a post — and so never are one.
+    """
+    guard = "".join(f"(?!{re.escape(route)}(?:[/?]|$))" for route in routes)
+    return rf"/{guard}{shape}(?:[/?]|$)"
+
+
+# Where each network writes an account in a URL, matched against the path and
+# query from the start. A link to a social host is a way to reach someone only
+# when it names an account. The share buttons a theme prints on every page link
+# to the same hosts and name the page being shared, and they carried a contact
+# page with no address and no form to ADS-AUTHOR-02 PASS, measured on
+# 2026-10-19.
+#
+# A shape per network, not one list of share endpoints for all of them. That
+# list rejected accounts named like another network's endpoint
+# (`github.com/intent`), rejected the follow buttons X and Threads build on
+# `/intent/`, which name an account, and passed whatever share or media URL it
+# had not foreseen: `twitter.com/home?status=`, `youtube.com/watch?v=`.
+_X_ACCOUNT = (
+    _first_segment(r"[a-z0-9_]{1,15}", "home", "intent", "share", "search", "hashtag", "i"),
+    r"/intent/(?:follow|user)\?(?:[^#]*&)?(?:screen_name|user_id)=[^&#]+",
 )
+_TELEGRAM_ACCOUNT = (_first_segment(r"[a-z0-9_]{5,32}", "share"),)
+_ACCOUNT_URLS: dict[str, tuple[str, ...]] = {
+    "linkedin.com": (r"/(?:in|company|school|showcase)/[^/?#]+",),
+    "github.com": (_first_segment(r"[a-z0-9-]{1,39}"),),
+    "twitter.com": _X_ACCOUNT,
+    "x.com": _X_ACCOUNT,
+    "instagram.com": (
+        _first_segment(r"[a-z0-9._]{1,30}", "p", "reel", "reels", "tv", "explore", "stories"),
+    ),
+    "facebook.com": (
+        # `profile.php?id=...` is an account too, and this already matches it.
+        _first_segment(
+            r"[a-z0-9.-]+", "sharer", "sharer.php", "share.php", "share", "dialog", "plugins",
+            "watch",
+        ),
+    ),
+    "youtube.com": (r"/@[^/?#]+", r"/(?:channel|c|user)/[^/?#]+"),
+    "bsky.app": (r"/profile/[^/?#]+",),
+    "t.me": _TELEGRAM_ACCOUNT,
+    "telegram.me": _TELEGRAM_ACCOUNT,
+    "wa.me": (r"/\d+(?:[/?]|$)", r"/message/[a-z0-9]+"),
+    "threads.net": (r"/@[^/?#]+", r"/intent/follow\?(?:[^#]*&)?username=[^&#]+"),
+}
+_SOCIAL_HOSTS = tuple(_ACCOUNT_URLS)
 
 # Mastodon is federated: the profile lives on the instance's own domain, so
 # there is no registrable domain to list. A host label is all that is left to
 # match on — and it is still a label, never a substring, so "mastodonte.com.br"
 # is not a profile.
 _SOCIAL_HOST_LABELS = frozenset({"mastodon"})
+_MASTODON_ACCOUNT = (r"/@[^/?#]+", r"/web/@[^/?#]+", r"/users/[^/?#]+")
 
-
-# The first path segment of the share and compose endpoints on the hosts above:
-# Facebook's /sharer/sharer.php, /sharer.php, /share.php and /dialog/share,
-# X's and Bluesky's and Threads' /intent/..., LinkedIn's /sharing/share-offsite,
-# /shareArticle and /cws/share, Telegram's and Mastodon's /share. A link there
-# names the page being shared, not an account, and the share buttons a theme
-# prints on every page carried a contact page with no address and no form to
-# ADS-AUTHOR-02 PASS, measured on 2026-10-19.
-_SHARE_PATH_SEGMENTS = frozenset(
-    {"sharer", "sharer.php", "share", "share.php", "dialog", "intent", "sharing",
-     "sharearticle", "cws"}
-)
-
-
-def _names_an_account(path: str) -> bool:
-    """Whether a social-host path points at an account rather than a share box.
-
-    A bare host is not an account either: `https://twitter.com/` is a link to
-    the network, and `wa.me/?text=...` is WhatsApp's share link, where
-    `wa.me/5511999999999` opens a chat with a number.
-    """
-    first = path.strip("/").split("/", 1)[0].lower()
-    return bool(first) and first not in _SHARE_PATH_SEGMENTS
+_ACCOUNT_PATTERNS = {
+    host: tuple(re.compile(pattern, re.IGNORECASE) for pattern in patterns)
+    for host, patterns in (*_ACCOUNT_URLS.items(), ("mastodon", _MASTODON_ACCOUNT))
+}
 
 
 # RFC 2606 and RFC 6761 reserve these for documentation and testing, so an
@@ -772,23 +798,33 @@ def _is_mailbox(address: str) -> bool:
     return not any(domain == d or domain.endswith("." + d) for d in _RESERVED_DOMAINS)
 
 
-def _is_social_host(host: str) -> bool:
-    """Whether `host` is a known profile host, matched on label boundaries.
+def _account_patterns(host: str) -> tuple[re.Pattern[str], ...]:
+    """How the network at `host` writes an account, or () when it is no network.
 
-    Substring matching is what this exists to avoid, and the damage was not
-    hypothetical: "x.com" sits inside netflix.com and phoenix.com, and "t.me"
-    inside payment.mercadopago.com.br. Any outgoing link then counted as a
-    social profile, a social profile is proof of a contact channel, and a
-    contact page offering no way to reach anyone came back OK. It is the same
-    missing-word-boundary defect `_compile` was written to kill, made once more
-    in the host list instead of in the markers.
+    The host is matched on label boundaries. Substring matching is what this
+    exists to avoid, and the damage was not hypothetical: "x.com" sits inside
+    netflix.com and phoenix.com, and "t.me" inside payment.mercadopago.com.br.
+    Any outgoing link then counted as a social profile, a social profile is
+    proof of a contact channel, and a contact page offering no way to reach
+    anyone came back OK. It is the same missing-word-boundary defect `_compile`
+    was written to kill, made once more in the host list instead of in the
+    markers.
     """
     host = host.rpartition("@")[2].split(":")[0]  # drop userinfo and port
     if not host:
-        return False
-    if any(host == domain or host.endswith("." + domain) for domain in _SOCIAL_HOSTS):
-        return True
-    return not _SOCIAL_HOST_LABELS.isdisjoint(host.split("."))
+        return ()
+    for domain in _SOCIAL_HOSTS:
+        if host == domain or host.endswith("." + domain):
+            return _ACCOUNT_PATTERNS[domain]
+    if not _SOCIAL_HOST_LABELS.isdisjoint(host.split(".")):
+        return _ACCOUNT_PATTERNS["mastodon"]
+    return ()
+
+
+def _names_an_account(host: str, path: str, query: str) -> bool:
+    """Whether a link names an account on a social network (see `_ACCOUNT_URLS`)."""
+    target = f"{path}?{query}" if query else path
+    return any(pattern.match(target) for pattern in _account_patterns(host))
 
 
 @dataclass(frozen=True)
@@ -855,7 +891,7 @@ def channels_in(doc: Document) -> ContactChannels:
                 mailto.append(address)
             continue
         parsed = split_url(href)
-        if _is_social_host(fold(parsed.netloc)) and _names_an_account(parsed.path):
+        if _names_an_account(fold(parsed.netloc), parsed.path, parsed.query):
             socials.append(href)
     text = doc.text
     emails = [m.group() for m in _EMAIL_RE.finditer(text) if _is_mailbox(m.group())]
