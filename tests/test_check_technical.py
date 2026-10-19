@@ -417,3 +417,22 @@ def test_uma_sessao_para_a_execucao_inteira(server, monkeypatch, capsys, sessoes
 
     assert len(rotas.received) >= 5
     assert sessoes == {"abertas": 1, "fechadas": 1}
+
+
+def test_o_sitemap_achado_e_nomeado_mesmo_com_a_amostra(server, monkeypatch, capsys):
+    """A linha de resumo só saía quando não havia nenhuma nota, e a nota da
+    amostra sempre existe quando alguma URL foi buscada. Numa execução normal o
+    relatório não dizia qual sitemap, achado por onde, com quantas URLs."""
+    base, rotas = server
+    rotas["/"] = (200, {"Content-Type": "text/html"}, "<html><body><p>oi</p></body></html>")
+    rotas["/robots.txt"] = (200, {"Content-Type": "text/plain"}, "User-agent: *\nAllow: /\n")
+    rotas["/sitemap.xml"] = (200, {"Content-Type": "application/xml"}, _sitemap(base))
+    for caminho in ("/a", "/b"):
+        rotas[caminho] = (200, {"Content-Type": "text/html"}, "<html></html>")
+
+    monkeypatch.setattr("sys.argv", ["check_technical.py", base + "/"])
+    check_technical.main()
+    saida = capsys.readouterr().out
+
+    assert f"urlset at {base}/sitemap.xml, found via conventional path: 2 URL(s)" in saida
+    assert "2 of 2 sampled URL(s) answered 200" in saida

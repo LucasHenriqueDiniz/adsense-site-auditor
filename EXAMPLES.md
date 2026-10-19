@@ -193,6 +193,7 @@ Technical checks — http://localhost:8765
 [PASS] ADS-CRAWL-02 robots.txt
          - Mediapartners-Google, Googlebot and AdsBot are all allowed at /
 [PASS] ADS-CRAWL-07 sitemap
+         - urlset at http://localhost:8765/sitemap.xml, found via robots.txt: 6 URL(s)
          - 5 of 5 sampled URL(s) answered 200
 
 4 checks: PASS=3, WARN=1
@@ -205,10 +206,12 @@ request cannot establish reliability over time, so uptime is named as a gap
 rather than being quietly folded into a `PASS` — which is what an earlier
 version did, printing a scheme test under the whole requirement ID.
 
-The sitemap line reports the sample rather than the discovery. The check reads
-the `Sitemap:` directive before it tries `/sitemap.xml`, which is what makes it
-work on the many sites that 404 at the conventional path; `-v` names the one
-that answered, as `discovered_via: robots.txt`.
+The sitemap line names what it found and how, then the sample it fetched. The
+check reads the `Sitemap:` directive before it tries `/sitemap.xml`, which is
+what makes it work on the many sites that 404 at the conventional path. Until
+2026-10-19 the first finding was printed only when there was nothing else to
+say, and the sample note is always there, so this block showed the sample
+alone.
 
 ## Crawl
 

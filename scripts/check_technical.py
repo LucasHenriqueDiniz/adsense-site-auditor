@@ -271,11 +271,21 @@ def _report(args: argparse.Namespace, session: requests.Session) -> int:
             f"{sample.ok_count} of {len(sample.checked)} sampled URL(s) answered 200"
             + (f"; {', '.join(bad[:3])}" if bad else "")
         )
-    sitemap_findings = list(sitemap.reasons) or [
-        f"{sitemap.kind} at {sitemap.sitemap_url}, found via {sitemap.discovered_via}:"
-        f" {sitemap.url_count} URL(s)"
-        + (" (lower bound, truncated)" if sitemap.url_count_is_lower_bound else "")
-    ]
+    # What was found comes first, whenever something was. It used to print only
+    # when there was nothing else to say, and the sample note above is always
+    # there once a URL was sampled, so a normal run never said which sitemap,
+    # found how, or how many URLs it lists: EXAMPLES.md's own block showed
+    # only "5 of 5 sampled URL(s) answered 200".
+    found = (
+        [
+            f"{sitemap.kind} at {sitemap.sitemap_url}, found via {sitemap.discovered_via}:"
+            f" {sitemap.url_count} URL(s)"
+            + (" (lower bound, truncated)" if sitemap.url_count_is_lower_bound else "")
+        ]
+        if sitemap.found
+        else []
+    )
+    sitemap_findings = found + list(sitemap.reasons)
     lines.append(
         Line(
             "sitemap",
