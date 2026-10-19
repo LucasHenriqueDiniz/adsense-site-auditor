@@ -38,7 +38,6 @@ from urllib.parse import SplitResult, urldefrag, urljoin, urlsplit
 
 import requests
 from requests.cookies import extract_cookies_to_jar
-from requests.models import DEFAULT_REDIRECT_LIMIT
 from requests.utils import requote_uri
 from urllib3.util import Timeout as Urllib3Timeout
 
@@ -505,10 +504,12 @@ def _send_following_redirects(
     Each hop here is its own request (see `_send_one`), streamed and closed
     unread, so no hop's body is read, and a hop's cookie reaches the next hop
     only through the session's jar, which `cookieless_session` keeps empty. The
-    next URL
-    is the `Location` resolved against the hop's own URL, as requests resolves
-    it, and a chain longer than requests' own limit ends in `TooManyRedirects`,
-    as it did.
+    next URL is the `Location` resolved against the hop's own URL, as requests
+    resolves it, and a chain longer than the session's `max_redirects` ends in
+    `TooManyRedirects`, counted as `Session.resolve_redirects` counts it: the
+    3xx past the limit raises, so a limit of 3 sends 4 requests. The session's
+    and not `DEFAULT_REDIRECT_LIMIT`, which is only what a new session starts
+    with: read off the constant, a session set to 3 sent 31 into a loop.
     """
     history: list[requests.Response] = []
     while True:
@@ -517,9 +518,9 @@ def _send_following_redirects(
             return resp, history
         resp.close()
         history.append(resp)
-        if len(history) > DEFAULT_REDIRECT_LIMIT:
+        if len(history) > sess.max_redirects:
             raise requests.TooManyRedirects(
-                f"Exceeded {DEFAULT_REDIRECT_LIMIT} redirects.", response=resp
+                f"Exceeded {sess.max_redirects} redirects.", response=resp
             )
         location = sess.get_redirect_target(resp) or ""
         url = urljoin(resp.url, requote_uri(location))

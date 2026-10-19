@@ -846,3 +846,25 @@ def test_redirect_em_loop_termina_no_limite_do_requests(server):
     assert r.error is not None and r.error.startswith("TooManyRedirects")
     saltos = [c for _m, c, _h in routes.received if c == "/volta"]
     assert len(saltos) == DEFAULT_REDIRECT_LIMIT + 1
+
+
+def test_redirect_em_loop_respeita_o_max_redirects_da_sessao(server):
+    """Achado 5 da revisão do PR #1: o limite é o da SESSÃO, não o padrão.
+
+    Com o laço feito aqui, o limite tinha virado a constante
+    `DEFAULT_REDIRECT_LIMIT`, e uma sessão que pediu 3 levava 31 pedidos a um
+    laço — o que `Session.resolve_redirects` nunca fez: ele lê
+    `self.max_redirects`. Mesma contagem que a dele: o quarto 3xx levanta, então
+    saem 4 pedidos.
+    """
+    import requests
+
+    base, routes = server
+    routes["/volta"] = (302, {"Location": "/volta"}, "")
+    sessao = requests.Session()
+    sessao.max_redirects = 3
+
+    r = fetch(base + "/volta", session=sessao)
+
+    assert r.error == "TooManyRedirects: Exceeded 3 redirects."
+    assert [c for _m, c, _h in routes.received] == ["/volta"] * 4
