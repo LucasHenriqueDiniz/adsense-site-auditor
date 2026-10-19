@@ -393,6 +393,28 @@ def test_threads_com_e_canal_publico_do_telegram_sao_conta():
     ):
         assert find_contact_channels(f'<a href="{href}">x</a>').socials == [href], href
 
+def test_whatsapp_e_messenger_sao_canal_e_o_compartilhar_deles_nao():
+    """O botão "Fale no WhatsApp" de muito site brasileiro usa
+    `api.whatsapp.com/send?phone=`, a outra forma de click-to-chat que o
+    WhatsApp documenta além do `wa.me`; o Messenger linka `m.me/<página>` e o
+    Facebook encurta páginas em `fb.me`. Nenhum contava, e um contato com um
+    deles saía MISS. Sem telefone, o mesmo `/send` é a caixa de compartilhar."""
+    for href in (
+        "https://api.whatsapp.com/send?phone=5511999999999",
+        "https://web.whatsapp.com/send/?phone=5511999999999&text=oi",
+        "https://www.whatsapp.com/channel/0029VaExemplo",
+        "https://m.me/minhapagina",
+        "https://fb.me/minhapagina",
+    ):
+        assert find_contact_channels(f'<a href="{href}">x</a>').socials == [href], href
+    for href in (
+        "https://api.whatsapp.com/send?text=Leia%20isto",
+        "https://www.whatsapp.com/",
+        "https://m.me/",
+        "https://fb.me/l.php?u=x",
+    ):
+        assert not find_contact_channels(f'<a href="{href}">x</a>').any_found, href
+
 def test_conta_em_cada_forma_que_a_rede_escreve():
     for href in (
         "https://www.facebook.com/profile.php?id=100012345",
@@ -4629,7 +4651,7 @@ def test_toda_entrada_de_ABOUT_PATHS_e_CONTACT_PATHS_vira_candidato():
 HOSTS_SOCIAIS = (
     "linkedin.com", "github.com", "twitter.com", "x.com", "instagram.com",
     "facebook.com", "youtube.com", "bsky.app", "t.me", "wa.me",
-    "telegram.me", "threads.net", "threads.com",
+    "telegram.me", "threads.net", "threads.com", "fb.me", "m.me", "whatsapp.com",
 )
 
 # Uma conta em cada rede, escrita como a rede escreve.
@@ -4638,7 +4660,8 @@ CONTA_POR_HOST = {
     "x.com": "/fulano", "instagram.com": "/fulano", "facebook.com": "/fulano",
     "youtube.com": "/@fulano", "bsky.app": "/profile/fulano.bsky.social", "t.me": "/fulano",
     "wa.me": "/5511999999999", "telegram.me": "/fulano", "threads.net": "/@fulano",
-    "threads.com": "/@fulano",
+    "threads.com": "/@fulano", "fb.me": "/fulano", "m.me": "/fulano",
+    "whatsapp.com": "/send?phone=5511999999999",
 }
 
 # As seis tags cujo conteúdo não é texto visível. `head` NÃO está aqui, e é de
@@ -4664,7 +4687,7 @@ TAGS_DE_REGIAO = ("footer", "nav", "header", "div", "section", "aside", "main", 
 def test_todo_host_social_conhecido_conta_como_canal():
     from adsense_checks.completeness import _SOCIAL_HOSTS, find_contact_channels
 
-    assert len(_SOCIAL_HOSTS) == 13
+    assert len(_SOCIAL_HOSTS) == 16
     assert set(CONTA_POR_HOST) == set(HOSTS_SOCIAIS)
     for host, caminho in CONTA_POR_HOST.items():
         canais = find_contact_channels(f'<a href="https://{host}{caminho}">eu</a>')

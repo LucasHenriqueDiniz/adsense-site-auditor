@@ -739,6 +739,15 @@ def _first_segment(shape: str, *routes: str) -> str:
 # page: share and compose boxes, posts and media, hashtags, sign-in and product
 # pages. A short list let `x.com/compose/post`, `github.com/features/...` and
 # `instagram.com/accounts/login/` pass as accounts, measured on 2026-10-19.
+#
+# These lists cannot be complete, and are not. None of these networks publishes
+# the names it reserves, and every product, help or legal page sits where an
+# account would. Still counted as accounts on 2026-10-19: `github.com/copilot`,
+# `github.com/search`, `twitter.com/en/tos`, `x.com/en/privacy`,
+# `facebook.com/help/...`, `facebook.com/business`, `facebook.com/marketplace/`.
+# A contact page whose only social link is one of those passes ADS-AUTHOR-02;
+# EXAMPLES.md records it among the known gaps. A route goes in when it is seen
+# in links on real pages, not to chase the list.
 _X_ACCOUNT = (
     _first_segment(
         r"[a-z0-9_]{1,15}", "home", "intent", "share", "compose", "search", "hashtag", "i",
@@ -750,6 +759,16 @@ _X_ACCOUNT = (
 _TELEGRAM_ACCOUNT = (
     _first_segment(r"[a-z0-9_]{5,32}", "share"),
     r"/s/[a-z0-9_]{5,32}(?:[/?]|$)",
+)
+# Facebook's own scripts end in `.php` — the link shim `l.php` that wraps every
+# outbound link, `photo.php`, `story.php`, `permalink.php`, the share boxes —
+# and none of them is an account except `profile.php?id=`.
+_FACEBOOK_ACCOUNT = (
+    _first_segment(
+        r"(?![a-z0-9.-]*\.php(?:[/?]|$))[a-z0-9.-]+", "sharer", "share", "dialog", "plugins",
+        "watch", "reel", "photo", "hashtag", "events", "login",
+    ),
+    r"/profile\.php\?(?:[^#]*&)?id=\d+",
 )
 # threads.net answers 301 to threads.com since 2025 (checked on 2026-10-19), and
 # links are written both ways.
@@ -770,21 +789,19 @@ _ACCOUNT_URLS: dict[str, tuple[str, ...]] = {
             "direct",
         ),
     ),
-    "facebook.com": (
-        # Facebook's own scripts end in `.php` — the link shim `l.php` that wraps
-        # every outbound link, `photo.php`, `story.php`, `permalink.php`, the
-        # share boxes — and none of them is an account except `profile.php?id=`.
-        _first_segment(
-            r"(?![a-z0-9.-]*\.php(?:[/?]|$))[a-z0-9.-]+", "sharer", "share", "dialog", "plugins",
-            "watch", "reel", "photo", "hashtag", "events", "login",
-        ),
-        r"/profile\.php\?(?:[^#]*&)?id=\d+",
-    ),
+    "facebook.com": _FACEBOOK_ACCOUNT,
+    # Facebook's short link to a page, and Messenger's link to one.
+    "fb.me": _FACEBOOK_ACCOUNT,
+    "m.me": (_first_segment(r"[a-z0-9.-]+"),),
     "youtube.com": (r"/@[^/?#]+", r"/(?:channel|c|user)/[^/?#]+"),
     "bsky.app": (r"/profile/[^/?#]+",),
     "t.me": _TELEGRAM_ACCOUNT,
     "telegram.me": _TELEGRAM_ACCOUNT,
     "wa.me": (r"/\d+(?:[/?]|$)", r"/message/[a-z0-9]+"),
+    # WhatsApp's other click-to-chat form, the "Fale no WhatsApp" button of many
+    # Brazilian sites, and its Channels. `/send?text=` without a phone is the
+    # share box, and does not match.
+    "whatsapp.com": (r"/send/?\?(?:[^#]*&)?phone=\+?\d+", r"/channel/[^/?#]+"),
     "threads.net": _THREADS_ACCOUNT,
     "threads.com": _THREADS_ACCOUNT,
 }

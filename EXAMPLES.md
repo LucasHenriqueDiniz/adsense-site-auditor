@@ -333,6 +333,15 @@ Behaviour observed in the runs above, recorded here because a reader will hit it
   links a GitHub profile, and the line still reports `MISS`. The
   requirement text says "About page, Contact page, or footer", so the check is
   narrower than the requirement it stamps.
+- A social link counts as a channel when it names an account, and on the
+  networks that put the account in the first path segment — X, Facebook,
+  Instagram, GitHub, Telegram — that means any segment not on the network's
+  list of its own pages. The lists cannot be complete: none of these networks
+  publishes the names it reserves. On 2026-10-19, `github.com/copilot`,
+  `github.com/search`, `twitter.com/en/tos`, `x.com/en/privacy`,
+  `facebook.com/help/...`, `facebook.com/business` and
+  `facebook.com/marketplace/` still counted as accounts, so a contact page
+  whose only social link is one of them passes this line.
 - A page is read the way a browser reads it, and a browser believes the
   charset it is given. A UTF-8 page served as `charset=iso-8859-1` comes back
   as "construÃ§Ã£o", with no replacement character to show anything was lost,
