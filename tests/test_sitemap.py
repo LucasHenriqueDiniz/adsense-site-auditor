@@ -423,6 +423,27 @@ def test_indice_e_seguido_e_url_count_soma_os_filhos(server):
     assert r.status is Status.OK
 
 
+def test_filho_em_outro_site_nao_e_buscado(server, outro_servidor):
+    """O índice listava um filho em qualquer host e ele era buscado: o site
+    auditado escolhia que URL a máquina do auditor pedia, endereço interno
+    incluso. O protocolo do sitemaps.org só permite a um índice listar sitemaps
+    do próprio site, então o filho de fora não é buscado e vira achado."""
+    base, rotas = server
+    outra, outras_rotas = outro_servidor
+    rotas["/sitemap.xml"] = (
+        200, XML, sitemapindex(f"{base}/post-sitemap.xml", f"{outra}/estranho.xml")
+    )
+    rotas["/post-sitemap.xml"] = (200, XML, urlset(f"{base}/p1", f"{base}/p2"))
+    outras_rotas["/estranho.xml"] = (200, XML, urlset(f"{outra}/x"))
+
+    r = check_sitemap(base)
+
+    assert outras_rotas.received == []
+    assert r.url_count == 2
+    assert r.status is Status.WARNING
+    assert any("estranho.xml" in nota and "not fetched" in nota for nota in r.reasons)
+
+
 def test_limite_de_filhos_marca_a_contagem_como_parcial(server):
     """Um número parcial que não se anuncia é a mesma mentira em outro lugar."""
     base, rotas = server

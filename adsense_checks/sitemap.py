@@ -594,6 +594,20 @@ def _resolve_index(
             continue
         visited.add(url)
 
+        if not same_site(url, entry.url or result.base_url):
+            # sitemaps.org: "A Sitemap index file can only specify Sitemaps that
+            # are found on the same site as the Sitemap index file." Fetching the
+            # child anyway let the audited site choose which URLs this auditor
+            # requests, link-local and private addresses included; crawl.py
+            # refuses an off-site seed for the same reason. A child a crawler
+            # following the protocol ignores is a finding about the index.
+            result.status = escalate(result.status, Status.WARNING)
+            result.note(
+                f"child sitemap {url} is not on the index's site; not fetched, as the"
+                " sitemap protocol allows an index to list only its own site's sitemaps"
+            )
+            continue
+
         if children_fetched >= max_child_sitemaps:
             # break, not return: the tail of this function still has to mark the
             # count partial, which is the only thing that makes it safe to read.
