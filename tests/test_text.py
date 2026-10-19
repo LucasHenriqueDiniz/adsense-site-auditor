@@ -924,6 +924,34 @@ def test_bloco_dentro_da_mobilia_nao_sobe():
             '<a href="/t3">guias</a>. Mais texto aqui</div>',
             {"ferramentas"},
         ),
+        # Uma contagem ao lado do link é rótulo dele, não frase: o widget de
+        # categorias, escrito direto no texto ou num <span> à parte.
+        ('<div><ul><li><a href="/n">Noticias</a> (15)</li></ul></div>', {"Noticias"}),
+        (
+            '<div><ul><li><a href="/n">Noticias</a> <span>(15)</span></li></ul></div>',
+            {"Noticias"},
+        ),
+        # O vizinho tem letras, mas só dentro de um link: fora dele, só a contagem.
+        (
+            '<div><ul><li><a href="/n">Noticias</a> '
+            '<span><a href="/f">feed</a> (15)</span></li></ul></div>',
+            {"Noticias", "feed"},
+        ),
+        # Com letras ao lado, é frase de novo, mesmo entre parênteses.
+        ('<div><p><a href="/g">Baixe</a> (2 min)</p></div>', set()),
+        # O ano depois da lista não faz dela uma frase: a frase começa com letra.
+        (
+            '<div>Tags: <a href="/t1">pdf</a> <a href="/t2">guias</a> 2026</div>',
+            {"guias"},
+        ),
+        # Um <br> encerra a linha: o rótulo em cima não é frase com o link embaixo,
+        # nem o texto embaixo é a continuação dos links.
+        (
+            '<div>Menu:<br><a href="/">Inicio</a><br><a href="/s">Sobre</a><br>'
+            "Fale com a gente pelo email</div>",
+            {"Inicio", "Sobre"},
+        ),
+        ('<div><p>Leia o<br><a href="/g">guia</a> agora</p></div>', set()),
     ],
     ids=[
         "frase",
@@ -936,6 +964,13 @@ def test_bloco_dentro_da_mobilia_nao_sobe():
         "dois-links-abrem-a-frase",
         "rotulo-com-espacos",
         "rotulo-e-ponto",
+        "contagem",
+        "contagem-em-span",
+        "letras-so-no-link-vizinho",
+        "letras-entre-parenteses",
+        "rotulo-e-ano",
+        "menu-com-br",
+        "quebra-na-frase",
     ],
 )
 def test_link_em_texto_corrido_nao_e_so_link(html, so_link):
@@ -961,6 +996,23 @@ def test_heading_que_e_ancora_de_si_mesmo_continua_heading():
     d = measure_depth(html)
     assert d.words == 1 + 2 + 200 + 2 + 90 + 2 + 60
     assert d.status is Status.INFO, d.reason
+
+
+def test_widget_de_categorias_com_contagem_nao_conta_os_links():
+    """O widget de categorias do WordPress: `<li><a>Notícias</a> (15)</li>`.
+    A contagem ao lado fazia de cada link "texto corrido", e com o título do
+    widget linkado — que agora vale como heading — o widget entrava sem
+    dúvida: 432 palavras, INFO, onde o post e o widget sem os links somam 312."""
+    itens = "".join(f'<li><a href="/c{i}">{_ruido(2)}</a> ({i})</li>' for i in range(60))
+    html = (
+        '<html><body><div class="post"><h1>Titulo</h1>'
+        f'<div class="entry"><p>{_palavras(250)}</p></div>'
+        f'<div class="widget"><h3><a href="/cats">Categorias</a></h3><ul>{itens}</ul></div>'
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert "ruido" not in d.text
+    assert d.words == 1 + 250 + 1 + 60  # título, post, título do widget, contagens
 
 
 def test_lista_de_tags_com_rotulo_nao_vira_texto():

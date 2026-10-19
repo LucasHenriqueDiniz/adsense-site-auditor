@@ -102,6 +102,10 @@ VOID_ELEMENTS = frozenset(
     }
 )
 
+# Void elements that end a line. Stored as elements, not as separator text, so
+# that reading a line of text can stop at them (see `_worded`).
+LINE_BREAKS = frozenset({"br", "hr"})
+
 # Elements whose subtree is not visible text. `head` and `title` are here so an
 # implicit head (no <head> tag at all, which is legal) is still excluded.
 DROPPED_ELEMENTS = frozenset(
@@ -228,6 +232,9 @@ _WHITESPACE = re.compile(r"\s+")
 # A word is a run of letters (any alphabet, accents included) or a run of
 # digits. `[^\W\d_]` is the Unicode-aware way to say "letter": a class like
 # [a-zA-Z]+ would cut "coração" into "cora" and "o".
+# A letter, in any alphabet. A count, a date or a price beside a link is a label
+# of it, not the sentence around it: see `_worded`.
+_LETTER = re.compile(r"[^\W\d_]")
 _WORD = re.compile(r"[^\W\d_]+(?:['’-][^\W\d_]+)*|\d+(?:[.,]\d+)*")
 # Invisible characters that sit *inside* a word and would otherwise split it:
 # soft hyphen, zero-width space, BOM. Spelled as escapes on purpose — a literal
@@ -292,7 +299,16 @@ class _Parser(HTMLParser):
             # element that has no end tag. The separator is the part that shows
             # in the output: a <br> or <hr> breaks a word boundary, and the
             # elements listed as inline — `wbr` alone, today — must not.
-            if tag not in INLINE_ELEMENTS:
+            if tag in LINE_BREAKS:
+                # Kept as a childless element rather than the separator text it
+                # used to be: `"\n"` from a <br> could not be told from a newline
+                # in the source between two tags, and a look for the word beside
+                # a link walked across it — "Menu:<br><a>Inicio</a>" read as one
+                # sentence. Nothing is pushed, so the stack stays as it was.
+                self._current.content.append(
+                    _Node(tag, parent=self._current, dropped=self._current.dropped)
+                )
+            elif tag not in INLINE_ELEMENTS:
                 self._current.content.append(_SEPARATOR)
             return
         if tag == "body":
@@ -494,9 +510,14 @@ def _link_only(roots: list[_Node], words: _LinkWords | None = None) -> frozenset
     volte" is a sentence with a link in it, and its words are the sentence's.
     Cutting them took 100 words out of a 220-word paragraph of a section beside
     the block, and a reader's 475 came out 375. So an inline element with a word
-    right beside it stays, whatever it holds (see `_in_running_text`). Only
-    inline elements can be in running text, so a heading asked about as itself
-    (`_page_title`) is always judged whole.
+    right beside it stays, whatever it holds, and so does a run of links that a
+    sentence goes on after (see `_in_running_text`). Only inline elements can be
+    in running text, so a heading asked about as itself (`_page_title`) is
+    always judged whole.
+
+    Nor is a heading on its own: `<h2><a href="#parte">` is the heading of its
+    section, linked to its own anchor. Inside a link-only card it still leaves,
+    because there the card is the subtree found.
 
     `words` is `_link_words` of a tree holding every root; without it, each
     root gets its own walk.
@@ -510,6 +531,7 @@ def _link_only(roots: list[_Node], words: _LinkWords | None = None) -> frozenset
     # and the index there of its outermost inline ancestor — so a tag cloud of
     # ten thousand links is not searched once per link.
     pending: list[tuple[_Node, tuple[_Node, int] | None]] = [(root, None) for root in roots]
+    runs: dict[tuple[int, int], bool] = {}
     while pending:
         node, at = pending.pop()
         inside, outside = words[node]
@@ -520,7 +542,7 @@ def _link_only(roots: list[_Node], words: _LinkWords | None = None) -> frozenset
             # heading that vouched for it, became doubt, and a 357-word page
             # read ERROR. A heading inside a link-only card still goes with
             # the card: there the card is the subtree found, not the heading.
-            if node.tag not in HEADING_ELEMENTS and not _in_running_text(node, words, at):
+            if node.tag not in HEADING_ELEMENTS and not _in_running_text(node, words, at, runs):
                 found.add(node)
             continue
         for i, child in enumerate(node.content):
@@ -530,7 +552,12 @@ def _link_only(roots: list[_Node], words: _LinkWords | None = None) -> frozenset
     return frozenset(found)
 
 
-def _in_running_text(node: _Node, words: _LinkWords, at: tuple[_Node, int] | None = None) -> bool:
+def _in_running_text(
+    node: _Node,
+    words: _LinkWords,
+    at: tuple[_Node, int] | None = None,
+    runs: dict[tuple[int, int], bool] | None = None,
+) -> bool:
     """Whether `node` is inline with a word right beside it.
 
     Right beside means the nearest thing on either side in the block's flow,
@@ -562,37 +589,57 @@ def _in_running_text(node: _Node, words: _LinkWords, at: tuple[_Node, int] | Non
     return (
         _worded(flow, index, -1, words)
         or _worded(flow, index, 1, words)
-        or _sentence_goes_on(flow, index, words)
+        or _sentence_goes_on(flow, index, words, runs)
     )
 
 
 def _worded(flow: list[str | _Node], index: int, step: int, words: _LinkWords) -> bool:
     """Whether the nearest thing to `flow[index]`, going `step`, carries a word.
 
-    Spaces and punctuation are looked past, written as text or wrapped in an
-    inline element of their own (`<span>:</span>`): the two spellings of one
-    sentence judged differently, and the second cut its link. A block or a link
+    A word here has letters. "<a>Notícias</a> (15)" is the shape of every
+    category and archive widget, and a count beside a link made it running
+    text: 60 such items counted their 120 link words. Spaces, punctuation and
+    bare numbers are looked past, written as text or wrapped in an inline
+    element of their own (`<span>:</span>`). A block, a line break or a link
     stops the look.
     """
     j = index + step
     while 0 <= j < len(flow):
         item = flow[j]
         if isinstance(item, str):
-            if _WORD.search(item):
+            if _LETTER.search(item):
                 return True
         elif not item.dropped:
             if item.tag not in INLINE_ELEMENTS:
                 return False
             inside, outside = words.get(item, (False, False))
-            if outside:
+            if outside and _letters_outside_links(item):
                 return True
-            if inside:
+            if inside and not outside:
                 return False
         j += step
     return False
 
 
-def _sentence_goes_on(flow: list[str | _Node], index: int, words: _LinkWords) -> bool:
+def _letters_outside_links(node: _Node) -> bool:
+    """Whether `node` holds a letter that is not inside a link."""
+    stack: list[str | _Node] = [node]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            if _LETTER.search(item):
+                return True
+        elif not item.dropped and not _is_link(item):
+            stack.extend(item.content)
+    return False
+
+
+def _sentence_goes_on(
+    flow: list[str | _Node],
+    index: int,
+    words: _LinkWords,
+    runs: dict[tuple[int, int], bool] | None = None,
+) -> bool:
     """Whether `flow[index]` opens a run of links, joined by spaces alone, that
     the sentence goes on right after: "<a>Foo</a> <a>Bar</a> é uma biblioteca".
 
@@ -601,26 +648,44 @@ def _sentence_goes_on(flow: list[str | _Node], index: int, words: _LinkWords) ->
     would undo what `_worded` stops: "Tags: <a>pdf</a> <a>guias</a>" is a run
     with a word beside it too. The difference is the sentence going on after
     the run — a label introduces a list and ends there, a sentence continues. So
-    only the right side counts, past spaces only, and it must start with a word:
-    "… <a>guias</a>. Mais texto" ends at the period. A run joined by commas,
-    and one ending its sentence, are left as `_worded` judges them.
+    only the right side counts, past spaces only, and it must start with a
+    letter: "… <a>guias</a>. Mais texto" ends at the period. A run joined by
+    commas, and one ending its sentence, are left as `_worded` judges them.
+
+    Every link of a run has the same answer, so `runs` keeps it for each one
+    the walk passed: asked link by link, a run of 4,000 links joined by spaces
+    took 0.96 s to read, against 0.07 s before this rule.
     """
+    key = (id(flow), index)
+    if runs is not None and key in runs:
+        return runs[key]
+    passed = [index]
+    answer = False
     j = index + 1
     while j < len(flow):
         item = flow[j]
         if isinstance(item, str):
             if item.strip():
-                return bool(_WORD.match(item.lstrip()))
+                answer = bool(_LETTER.match(item.lstrip()))
+                break
         elif not item.dropped:
             if item.tag not in INLINE_ELEMENTS:
-                return False
+                break
             inside, outside = words.get(item, (False, False))
             if outside:
-                return True
+                answer = _letters_outside_links(item)
+                break
             if not inside:
-                return False
+                break
+            if runs is not None and (id(flow), j) in runs:
+                answer = runs[(id(flow), j)]
+                break
+            passed.append(j)
         j += 1
-    return False
+    if runs is not None:
+        for k in passed:
+            runs[(id(flow), k)] = answer
+    return answer
 
 
 def _links_home(href: str) -> bool:
