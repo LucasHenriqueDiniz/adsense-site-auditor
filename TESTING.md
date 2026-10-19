@@ -91,7 +91,7 @@ What the run showed, in full detail in `EXAMPLES.md`:
 | | |
 | --- | --- |
 | Passed the gate on | About (742 words), Contact (820 words), 12 guides with 8 over 1200 words, no placeholders, 25 navigation links with none broken |
-| Missed | 48 tool pages with a median of 220 words; 45 of them below 300. Withdrawn on 2026-10-18: the depth check counted one paragraph block per page. Rebuilt from that day's source and counted from each `<h1>` to the end of its FAQ, no tool page was below 300; the fixed depth check still puts one there — see the correction in `EXAMPLES.md`, Part 2 |
+| Missed | 48 tool pages with a median of 220 words; 45 of them below 300. Withdrawn on 2026-10-18: the depth check counted one paragraph block per page. Rebuilt from that day's source and counted from each `<h1>` to the end of its FAQ, no tool page was below 300, and as of 2026-10-19 the depth check agrees (none below 300, median 559) — see the correction in `EXAMPLES.md`, Part 2 |
 | Ruled out by measurement | duplication — 276 pairs compared, median similarity 0.134, maximum 0.327, none above the rubric's 0.40 safe band |
 
 The gate reads the home page, the trust pages and the guide count. On a

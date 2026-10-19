@@ -550,15 +550,27 @@ def test_menu_e_lateral_de_links_em_div_ficam_de_fora_da_regiao():
     assert d.status is Status.WARNING, d.reason
 
 
-def test_texto_sem_titulo_depois_do_bloco_que_decide_a_faixa_e_ERROR():
+@pytest.mark.parametrize(
+    "lista",
+    [
+        "<ul><li>{}</li></ul>",
+        # Um <p> dentro do <li> passa pela lista como o próprio <li> passaria.
+        "<ul><li><p>{}</p></li></ul>",
+    ],
+)
+def test_texto_sem_titulo_depois_do_bloco_que_decide_a_faixa_e_ERROR(lista):
     """O caso que estrutura nenhuma separa: um <div> de texto puro depois do
     bloco, sem heading. É uma lateral ou uma lista de casos de uso, e as duas
     se escrevem igual. Quando a faixa depende disso, a faixa não é medição —
-    a mesma regra do controle de mobília."""
+    a mesma regra do controle de mobília.
+
+    Itens de lista pontuam desde que estejam numa seção com heading. Esta não
+    tem: se pontuassem, as 400 palavras venceriam o post de 120 e seriam
+    contadas inteiras como o bloco principal, OK, sem dúvida nenhuma."""
     html = (
         '<html><body><div id="page"><h1>Titulo</h1>'
         f'<div class="content"><div class="entry"><p>{_palavras(120)}</p></div></div>'
-        f'<div class="widgets"><ul><li>{_ruido(400)}</li></ul></div>'
+        f'<div class="widgets">{lista.format(_ruido(400))}</div>'
         "</div></body></html>"
     )
     d = measure_depth(html)
@@ -601,6 +613,115 @@ def test_grade_de_cards_linkados_fica_de_fora_e_nao_vence_a_pontuacao(por_card):
     assert "ruido" not in d.text
     assert d.words == _palavras_da_ferramenta() + 2  # + "Mais ferramentas"
     assert d.status is Status.OK, d.reason
+
+
+def test_lista_em_secao_com_titulo_tira_a_vitoria_do_hero():
+    """smallwebapps.com/apps/compress-pdf-to-1mb/, 2026-08-30: o único <p> da
+    página era a descrição no hero, com o <h1> dentro dele. O resto — passos,
+    casos de uso, FAQ — estava em <ol>, <ul> e <details>, que não pontuavam. O
+    hero ganhava, o título estava dentro do vencedor, nada alargava: 182
+    palavras onde a referência tem 541. Com itens de lista pontuando nas suas
+    seções, uma seção vence, e a região a partir do <h1> pega a página."""
+    passos = "".join(f"<li>{_palavras(40)}</li>" for _ in range(3))
+    casos = "".join(f"<li>{_palavras(30)}</li>" for _ in range(3))
+    perguntas = "".join(
+        f"<details><summary>Pergunta um</summary><p>{_palavras(25)}</p></details>"
+        for _ in range(2)
+    )
+    html = (
+        f"<html><body><header><nav>{_ruido(20)}</nav></header>"
+        '<div class="tool-page">'
+        f'<section class="hero"><h1>Comprimir PDF</h1><p>{_palavras(60)}</p></section>'
+        '<div class="lower">'
+        f"<section><h2>Passos</h2><ol>{passos}</ol></section>"
+        f"<section><h2>Casos</h2><ul>{casos}</ul></section>"
+        f'<section class="faq"><h2>Perguntas</h2><div class="list">{perguntas}</div></section>'
+        "</div></div>"
+        f"<footer><p>{_ruido(10)}</p></footer></body></html>"
+    )
+    esperado = 2 + 60 + (1 + 120) + (1 + 90) + (1 + 2 * (2 + 25))
+    d = measure_depth(html)
+    assert d.words == esperado
+    assert "ruido" not in d.text
+
+
+def test_resposta_do_faq_credita_o_faq_e_nao_o_vazio():
+    """Um <p> de resposta dentro de <details> creditava o <details>, que não é
+    container, e o FAQ ganhava só a metade. Um <div> com um parágrafo maior
+    que cada resposta, e menor que todas juntas, levava a página. Sem <h1>,
+    sem alargamento: o que se mede é só a pontuação."""
+    perguntas = "".join(
+        f"<details><summary>Pergunta dois</summary><p>{_palavras(30)}</p></details>"
+        for _ in range(4)
+    )
+    html = (
+        "<html><body>"
+        f'<section class="faq"><h2>Perguntas</h2><div class="list">{perguntas}</div></section>'
+        # 539 caracteres: mais que a metade das quatro respostas (478), que era
+        # tudo o que o FAQ levava; menos que elas inteiras (956).
+        f'<div class="outro"><p>{_ruido(90)}</p></div>'
+        "</body></html>"
+    )
+    d = measure_depth(html)
+    assert "ruido" not in d.text
+    assert d.words == 4 * (2 + 30)
+
+
+def test_lista_na_mobilia_nao_pontua_mesmo_com_titulo():
+    """Um rodapé com colunas de endereço em <ul>, e um <h4> em cima: é uma
+    seção com heading, mas é a mobília da página. Itens de lista só pontuam
+    fora dela — um rodapé gordo não pode vencer o artigo."""
+    html = (
+        "<html><body>"
+        f'<div class="entry"><p>{_palavras(120)}</p></div>'
+        f'<footer><div class="cols"><h4>Endereco</h4><ul><li>{_ruido(300)}</li></ul></div></footer>'
+        "</body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 120
+    assert "ruido" not in d.text
+
+
+def test_menu_de_links_com_titulo_nao_pontua():
+    """Um menu em <div> com um <h3> em cima tem seção e heading; o que ele não
+    tem é texto que não seja link. Item só de link é navegação e não pontua."""
+    itens = "".join(f'<li><a href="/c{i}">{_ruido(2)}</a></li>' for i in range(100))
+    html = (
+        "<html><body>"
+        f'<div class="menu"><h3>Categorias</h3><ul>{itens}</ul></div>'
+        f'<div class="entry"><p>{_palavras(120)}</p></div>'
+        "</body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 120
+    assert "ruido" not in d.text
+
+
+def test_o_body_nao_e_secao_de_ninguem():
+    """Um <h2> em qualquer lugar da página põe um heading dentro do <body>. Se
+    isso bastasse, toda lista solta direto no body teria "seção com heading":
+    a lateral pontua, vence, e o teto do body a devolve sozinha como o
+    conteúdo — 400 palavras de chrome, OK."""
+    html = (
+        "<html><body><h1>Titulo</h1>"
+        f'<div class="content"><h2>Parte</h2><div class="entry"><p>{_palavras(120)}</p></div></div>'
+        f'<div class="widgets"><ul><li>{_ruido(400)}</li></ul></div>'
+        "</body></html>"
+    )
+    d = measure_depth(html)
+    assert "ruido" not in d.text
+
+
+def test_collect_nunca_pula_o_proprio_no():
+    """`_collect(no, skip)` com o próprio nó no conjunto devolve o texto dele:
+    é como a pontuação lê só as palavras de cada bloco, passando o conjunto de
+    todos os blocos da página de uma vez."""
+    from adsense_checks.text import _collect, _iter_elements, _parse
+
+    doc = _parse("<ul><li>rotulo<ul><li>filho</li></ul></li></ul>")
+    externo = next(n for n in _iter_elements(doc.root) if n.tag == "li")
+    blocos = frozenset(n for n in _iter_elements(doc.root) if n.tag == "li")
+    assert _collect(externo, skip=blocos).split() == ["rotulo"]
 
 
 def test_texto_solto_depois_do_bloco_que_decide_a_faixa_e_ERROR():

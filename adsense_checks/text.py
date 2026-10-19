@@ -153,9 +153,27 @@ INLINE_ELEMENTS = frozenset(
     }
 )
 
-# Containers that can plausibly hold an article body. A `<p>` inside anything
-# else scores nothing, which is what keeps a menu of links from winning.
+# Containers that can plausibly hold an article body. A text block credits
+# only these, past any list structure between them (`LIST_STRUCTURE`); one
+# inside anything else scores nothing, which is what keeps a menu from winning.
 CONTENT_CONTAINERS = frozenset({"article", "body", "div", "main", "section", "td"})
+
+# Prose that is not written as `<p>`: a list item, a term and its description,
+# the question a `<details>` asks. Tool pages, FAQs and how-tos keep most of
+# their text in these, and with `<p>` alone scoring, the paragraph scoring saw
+# a fifth of it — measured on smallwebapps.com, 2026-10-18: with no `<h1>` to
+# widen from, 28 tool pages read a median of 22% of what a reader counts.
+TEXT_BLOCKS = frozenset({"dd", "dt", "li", "summary"})
+
+# The structure those blocks hang from. None of it is a place an article lives,
+# so a block's credit passes through it to the container that holds the list:
+# a `<li>` credits the `<section>` around its `<ul>`, an answer `<p>` inside a
+# `<details>` credits the FAQ around it. Before, both credited nothing.
+LIST_STRUCTURE = frozenset({"dd", "details", "dl", "dt", "li", "ol", "summary", "ul"})
+
+# A section of the page's outline is a heading and what follows it. The page's
+# own `<h1>` heads the whole page, so it vouches for no section in particular.
+SUBHEADINGS = frozenset({"h2", "h3", "h4", "h5", "h6"})
 
 # Winning the main-content heuristic with one of these means it did not run:
 # they are the page, not a part of it, so the "main content" they return is the
@@ -342,9 +360,10 @@ def _collect(node: _Node, skip: frozenset[_Node] = frozenset()) -> str:
 
     `skip` drops whole subtrees, named by identity rather than by tag: which
     `<header>` is furniture depends on where it sits, and only the caller knows
-    (see `_furniture`). It never holds `node` itself — the caller asked for
+    (see `_furniture`). It never drops `node` itself — the caller asked for
     this element's text, and "" for it would read as an empty page rather than
-    as a refusal to answer.
+    as a refusal to answer — so a set that happens to hold `node` (every text
+    block on the page, when the caller wants one block's own words) is safe.
     """
     out: list[str] = []
     # Iterative: 5000 unclosed <div>s in a malformed page would blow a
@@ -356,7 +375,7 @@ def _collect(node: _Node, skip: frozenset[_Node] = frozenset()) -> str:
             out.append(item)
             continue
         block = item.tag != "#document" and item.tag not in INLINE_ELEMENTS
-        if item.dropped or item in skip:
+        if item.dropped or (item in skip and item is not node):
             # The subtree goes; the boundary it drew stays. Leaving with the
             # separator unwritten is the welding this module exists to stop:
             # `abc<nav>x</nav>def` would come back as "abcdef", one word that
@@ -710,6 +729,30 @@ def _titled_region(title: _Node | None, block: _Node) -> _Node:
     return block if region.tag in WHOLE_PAGE_ELEMENTS else region
 
 
+def _subheaded(root: _Node) -> frozenset[_Node]:
+    """Every live element under `root` that holds an `<h2>`-`<h6>` somewhere below
+    it. One walk down and one back up, like `_link_words`, so asking it per
+    list item costs nothing."""
+    order: list[_Node] = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        order.append(node)
+        stack.extend(c for c in node.content if isinstance(c, _Node) and not c.dropped)
+    holds: set[_Node] = set()
+    for node in reversed(order):
+        if any(isinstance(c, _Node) and (c in holds or c.tag in SUBHEADINGS) for c in node.content):
+            holds.add(node)
+    return frozenset(holds)
+
+
+def _past_lists(node: _Node | None) -> _Node | None:
+    """`node`, or the first element above it that is not list structure."""
+    while node is not None and node.tag in LIST_STRUCTURE:
+        node = node.parent
+    return node
+
+
 def _richest(nodes: list[_Node]) -> _Node | None:
     """The node with the most words, or None when they are all empty."""
     best: _Node | None = None
@@ -752,8 +795,11 @@ def _main_container(doc: _Parser, url: str = "") -> _MainContent:
             return _MainContent(found, True)
 
     # Readability-style scoring: a paragraph credits its container, and half of
-    # itself to the container above. A nav or a sidebar has links and list
-    # items but no <p>, so it scores zero and cannot win.
+    # itself to the container above. A list item, a term, a description and a
+    # `<details>` question score the same way (`TEXT_BLOCKS`), and the list
+    # structure between any block and its container is passed through
+    # (`LIST_STRUCTURE`). A menu still cannot win: its items are link text, and
+    # its `<nav>` is furniture — the new blocks score only outside both.
     scores: dict[int, float] = {}
     nodes: dict[int, _Node] = {}
 
@@ -787,10 +833,68 @@ def _main_container(doc: _Parser, url: str = "") -> _MainContent:
     # copyright `<p>` in its footer is no competitor: counting it as one sent
     # the page to the body and reported a thin listing as unmeasurable.
     in_furniture = _subtrees(page_furniture)
-    competes = any(node not in in_furniture for node, _ in text_paragraphs)
-    for node, weight in text_paragraphs if competes else text_paragraphs + link_paragraphs:
-        credit(node.parent, weight)
-        credit(node.parent.parent if node.parent else None, weight / 2)
+    subheaded = _subheaded(doc.root)
+
+    def headed_section(block: _Node) -> tuple[_Node | None, _Node | None] | None:
+        """Where a block's credit lands once it passes through list structure —
+        the container around the list and the one above — when either of them
+        heads a section. A plain list in a `<div>`, with no heading near it, is
+        a sidebar as easily as a list of use cases, and scoring it let a 400-word
+        sidebar out-score a 120-word post and be counted whole as the article.
+        """
+        holder = _past_lists(block.parent)
+        above = _past_lists(holder.parent) if holder is not None else None
+        for candidate in (holder, above):
+            if (
+                candidate is not None
+                and candidate.tag not in WHOLE_PAGE_ELEMENTS
+                and candidate in subheaded
+            ):
+                return holder, above
+        return None
+
+    # In document order, so that a tie keeps resolving to the first container.
+    in_order = [n for n in _iter_elements(doc.root) if n.tag == "p" or n.tag in TEXT_BLOCKS]
+    every_block = frozenset(in_order)
+    targets: dict[_Node, tuple[_Node | None, _Node | None]] = {}
+    text_blocks: list[tuple[_Node, float]] = []
+    for node in in_order:
+        if node.tag == "p":
+            # A paragraph inside a list or a `<details>` passes through it into
+            # a headed section; anywhere else it credits its parent and
+            # grandparent exactly as it always has.
+            parent = node.parent
+            section = (
+                headed_section(node)
+                if parent is not None and parent.tag in LIST_STRUCTURE
+                else None
+            )
+            targets[node] = section or (parent, parent.parent if parent is not None else None)
+            continue
+        if node in in_furniture:
+            continue
+        inside, outside = link_words[node]
+        if inside and not outside:
+            continue
+        section = headed_section(node)
+        if section is None:
+            continue
+        # Each by its own words: a `<li>` holding a nested list is credited for
+        # its label, and each nested item for itself.
+        weight = float(len(_normalize(_collect(node, skip=every_block))))
+        if weight > 0:
+            targets[node] = section
+            text_blocks.append((node, weight))
+    competes = bool(text_blocks) or any(node not in in_furniture for node, _ in text_paragraphs)
+    allowed = {n for n, _ in text_paragraphs} | {
+        n for n, _ in (text_blocks if competes else link_paragraphs)
+    }
+    weights = dict(text_paragraphs + link_paragraphs + text_blocks)
+    for node in in_order:
+        if node in allowed:
+            container, above = targets[node]
+            credit(container, weights[node])
+            credit(above, weights[node] / 2)
 
     if scores:
         # Deepest wins a tie, so a chain of wrapper divs resolves to the
@@ -927,7 +1031,11 @@ def main_content_text(html: str, *, url: str = "") -> str:
          teasers into a substantial-looking page.
       3. otherwise the container scoring highest on paragraph text: each `<p>`
          credits its parent container fully and its grandparent by half, and a
-         `<p>` that is all link text scores only when no other does. The
+         `<p>` that is all link text scores only when no other does. List
+         items, terms, descriptions and `<details>` questions score too, by
+         their own words, when they sit in a section with a heading and
+         outside the furniture; their credit, and that of a `<p>` inside a
+         list, passes through the list to the container around it. The
          winner is widened to the smallest element that also holds the page's
          `<h1>`, never as far as the `<body>` (see `_titled_region`). What the
          widening collects beside the title and the block loses its

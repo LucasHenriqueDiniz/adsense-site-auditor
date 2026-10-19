@@ -365,9 +365,11 @@ Behaviour observed in the runs above, recorded here because a reader will hit it
   `<body>`, the block is measured alone — an undercount, kept because counting
   the body is the menu-and-footer number the script refuses everywhere else.
   When the `<h1>` sits inside the winning block itself — a hero whose
-  description is the page's densest paragraph — nothing widens: one of the 142
-  tool pages in the 2026-08-30 reconstruction (Part 2) measures 182 where the
-  reference holds 541. Plain text that is not content but carries a heading, or
+  description is the page's densest paragraph — nothing widens. One of the 142
+  tool pages in the 2026-08-30 reconstruction (Part 2) measured 182 where the
+  reference holds 541; since 2026-10-19 list items in a headed section score,
+  a section out-scores that hero, and the page reads 547. The shape remains
+  wherever a hero still out-scores every section. Plain text that is not content but carries a heading, or
   sits between the `<h1>` and the block, is counted without a doubt raised. And
   a link list with any word outside its links — "News (15)" — is text, so it
   stays in.
@@ -411,8 +413,10 @@ day, and as it stands after the fix.
 | depth check as of 2026-10-18, after the fix | 559 | 182 | 1274 | 1 |
 | `<h1>` to the end of the FAQ, related-tools grid left out | 553 | 396 | 1268 | 0 |
 
-The page the fixed check still puts below 300 is the one "Known gaps" names: an
-`<h1>` inside the block the scoring elects.
+The page the fixed check put below 300 is the one "Known gaps" names: an `<h1>`
+inside the block the scoring elects. Since 2026-10-19, when list items in a
+headed section began to score, it reads 547, and the 142 read a median of 559,
+lowest 402, none below 300.
 
 The code of 2026-08-30 is commit `c2df5d5`. A squash or rebase merge leaves that
 commit off `master`, so it is cited where GitHub keeps it whatever the merge:
