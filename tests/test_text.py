@@ -359,19 +359,26 @@ def test_titulo_e_bloco_que_so_se_encontram_no_body_nao_contam_o_body():
     página. Contar o body — mesmo sem a mobília — é a contagem que
     `measure_depth` recusa em todo outro caminho, então o bloco volta sozinho.
 
-    É uma subcontagem conhecida, não uma medição boa: as outras seções ficam
-    de fora, como antes da correção. Registrada em EXAMPLES.md, "Known gaps"."""
+    O teste fixa essa recusa, não o número que ela dá hoje. Hoje é o bloco
+    sozinho, uma subcontagem registrada em EXAMPLES.md, "Known gaps"; uma
+    correção que recupere as seções irmãs sem contar o body tem de passar
+    aqui. O que a denuncia é o banner de cookies: um <div> de texto puro,
+    fora de qualquer mobília, que só entra na conta se o body entrar. Sem ele,
+    o body menos a mobília soma exatamente o conteúdo, e contar a página
+    inteira não deixaria rastro nenhum."""
     html = (
         "<html><body>"
         f"<header><nav>{_ruido(20)}</nav></header>"
         "<h1>Girar paginas de PDF</h1>"
         f'<div class="lower">{_secoes()}</div>'
         f"<footer><p>{_ruido(20)}</p></footer>"
+        f'<div class="cookie-banner">{_ruido(20)}</div>'
         "</body></html>"
     )
+    conteudo = word_count("Girar paginas de PDF") + sum(2 + n for n in SECOES_DA_FERRAMENTA)
     d = measure_depth(html)
-    assert d.words == max(SECOES_DA_FERRAMENTA)
     assert "ruido" not in d.text
+    assert max(SECOES_DA_FERRAMENTA) <= d.words <= conteudo
 
 
 # --------------------------------------------------------------------------

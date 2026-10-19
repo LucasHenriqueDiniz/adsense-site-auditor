@@ -446,7 +446,7 @@ def _link_only(roots: list[_Node]) -> frozenset[_Node]:
     return frozenset(found)
 
 
-def _page_title(doc: _Parser) -> _Node | None:
+def _page_title(body: _Node, furniture: frozenset[_Node]) -> _Node | None:
     """The page's own `<h1>`: the first one with words that is neither furniture
     nor a link.
 
@@ -456,9 +456,9 @@ def _page_title(doc: _Parser) -> _Node | None:
     furniture says so. Inside `<div id="header">` nothing does, except that a
     logo is a link home: `<h1><a href="/">Brand</a></h1>` is link-only, and a
     page's title is not.
+
+    `furniture` is `_furniture(body)`, which the caller already holds.
     """
-    body = _find_body(doc)
-    furniture = _furniture(body)
     for node in _iter_elements(body):
         if node.tag != "h1" or word_count(_collect(node)) == 0:
             continue
@@ -484,7 +484,7 @@ def _has_heading(node: _Node, skip: frozenset[_Node]) -> bool:
 
 
 def _beside_the_content(
-    region: _Node, title: _Node, block: _Node
+    region: _Node, title: _Node, block: _Node, page_furniture: frozenset[_Node]
 ) -> tuple[frozenset[_Node], frozenset[_Node]]:
     """What a widened region holds besides its title, its block and the path
     between them: what to leave out, and what nobody can say is content.
@@ -509,6 +509,13 @@ def _beside_the_content(
     collect. Outside both, a `<div>` of plain text is a sidebar or a list of use
     cases, and structure cannot say which. It stays in the count;
     `measure_depth` refuses the count when the verdict depends on it.
+
+    `page_furniture` is `_furniture` of the body. The region's own is the part
+    of it below the region: no `<article>` with words sits above the region,
+    or the article would have won `_main_container` first, so nothing between
+    the body and the region can claim a piece of furniture differently. The
+    region itself is never in it, since it holds a title `_page_title` proved
+    is outside all furniture.
     """
     paths = set(_ancestors(title)) | set(_ancestors(block))
     # The region is in the order too: a title left unclosed swallows the rest of
@@ -522,7 +529,7 @@ def _beside_the_content(
             if not isinstance(child, _Node) or child.dropped or child is title or child is block:
                 continue
             (stack if child in paths else branches).append(child)
-    furniture = _furniture(region)
+    furniture = frozenset(f for f in page_furniture if region in _ancestors(f.parent))
     left_out = furniture | _link_only([b for b in branches if b not in furniture])
     undecided = frozenset(
         branch
@@ -647,14 +654,19 @@ def _main_container(doc: _Parser) -> _MainContent:
         # the body wins, nothing was separated from anything.
         if winner.tag in WHOLE_PAGE_ELEMENTS:
             return _MainContent(winner, False)
-        title = _page_title(doc)
+        body = _find_body(doc)
+        # Computed once: the title search and the region both read it.
+        page_furniture = _furniture(body)
+        title = _page_title(body, page_furniture)
         region = _titled_region(title, winner)
         if region is winner:
             # The title is inside the block, or there is none to widen to. The
             # block's own furniture stays in the count, where `measure_depth`'s
             # control can still see it.
             return _MainContent(winner, True)
-        return _MainContent(region, True, *_beside_the_content(region, title, winner))
+        return _MainContent(
+            region, True, *_beside_the_content(region, title, winner, page_furniture)
+        )
 
     return _MainContent(_find_body(doc), False)
 
@@ -856,11 +868,13 @@ def measure_depth(html: str, *, min_words: int = DEFAULT_MIN_WORDS, url: str = "
     total = word_count(_visible_text(doc))
     # The same container with its page furniture removed. Never reported as
     # the count — it is only the control that says whether `words` is a
-    # measurement of the article or of the menu wrapped around it. For a
-    # region `_titled_region` widened, `outside` already holds that furniture,
-    # so the two counts agree and the control has nothing left to catch.
-    editorial_words = word_count(
-        _normalize(_collect(container, skip=outside | _furniture(container)))
+    # measurement of the article or of the menu wrapped around it. A region
+    # `_titled_region` widened has its furniture in `outside` already, so the
+    # recount would only reproduce `words`, and is skipped.
+    editorial_words = (
+        words
+        if outside
+        else word_count(_normalize(_collect(container, skip=_furniture(container))))
     )
     # The second control, for a widened region only: the count without the
     # branches `_beside_the_content` could not call content or page.
