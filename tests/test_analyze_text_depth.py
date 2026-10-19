@@ -143,3 +143,16 @@ def test_min_words_1_e_aceito(server, monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["analyze_text_depth.py", "--min-words", "1", base + "/"])
     analyze_text_depth.main()
     assert "min 1 words" in capsys.readouterr().out
+
+
+def test_uma_sessao_para_todas_as_paginas(server, monkeypatch, capsys, sessoes):
+    base, routes = server
+    for caminho in ("/a", "/b", "/c"):
+        routes[caminho] = (200, {"Content-Type": "text/html; charset=utf-8"}, pagina(320))
+
+    urls = [f"{base}/a", f"{base}/b", f"{base}/c"]
+    monkeypatch.setattr("sys.argv", ["analyze_text_depth.py", *urls])
+    analyze_text_depth.main()
+
+    assert len(routes.received) == 3
+    assert sessoes == {"abertas": 1, "fechadas": 1}

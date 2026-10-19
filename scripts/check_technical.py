@@ -20,6 +20,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import requests
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from adsense_checks.http import (  # noqa: E402
@@ -50,7 +52,9 @@ SLOW_RESPONSE_MS = 2500
 _REQ_ROBOTS = "ADS-CRAWL-02"
 
 
-def _robots(base: str, timeout: int) -> tuple[Line, Robots]:
+def _robots(
+    base: str, timeout: float, session: requests.Session | None = None
+) -> tuple[Line, Robots]:
     """ADS-CRAWL-02 — read robots.txt and say whether it shuts a crawler out.
 
     Every return carries the requirement ID. Only the success path used to, so a
@@ -70,7 +74,7 @@ def _robots(base: str, timeout: int) -> tuple[Line, Robots]:
     # typed asked a subdirectory install for `/blog/robots.txt`, took the 404 as
     # "absent: everything is crawlable", and reported a site as fully open
     # without having fetched the file that governs it.
-    response = fetch(url, timeout=timeout)
+    response = fetch(url, timeout=timeout, session=session)
     code = response.status_code
 
     def unreadable(status: Status, note: str) -> tuple[Line, Robots]:
@@ -200,7 +204,16 @@ def main() -> int:
         # comparison at all and so fails this one.
         parser.error(f"--timeout must be greater than 0 and less than {MAX_WAIT_SECONDS}")
 
-    home = fetch(args.url, timeout=args.timeout)
+    # One session for the whole run, closed at the end. Each `fetch` without one
+    # built its own and never closed it: a new TCP and TLS handshake to the same
+    # host for the home page, robots.txt, every sitemap candidate, every child
+    # and every sampled URL, up to some 37 of them.
+    with requests.Session() as session:
+        return _report(args, session)
+
+
+def _report(args: argparse.Namespace, session: requests.Session) -> int:
+    home = fetch(args.url, timeout=args.timeout, session=session)
     lines: list[Line] = []
 
     if home.error is not None:
@@ -238,15 +251,15 @@ def main() -> int:
     # the typed URL is the fallback for when nothing answered at all.
     base = home.final_url or args.url
 
-    robots_line, robots = _robots(base, args.timeout)
+    robots_line, robots = _robots(base, args.timeout, session)
     lines.append(robots_line)
 
-    sitemap = check_sitemap(base, robots=robots, timeout=args.timeout)
+    sitemap = check_sitemap(base, robots=robots, timeout=args.timeout, session=session)
     # ADS-CRAWL-07 asks that the advertised URLs answer 200. `verify_sample_urls`
     # existed for it and had no caller outside the tests, so the check printed
     # PASS having never fetched one of them — the very thing `_availability`
     # refuses to do for ADS-CRAWL-06, one function over.
-    sample = verify_sample_urls(sitemap, timeout=args.timeout)
+    sample = verify_sample_urls(sitemap, timeout=args.timeout, session=session)
     # `reasons` is empty when nothing went wrong, and a bare `[PASS] sitemap` line
     # leaves the reader unable to tell "observed and correct" from "never ran" —
     # the guard crawl_site.py and check_completeness.py both install, and the one

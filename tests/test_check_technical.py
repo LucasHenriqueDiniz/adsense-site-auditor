@@ -400,3 +400,20 @@ def test_o_maior_timeout_que_o_socket_aceita_nao_e_recusado(server, monkeypatch,
     check_technical.main()
 
     assert "/" in [caminho for _metodo, caminho, _headers in routes.received]
+
+
+def test_uma_sessao_para_a_execucao_inteira(server, monkeypatch, capsys, sessoes):
+    """Home, robots.txt, os candidatos de sitemap e a amostra de URLs: antes,
+    uma sessão nova por requisição, nenhuma fechada."""
+    base, rotas = server
+    rotas["/"] = (200, {"Content-Type": "text/html"}, "<html><body><p>oi</p></body></html>")
+    rotas["/robots.txt"] = (200, {"Content-Type": "text/plain"}, "User-agent: *\nAllow: /\n")
+    rotas["/sitemap.xml"] = (200, {"Content-Type": "application/xml"}, _sitemap(base))
+    for caminho in ("/a", "/b"):
+        rotas[caminho] = (200, {"Content-Type": "text/html"}, "<html></html>")
+
+    monkeypatch.setattr("sys.argv", ["check_technical.py", base + "/"])
+    check_technical.main()
+
+    assert len(rotas.received) >= 5
+    assert sessoes == {"abertas": 1, "fechadas": 1}

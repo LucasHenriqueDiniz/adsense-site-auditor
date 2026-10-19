@@ -217,3 +217,16 @@ def test_limiar_minusculo_sai_impresso_inteiro_e_nao_arredondado_a_zero(
 
         assert f"2 pages at similarity >= {valor}:" in saida, valor
         assert codigo == 1, valor
+
+
+def test_uma_sessao_para_todas_as_paginas(server, monkeypatch, capsys, sessoes):
+    base, routes = server
+    routes["/a"] = (200, HTML, pagina(AFIACAO))
+    routes["/b"] = (200, HTML, pagina(SECAGEM))
+    routes["/c"] = (200, HTML, pagina(AFIACAO + SECAGEM))
+
+    monkeypatch.setattr("sys.argv", ["check_duplicates.py", f"{base}/a", f"{base}/b", f"{base}/c"])
+    check_duplicates.main()
+
+    assert len(routes.received) == 3
+    assert sessoes == {"abertas": 1, "fechadas": 1}

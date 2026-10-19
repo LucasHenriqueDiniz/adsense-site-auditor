@@ -118,3 +118,30 @@ def outro_servidor():
     yield base, routes
     httpd.shutdown()
     httpd.server_close()
+
+
+@pytest.fixture
+def sessoes(monkeypatch):
+    """Conta as `requests.Session` abertas e fechadas durante o teste.
+
+    O `fetch` monta uma sessão própria quando não recebe nenhuma, e nunca a
+    fecha. Uma CLI que não compartilha a sua abre uma por requisição: um
+    handshake TCP e TLS novo, contra o mesmo host, a cada página. A contagem é
+    o que a rede não mostra contra o servidor de teste, que fecha a conexão a
+    cada resposta de qualquer jeito.
+    """
+    import requests
+
+    contagem = {"abertas": 0, "fechadas": 0}
+
+    class _Contada(requests.Session):
+        def __init__(self):
+            super().__init__()
+            contagem["abertas"] += 1
+
+        def close(self):
+            contagem["fechadas"] += 1
+            super().close()
+
+    monkeypatch.setattr(requests, "Session", _Contada)
+    return contagem

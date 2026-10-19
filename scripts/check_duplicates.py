@@ -5,6 +5,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import requests
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from adsense_checks.duplicates import check_urls  # noqa: E402
@@ -41,7 +43,10 @@ def main() -> int:
         # while 1 — "group only byte-identical extractions" — is kept.
         parser.error("--threshold must be greater than 0 and at most 1")
 
-    result = check_urls(args.urls, threshold=args.threshold)
+    # One session for every page, closed at the end, instead of one per page
+    # that nothing closed.
+    with requests.Session() as session:
+        result = check_urls(args.urls, threshold=args.threshold, session=session)
     findings = list(result.reasons)
     for group in result.groups:
         # The threshold as typed, not a rounding of it. `:.2f` printed every
