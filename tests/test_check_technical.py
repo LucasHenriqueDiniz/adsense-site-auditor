@@ -459,3 +459,33 @@ def test_a_sessao_compartilhada_nao_carrega_cookie_da_home(server, monkeypatch, 
     assert depois_da_home
     assert all("Cookie" not in headers for _m, _c, headers in depois_da_home)
     assert "0 of 2 sampled URL(s) answered 200" in saida
+
+
+def test_amostra_recusada_diz_para_onde_redirecionava(
+    server, outro_servidor, monkeypatch, capsys
+):
+    """Uma URL da amostra que redireciona para um endereço interno não é pedida
+    lá, e a linha do sitemap diz isso. "-> HTTP 302" sozinho leria como uma
+    página que respondeu."""
+    import adsense_checks.sitemap as sitemap
+    from adsense_checks.crawl import same_site
+
+    base, routes = server
+    interno, rotas_internas = outro_servidor
+    real = sitemap.private_address
+    monkeypatch.setattr(
+        sitemap, "private_address", lambda url: False if same_site(url, base) else real(url)
+    )
+    routes["/robots.txt"] = (200, {"Content-Type": "text/plain"}, "User-agent: *\nAllow: /\n")
+    routes["/"] = (200, {"Content-Type": "text/html"}, "<html><body>ok</body></html>")
+    routes["/sitemap.xml"] = (200, {"Content-Type": "application/xml"}, _sitemap(base))
+    routes["/a"] = (302, {"Location": interno + "/painel"}, "")
+    routes["/b"] = (200, {"Content-Type": "text/html"}, "<html>b</html>")
+
+    monkeypatch.setattr("sys.argv", ["check_technical.py", base + "/"])
+    check_technical.main()
+    saida = capsys.readouterr().out
+
+    assert rotas_internas.received == []
+    assert "1 of 2 sampled URL(s) answered 200" in saida
+    assert f"{base}/a redirects to {interno}/painel, a loopback, private or link-local" in saida

@@ -266,7 +266,11 @@ def _report(args: argparse.Namespace, session: requests.Session) -> int:
     # the guard crawl_site.py and check_completeness.py both install, and the one
     # script that lacked it.
     if sample.checked:
-        bad = [f"{u} -> HTTP {c}" for u, st, c in sample.checked if st is not Status.OK]
+        bad = [
+            f"{u} {sample.refused[u]}" if u in sample.refused else f"{u} -> HTTP {c}"
+            for u, st, c in sample.checked
+            if st is not Status.OK
+        ]
         sitemap.status = escalate(sitemap.status, sample.status)
         sitemap.note(
             f"{sample.ok_count} of {len(sample.checked)} sampled URL(s) answered 200"

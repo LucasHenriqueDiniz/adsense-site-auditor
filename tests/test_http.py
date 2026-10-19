@@ -868,3 +868,33 @@ def test_redirect_em_loop_respeita_o_max_redirects_da_sessao(server):
 
     assert r.error == "TooManyRedirects: Exceeded 3 redirects."
     assert [c for _m, c, _h in routes.received] == ["/volta"] * 4
+
+
+def test_um_salto_recusado_nao_sai_e_a_cadeia_para_no_3xx_que_o_nomeou(server):
+    """`refuse_hop` é perguntado sobre cada alvo de redirect ANTES de ele sair.
+
+    Uma regra aplicada só à URL pedida é uma regra que um redirect contorna: um
+    sitemap do próprio site respondendo 302 para um endereço interno levava o
+    auditor até lá. A URL pedida não passa pela pergunta — é do chamador — e o
+    alvo recusado não chega ao fio.
+    """
+    base, routes = server
+    routes["/a"] = (302, {"Location": "/b"}, "")
+    routes["/b"] = (302, {"Location": "/c"}, "")
+    routes["/c"] = (200, {"Content-Type": "text/html"}, "<html>c</html>")
+
+    r = fetch(base + "/a", refuse_hop=lambda url: "nao" if url.endswith("/c") else None)
+
+    assert [c for _m, c, _h in routes.received] == ["/a", "/b"]
+    assert r.refused_url == base + "/c"
+    assert r.error == "RefusedRedirect: nao"
+    assert r.final_url == base + "/b"
+    assert r.status_code == 302
+    assert r.redirect_chain == [(302, base + "/a"), (302, base + "/b")]
+    assert r.ok is False
+
+    routes.received.clear()
+    tudo = fetch(base + "/a", refuse_hop=lambda url: "nao")
+
+    assert [c for _m, c, _h in routes.received] == ["/a"]
+    assert tudo.refused_url == base + "/b"

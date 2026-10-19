@@ -49,7 +49,14 @@ from xml.etree import ElementTree
 import requests
 
 from adsense_checks.crawl import looks_like_document, same_site, site_host
-from adsense_checks.http import DEFAULT_TIMEOUT, Fetch, fetch, join_url, split_url
+from adsense_checks.http import (
+    DEFAULT_TIMEOUT,
+    Fetch,
+    HopRefusal,
+    fetch,
+    join_url,
+    split_url,
+)
 from adsense_checks.robots import Robots, parse_robots
 from adsense_checks.status import Status, escalate
 
@@ -388,8 +395,44 @@ def private_address(url: str) -> bool:
     return any(not ipaddress.ip_address(address).is_global for address in addresses)
 
 
+def _private_refusal(base_url: str) -> HopRefusal:
+    """The one rule for which URLs this module will not request, for `base_url`.
+
+    A public site's sitemap, robots.txt or listed pages are never on a loopback,
+    private or link-local address, so a URL there that is not on the audited
+    site itself is refused; a site audited on such an address keeps reading its
+    own. The same function judges a URL robots.txt declares and every redirect
+    target, through `fetch`'s `refuse_hop`: checked on the declared URL alone,
+    a sitemap on the audited site answering a 302 to the internal address took
+    the auditor there anyway.
+
+    What it does not close: the address is resolved here and again when the
+    connection is made, so a name that answers public now and private a moment
+    later passes. Holding the connection to the address that was checked is a
+    transport-level change this module does not make.
+    """
+    base_is_private = private_address(base_url)
+
+    def refuse(url: str) -> str | None:
+        if base_is_private or same_site(url, base_url) or not private_address(url):
+            return None
+        return f"{url} is a loopback, private or link-local address"
+
+    return refuse
+
+
+def _refused_reason(got: Fetch) -> str:
+    return (
+        f"redirects to {got.refused_url}, a loopback, private or link-local address;"
+        " not followed"
+    )
+
+
 def _fetch_doc(
-    url: str, session: requests.Session | None, timeout: float
+    url: str,
+    session: requests.Session | None,
+    timeout: float,
+    refuse_hop: HopRefusal | None = None,
 ) -> tuple[SitemapDoc, Fetch]:
     """Fetch and parse one sitemap URL through the shared fetch path."""
     if split_url(url).path.lower().endswith(".gz"):
@@ -399,7 +442,11 @@ def _fetch_doc(
         doc = SitemapDoc(url=url, status=Status.ERROR, reason="gzipped sitemap; not readable here")
         return doc, Fetch(url=url)
 
-    got = fetch(url, timeout=timeout, session=session, max_bytes=MAX_SITEMAP_BYTES)
+    got = fetch(
+        url, timeout=timeout, session=session, max_bytes=MAX_SITEMAP_BYTES, refuse_hop=refuse_hop
+    )
+    if got.refused_url:
+        return SitemapDoc(url=url, status=Status.WARNING, reason=_refused_reason(got)), got
     if not got.ok:
         reason = got.error or f"HTTP {got.status_code}"
         return SitemapDoc(url=url, status=got.status, reason=reason), got
@@ -454,13 +501,29 @@ def _fold_failed_candidate(
 
 
 def _load_robots(
-    base_url: str, session: requests.Session | None, timeout: float
-) -> tuple[Robots, str]:
-    """Fetch and parse robots.txt. An unreachable file is 'allow all', per Google."""
-    got = fetch(join_url(base_url, "/robots.txt"), timeout=timeout, session=session)
+    base_url: str,
+    session: requests.Session | None,
+    timeout: float,
+    refuse_hop: HopRefusal | None = None,
+) -> tuple[Robots, str, Status]:
+    """Fetch and parse robots.txt, with a note and the status the load adds.
+
+    An unreachable file is 'allow all', per Google, and adds nothing. One that
+    redirects to an address `refuse_hop` refuses is not read either, and that
+    is a WARNING, as a `Sitemap:` line pointing there is.
+    """
+    got = fetch(
+        join_url(base_url, "/robots.txt"), timeout=timeout, session=session, refuse_hop=refuse_hop
+    )
+    if got.refused_url:
+        return Robots(missing=True), f"robots.txt {_refused_reason(got)}", Status.WARNING
     if not got.ok:
-        return Robots(missing=True), f"robots.txt not read ({got.error or got.status_code})"
-    return parse_robots(got.text), ""
+        return (
+            Robots(missing=True),
+            f"robots.txt not read ({got.error or got.status_code})",
+            Status.OK,
+        )
+    return parse_robots(got.text), "", Status.OK
 
 
 def check_sitemap(
@@ -495,23 +558,22 @@ def check_sitemap(
         result.note(f"invalid base URL {base_url!r}: expected http(s) scheme and host")
         return result
 
+    # Resolved once, and the same rule for the URLs robots.txt declares and for
+    # every redirect target below.
+    refuse = _private_refusal(base_url)
+
     if robots is None:
-        robots, note = _load_robots(base_url, session, timeout)
+        robots, note, status = _load_robots(base_url, session, timeout, refuse)
         result.note(note)
+        result.status = escalate(result.status, status)
 
     declared: set[str] = set()
     if not robots.missing:
         declared = {join_url(base_url, s.strip()) for s in robots.sitemaps}
     result.candidates = discover_sitemap_urls(base_url, robots)
 
-    # Resolved once: every candidate is compared with it.
-    base_is_private = private_address(base_url)
     for candidate in result.candidates:
-        if (
-            not base_is_private
-            and not same_site(candidate, base_url)
-            and private_address(candidate)
-        ):
+        if refuse(candidate) is not None:
             # A `Sitemap:` line is the site's to write, and it can point
             # anywhere: `http://169.254.169.254/...` or `http://localhost:8080/`
             # made this auditor request them from the operator's own network.
@@ -524,9 +586,16 @@ def check_sitemap(
                 " not fetched"
             )
             continue
-        doc, got = _fetch_doc(candidate, session, timeout)
+        doc, got = _fetch_doc(candidate, session, timeout, refuse)
         if _requested(got):
             result.documents_fetched += 1
+        if got.refused_url:
+            # The same refusal one hop later. Folded with the failed candidates
+            # it would be silent at a conventional path, which reports only a
+            # FAIL or an ERROR there.
+            result.status = escalate(result.status, Status.WARNING)
+            result.note(f"sitemap {candidate} {doc.reason}")
+            continue
         if doc.oversized:
             # Found, and too large to be read. Folded with the failed candidates
             # it was "not readable" at a conventional path, and the run then
@@ -569,7 +638,7 @@ def check_sitemap(
         if doc.kind == "urlset":
             _absorb_urls(result, doc)
         else:
-            _resolve_index(result, doc, session, timeout, max_depth, max_child_sitemaps)
+            _resolve_index(result, doc, session, timeout, max_depth, max_child_sitemaps, refuse)
         _report_out_of_scope(result)
         break
 
@@ -652,6 +721,7 @@ def _resolve_index(
     timeout: float,
     max_depth: int,
     max_child_sitemaps: int,
+    refuse_hop: HopRefusal | None = None,
 ) -> None:
     """Follow a `<sitemapindex>` into its children, within explicit limits.
 
@@ -695,7 +765,7 @@ def _resolve_index(
             result.note(f"stopped after {max_child_sitemaps} child sitemaps fetched")
             break
 
-        doc, got = _fetch_doc(url, session, timeout)
+        doc, got = _fetch_doc(url, session, timeout, refuse_hop)
         children_fetched += 1
         if _requested(got):
             result.documents_fetched += 1
@@ -742,6 +812,10 @@ class SampleCheck:
 
     checked: list[tuple[str, Status, int | None]] = field(default_factory=list)
     status: Status = Status.OK
+    # Sampled URLs that redirect to an address `_private_refusal` will not
+    # request, with the sentence saying so: the status code alone, a 3xx,
+    # reads as a page that answered.
+    refused: dict[str, str] = field(default_factory=dict)
 
     @property
     def ok_count(self) -> int:
@@ -767,8 +841,12 @@ def verify_sample_urls(
         check.status = Status.MISSING
         return check
 
+    refuse = _private_refusal(result.base_url)
     for url in result.sample_urls[:sample_size]:
-        got = fetch(url, timeout=timeout, session=session)
-        check.checked.append((url, got.status, got.status_code))
-        check.status = escalate(check.status, got.status)
+        got = fetch(url, timeout=timeout, session=session, refuse_hop=refuse)
+        status = Status.WARNING if got.refused_url else got.status
+        if got.refused_url:
+            check.refused[url] = _refused_reason(got)
+        check.checked.append((url, status, got.status_code))
+        check.status = escalate(check.status, status)
     return check

@@ -32,6 +32,7 @@ import codecs
 import http.cookiejar
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from urllib.parse import SplitResult, urldefrag, urljoin, urlsplit
@@ -168,6 +169,10 @@ class Fetch:
     # and all. Whether that costs a check anything depends on where the bad
     # bytes were (see `decoding_loss`).
     charset_error: str | None = None
+    # The redirect target `refuse_hop` would not let `fetch` request. The chain
+    # stops at the 3xx that named it: `final_url` and `status_code` are that
+    # hop's, and `error` says why the next one was not sent.
+    refused_url: str = ""
 
     @property
     def ok(self) -> bool:
@@ -487,11 +492,22 @@ def _send_one(
     return resp
 
 
+# Asked about each redirect target before it is requested. A string is why it
+# must not be, and the chain stops there; None lets it through.
+HopRefusal = Callable[[str], "str | None"]
+
+
 def _send_following_redirects(
-    sess: requests.Session, method: str, url: str, *, timeout: object, user_agent: str
-) -> tuple[requests.Response, list[requests.Response]]:
-    """The final response for `url`, following redirects one hop at a time, and
-    the redirect responses on the way.
+    sess: requests.Session,
+    method: str,
+    url: str,
+    *,
+    timeout: object,
+    user_agent: str,
+    refuse_hop: HopRefusal | None = None,
+) -> tuple[requests.Response | None, list[requests.Response], tuple[str, str] | None]:
+    """The final response for `url`, following redirects one hop at a time, the
+    redirect responses on the way, and the hop `refuse_hop` stopped, if any.
 
     requests' own `allow_redirects=True` did two things this audit cannot have.
     It read the whole body of every 3xx before following it, so the ceiling
@@ -510,12 +526,21 @@ def _send_following_redirects(
     3xx past the limit raises, so a limit of 3 sends 4 requests. The session's
     and not `DEFAULT_REDIRECT_LIMIT`, which is only what a new session starts
     with: read off the constant, a session set to 3 sent 31 into a loop.
+
+    `refuse_hop` sees every target before it goes out, because a rule applied
+    only to the URL a caller asked for is a rule a redirect walks around: a
+    sitemap on the audited site answering `302 Location:
+    http://localhost:<port>/latest/meta-data/` made the auditor request the
+    address the sitemap check had just refused to request when declared
+    directly, measured on 2026-10-19. A refused target comes back as the third
+    element with the reason, the response is None, and the 3xx that named the
+    target is the last entry of the history.
     """
     history: list[requests.Response] = []
     while True:
         resp = _send_one(sess, method, url, timeout=timeout, user_agent=user_agent)
         if not resp.is_redirect:
-            return resp, history
+            return resp, history, None
         resp.close()
         history.append(resp)
         if len(history) > sess.max_redirects:
@@ -524,6 +549,9 @@ def _send_following_redirects(
             )
         location = sess.get_redirect_target(resp) or ""
         url = urljoin(resp.url, requote_uri(location))
+        reason = refuse_hop(url) if refuse_hop is not None else None
+        if reason is not None:
+            return None, history, (url, reason)
 
 
 def _decode(raw: bytes, content_type: str) -> tuple[str, str | None]:
@@ -629,8 +657,14 @@ def fetch(
     user_agent: str = ADSENSE_UA,
     method: str = "GET",
     max_bytes: int = MAX_BODY_BYTES,
+    refuse_hop: HopRefusal | None = None,
 ) -> Fetch:
     """GET a URL following redirects. Never raises; failures come back as ERROR.
+
+    `refuse_hop` is asked about every redirect target before it is requested;
+    see `_send_following_redirects`. A refused target is not sent: the result
+    carries it in `refused_url`, with the reason in `error`, so a caller that
+    does not look for it still reads the chain as unfinished.
 
     "Never raises" is about the network and about URLs — the things a stranger
     controls. A `timeout` this client cannot use is the caller's own bug and is
@@ -659,8 +693,8 @@ def fetch(
         # Streamed, so the body is read by `_read_body` and only up to the
         # ceiling a Google crawler reads, and redirects are followed here, hop
         # by hop, so no hop's body is read and no hop's cookie travels.
-        resp, history = _send_following_redirects(
-            sess, method, url, timeout=timeout, user_agent=user_agent
+        resp, history, refused = _send_following_redirects(
+            sess, method, url, timeout=timeout, user_agent=user_agent, refuse_hop=refuse_hop
         )
         # Which method actually produced `resp`. Tracking it is the point: the
         # body guard below used to test the method REQUESTED, so the GET issued
@@ -669,13 +703,25 @@ def fetch(
         answered_with = method
         # The refused HEAD cost real time; dropping it understated the chain.
         refused_head = None
-        if method == "HEAD" and resp.status_code >= 400:
+        if resp is not None and method == "HEAD" and resp.status_code >= 400:
             refused_head = sum((r.elapsed for r in (*history, resp)), timedelta())
             resp.close()
-            resp, history = _send_following_redirects(
-                sess, "GET", url, timeout=timeout, user_agent=user_agent
+            resp, history, refused = _send_following_redirects(
+                sess, "GET", url, timeout=timeout, user_agent=user_agent, refuse_hop=refuse_hop
             )
             answered_with = "GET"
+        if resp is None:
+            # Stopped before a target `refuse_hop` would not let out. The last
+            # 3xx is where the chain ended, and it is closed already.
+            last = history[-1]
+            result.refused_url, reason = refused
+            result.final_url = last.url
+            result.status_code = last.status_code
+            result.headers = {k.lower(): v for k, v in last.headers.items()}
+            result.redirect_chain = [(r.status_code, r.url) for r in history]
+            result.elapsed_ms = sum(r.elapsed.total_seconds() for r in history) * 1000
+            result.error = f"RefusedRedirect: {reason}"
+            return result
         result.final_url = resp.url
         result.status_code = resp.status_code
         result.headers = {k.lower(): v for k, v in resp.headers.items()}

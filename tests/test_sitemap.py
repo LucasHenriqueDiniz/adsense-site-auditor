@@ -1129,6 +1129,105 @@ def test_sitemap_declarado_em_endereco_interno_nao_e_buscado():
     assert r.status >= Status.WARNING
 
 
+def _site_publico(monkeypatch, base):
+    """O servidor de teste no papel de site público.
+
+    Só o endereço dele deixa de contar como interno; o do outro servidor, em
+    127.0.0.1 numa outra porta, continua interno e faz o papel do endereço de
+    metadados da nuvem ou de um painel na rede de quem roda a auditoria.
+    """
+    import adsense_checks.sitemap as sitemap
+    from adsense_checks.crawl import same_site
+
+    real = sitemap.private_address
+    monkeypatch.setattr(
+        sitemap, "private_address", lambda url: False if same_site(url, base) else real(url)
+    )
+
+
+def test_sitemap_que_redireciona_para_endereco_interno_nao_leva_o_auditor_ate_la(
+    server, outro_servidor, monkeypatch
+):
+    """Achado 1 da revisão do PR #1: a trava valia só para a URL declarada.
+
+    Declarar `Sitemap: <interno>` era recusado; declarar o próprio `/s.xml` e
+    responder 302 para o mesmo endereço levava o auditor até ele, medido em
+    2026-10-19: o servidor interno recebeu `GET /latest/meta-data/`.
+    """
+    base, rotas = server
+    interno, rotas_internas = outro_servidor
+    _site_publico(monkeypatch, base)
+    alvo = interno + "/latest/meta-data/"
+    rotas["/robots.txt"] = (200, {"Content-Type": "text/plain"}, f"Sitemap: {base}/s.xml\n")
+    rotas["/s.xml"] = (302, {"Location": alvo}, "")
+
+    r = check_sitemap(base)
+
+    assert rotas_internas.received == []
+    assert r.status >= Status.WARNING
+    assert f"sitemap {base}/s.xml redirects to {alvo}, a loopback, private or link-local" in (
+        " | ".join(r.reasons)
+    )
+
+
+def test_filho_de_indice_que_redireciona_para_endereco_interno_nao_e_seguido(
+    server, outro_servidor, monkeypatch
+):
+    """O filho do mesmo site passa pela regra do achado 9 e depois redirecionava."""
+    base, rotas = server
+    interno, rotas_internas = outro_servidor
+    _site_publico(monkeypatch, base)
+    rotas["/sitemap.xml"] = (200, XML, sitemapindex(f"{base}/filho.xml"))
+    rotas["/filho.xml"] = (302, {"Location": interno + "/admin.xml"}, "")
+
+    r = check_sitemap(base)
+
+    assert rotas_internas.received == []
+    assert r.status >= Status.WARNING
+    assert any(
+        f"child sitemap {base}/filho.xml unusable: redirects to {interno}/admin.xml" in nota
+        for nota in r.reasons
+    ), r.reasons
+
+
+def test_url_da_amostra_que_redireciona_para_endereco_interno_nao_e_seguida(
+    server, outro_servidor, monkeypatch
+):
+    """A amostra do ADS-CRAWL-07 pede URLs que o sitemap lista, do próprio site."""
+    base, rotas = server
+    interno, rotas_internas = outro_servidor
+    _site_publico(monkeypatch, base)
+    rotas["/sitemap.xml"] = (200, XML, urlset(f"{base}/a", f"{base}/b"))
+    rotas["/a"] = (302, {"Location": interno + "/painel"}, "")
+    rotas["/b"] = (200, {"Content-Type": "text/html"}, "<html>b</html>")
+
+    amostra = verify_sample_urls(check_sitemap(base))
+
+    assert rotas_internas.received == []
+    assert amostra.refused == {
+        f"{base}/a": f"redirects to {interno}/painel, a loopback, private or link-local"
+        " address; not followed"
+    }
+    assert amostra.checked[0][1] is Status.WARNING
+    assert amostra.ok_count == 1
+
+
+def test_robots_txt_que_redireciona_para_endereco_interno_nao_e_seguido(
+    server, outro_servidor, monkeypatch
+):
+    """O robots.txt que a própria checagem busca é o quarto caminho até lá."""
+    base, rotas = server
+    interno, rotas_internas = outro_servidor
+    _site_publico(monkeypatch, base)
+    rotas["/robots.txt"] = (302, {"Location": interno + "/robots.txt"}, "")
+
+    r = check_sitemap(base)
+
+    assert rotas_internas.received == []
+    assert r.status >= Status.WARNING
+    assert any(nota.startswith("robots.txt redirects to") for nota in r.reasons), r.reasons
+
+
 def test_site_auditado_em_endereco_interno_continua_lendo_os_proprios_sitemaps(server):
     """O mesmo endereço é legítimo quando é o do site auditado: os testes e a
     fixture do EXAMPLES rodam em 127.0.0.1."""
