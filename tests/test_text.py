@@ -480,6 +480,8 @@ def test_bloco_dentro_da_mobilia_nao_desconta_o_que_nao_contou():
         ('<h1 id="site-title"><a href="/pt-br/">Meu Blog</a></h1>', "https://exemplo.com/pt-br/um/"),
         # Na raiz do site, o logo aponta para a própria página e continua logo.
         ('<h1 id="site-title"><a href="/">Meu Blog</a></h1>', "https://exemplo.com/"),
+        # A raiz servida pelo documento de índice ainda é a raiz.
+        ('<h1 id="site-title"><a href="/">Meu Blog</a></h1>', "https://exemplo.com/index.php"),
     ],
 )
 def test_com_a_url_da_pagina_logo_e_o_link_que_leva_a_outro_lugar(logo, url):
@@ -491,18 +493,40 @@ def test_com_a_url_da_pagina_logo_e_o_link_que_leva_a_outro_lugar(logo, url):
     assert d.status is Status.WARNING, d.reason
 
 
-def test_com_a_url_da_pagina_titulo_linkado_a_ela_mesma_e_titulo():
-    """O outro lado da regra: `/post` numa página servida em `/post/` é a mesma
-    página — a barra final é a única diferença, e não conta."""
+def test_main_content_text_recebe_a_url_e_devolve_o_texto_medido():
+    """A URL decide qual <h1> ancora a região, e `main_content_text` não a
+    recebia: na mesma página, `measure_depth(url=...)` media 120 palavras e o
+    texto devolvido tinha 425. Com a mesma URL, os dois falam da mesma coisa."""
+    html = _tema_de_divs('<h1 id="site-title"><a href="/pt-br/">Meu Blog</a></h1>')
+    url = "https://exemplo.com/pt-br/um/"
+    texto = main_content_text(html, url=url)
+    assert texto == measure_depth(html, url=url).text
+    assert word_count(texto) == 120
+
+
+@pytest.mark.parametrize(
+    "href,url",
+    [
+        ("/post", "https://exemplo.com/post/"),
+        ("/post", "https://exemplo.com/Post/"),
+        ("/post", "https://exemplo.com/post/index.html"),
+        ("/ca%C3%A7a", "https://exemplo.com/caça/"),
+    ],
+)
+def test_com_a_url_da_pagina_titulo_linkado_a_ela_mesma_e_titulo(href, url):
+    """O outro lado da regra: o link e a página são a mesma página quando só a
+    grafia do caminho difere — barra final, maiúsculas, o documento de índice,
+    o percent-encoding. Comparados ao pé da letra, `/post` e `/Post/` davam
+    logo, e a página ficava com 100 palavras onde um leitor conta 562."""
     html = (
         '<html><body><div id="page"><div class="post">'
-        '<h1><a href="/post">Titulo</a></h1>'
+        f'<h1><a href="{href}">Titulo</a></h1>'
         f'<div class="intro"><p>{_palavras(60)}</p></div>'
         f"<section><h2>Parte</h2><ul><li>{_palavras(400)}</li></ul></section>"
         f'<div class="entry"><p>{_palavras(100)}</p></div>'
         "</div></div></body></html>"
     )
-    d = measure_depth(html, url="https://exemplo.com/post/")
+    d = measure_depth(html, url=url)
     assert d.words == 562
     assert d.status is Status.OK, d.reason
 

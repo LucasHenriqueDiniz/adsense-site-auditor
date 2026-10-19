@@ -61,7 +61,7 @@ import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import NamedTuple
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
 
@@ -553,10 +553,22 @@ def _is_logo(heading: _Node, url: str = "") -> bool:
     return not all(_page_path(urljoin(url, link.attrs["href"])) == page for link in links)
 
 
+# A directory's index document, which `/post/` and `/post/index.html` both name.
+_INDEX_DOCUMENT = re.compile(r"/index\.[a-z0-9]+$")
+
+
 def _page_path(url: str) -> str:
-    """The path `url` names, without the trailing slash that `/post` and `/post/`
-    disagree on. The root comes back empty."""
-    return urlsplit(url.strip()).path.rstrip("/")
+    """The path `url` names, spelled one way for every spelling of one page.
+
+    `/post`, `/post/`, `/Post/`, `/post/index.html` and a percent-encoded `/ca%C3%A7a`
+    against a literal `/caça` are the same page as far as a link to it goes; a
+    literal comparison took a title linked to its own page for a logo and kept
+    the undercount, 100 words where a reader counts 562. These are spelling
+    conventions of URLs and web servers, not a measure of anything. The root
+    comes back empty.
+    """
+    path = unquote(urlsplit(url.strip()).path).lower()
+    return _INDEX_DOCUMENT.sub("", path).rstrip("/")
 
 
 def _has_heading(node: _Node, skip: frozenset[_Node]) -> bool:
@@ -904,7 +916,7 @@ def extract_text(html: str) -> str:
     return _visible_text(_parse(html))
 
 
-def main_content_text(html: str) -> str:
+def main_content_text(html: str, *, url: str = "") -> str:
     """Text of the page's main content, chrome excluded where detectable.
 
     The heuristic, in order:
@@ -934,8 +946,12 @@ def main_content_text(html: str) -> str:
     ERROR rather than grading the menu as prose. It also only sees server HTML:
     for a client-rendered page there is nothing to find, which `measure_depth`
     likewise reports as ERROR rather than as a thin page.
+
+    `url` is the page's own, and means what it means to `measure_depth`: with
+    it, a title linked to this very page is told apart from a logo linked
+    home (see `_is_logo`). Pass the same one and the text is the text measured.
     """
-    found = _main_container(_parse(html))
+    found = _main_container(_parse(html), url)
     return _normalize(_collect(found.node, skip=found.outside))
 
 
@@ -1007,7 +1023,16 @@ class TextDepth:
 
 
 def measure_depth(html: str, *, min_words: int = DEFAULT_MIN_WORDS, url: str = "") -> TextDepth:
-    """Measure main-content depth in an HTML string."""
+    """Measure main-content depth in an HTML string.
+
+    `url` is the address the HTML was served from, after redirects, and it is
+    not only a label: on a page with no `<main>` or `<article>`, an `<h1>` whose
+    every word is link text is the page's title when it links to this URL and
+    a logo otherwise (see `_is_logo`), and that decides how far the count
+    reaches. Without it, only a link to the site root is known to be a logo.
+    `measure_fetch` passes the final URL; a caller holding only the requested
+    one should expect a different count when the two differ.
+    """
     doc = _parse(html)
     found = _main_container(doc, url)
     container, isolated, outside, undecided = (
