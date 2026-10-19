@@ -832,10 +832,13 @@ def _beside_the_content(
     only elements were sorted. A text chunk cannot be named in the skip set the
     way a subtree can, so its words come back as a number instead.
 
-    A region `_prose_region` widened has no title, so nothing lies between: every
-    branch is before or after the block. There the climb was taken for prose
-    rather than for a title, so a branch that holds prose (`prose`, the elements
-    with prose below them) is vouched for the way a heading vouches for one.
+    Each signal vouches for what it reached. A title vouches for the stretch
+    between it and the block; with none in the region (`title` is None)
+    nothing lies between. Prose vouches for what the prose climb took: a
+    branch that holds prose (`prose`, the elements with prose below them) is
+    why the climb went there, and is vouched for the way a heading vouches for
+    one. A region a title set was not climbed for prose, so its caller passes
+    no `prose`, and an unheaded `<p>` sidebar after the block stays in doubt.
 
     `furniture` is `_furniture(region)`, which the caller already holds.
     """
@@ -883,7 +886,7 @@ def _beside_the_content(
         if branch not in left_out
         and not first < at < last
         and not _has_heading(branch, left_out)
-        and not (title is None and branch in prose)
+        and branch not in prose
     )
     # Joined with a separator so two chunks cannot weld into one word that is
     # on no page; the same reason `_collect` writes one at element boundaries.
@@ -1209,38 +1212,50 @@ def _main_container(doc: _Parser, url: str = "") -> _MainContent:
         if winner.tag in WHOLE_PAGE_ELEMENTS:
             return _MainContent(winner, False)
         title = _page_title(body, page_furniture, link_words, url)
-        region = _titled_region(title, winner)
-        prose_blocks: frozenset[_Node] = frozenset()
-        if region is winner and winner in in_furniture:
+        # One widening, two signals. The title sets the floor: the smallest
+        # element holding it and the block, or the block itself when it cannot
+        # widen it (none, one inside the block, or one meeting it only at the
+        # <body>). With no title above the block, the block climbs as far as
+        # its prose outweighs the rest it would count (see `_prose_region`).
+        #
+        # A title is also the ceiling. Letting the climb go on above it would
+        # reach sections beside the title's own wrapper — 251 words, a reader
+        # counts 555, and the climb read 553 — but the comment thread beside a
+        # post is prose in a headed sibling wrapper too, and nothing in the
+        # markup tells the two apart: a 180-word post under 12 comments of 40
+        # words read 665, OK, where it reads 183, WARNING, capped. The title
+        # says where the article is; the climb is for pages with no such word.
+        floor = _titled_region(title, winner)
+        anchor = title if floor is not winner else None
+        if anchor is None and winner in in_furniture:
             # The scoring elected a block inside the page's furniture — the only
             # `<p>` on the page sitting in a `<header>`. Climbing from there
             # stopped on the header itself, weightless and so worth more than
             # the block, and counted its `<nav>` as content: 60 words where the
             # block alone is 40. A block in the furniture is not grown.
             return _MainContent(winner, True)
-        if region is winner:
-            # No title to widen to, or none outside the block: weigh the prose
-            # instead (see `_prose_region`).
+        region = floor
+        prose_blocks: frozenset[_Node] = frozenset()
+        if anchor is None:
             prose_words = dict(own_words)
             for n, _ in text_paragraphs:
                 if n not in in_furniture:
                     prose_words[n] = word_count(_collect(n, skip=not_own))
             sums = _word_sums(doc.root, prose_words, page_furniture | cut_links)
-            region = _prose_region(winner, sums)
-            if region is winner:
-                # Nothing above the block is worth more than the block. Its own
-                # furniture stays in the count, where `measure_depth`'s control
-                # can still see it.
-                return _MainContent(winner, True)
-            title = None
+            region = _prose_region(floor, sums)
             prose_blocks = frozenset(n for n, (_, prose, _) in sums.items() if prose > 0)
+        if region is winner:
+            # Nothing above the block is worth more than the block, and no title
+            # raised the floor. Its own furniture stays in the count, where
+            # `measure_depth`'s control can still see it.
+            return _MainContent(winner, True)
         # The region's furniture is the body's, below the region. No `<article>`
         # with words sits above the region, or it would have won above, so
         # nothing between the body and the region claims a piece differently;
         # and the region is never in it, holding a title proved outside all.
         region_furniture = frozenset(f for f in page_furniture if region in _ancestors(f.parent))
         left_out, undecided, loose_words = _beside_the_content(
-            region, title, winner, region_furniture, link_words, prose_blocks
+            region, anchor, winner, region_furniture, link_words, prose_blocks
         )
         return _MainContent(region, True, left_out, undecided, loose_words, region_furniture)
 

@@ -377,7 +377,12 @@ Behaviour observed in the runs above, recorded here because a reader will hit it
   722.5 and 553. One of the 142, compress-pdf-to-1mb, kept its `<h1>` inside a
   winning hero and read 182 where the reference holds 541; it now reads 547.
 
-  Six shapes are still wrong. Three of the 142 still stop short with no title
+  Seven shapes are still wrong. A title is the ceiling as well as the floor,
+  so sections that sit beside the title's own wrapper stay out: 251 words where
+  a reader counts 555. Climbing on past the title would reach them (553), and
+  would reach a comment thread beside a post just the same, since both are
+  prose in a headed sibling wrapper: a 180-word post under 12 comments read
+  665, OK, instead of 183, WARNING. Three of the 142 still stop short with no title
   to climb to: each has 213 to 412 words of tool interface beside its
   sections, and that outweighs the prose beyond it. Two blocks hanging straight
   off the `<body>`, with no wrapper of their own, meet only at the page, so the

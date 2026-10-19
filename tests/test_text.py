@@ -1079,6 +1079,46 @@ def test_lista_de_tags_com_rotulo_nao_vira_texto():
     assert d.status is Status.WARNING, d.reason
 
 
+def test_o_titulo_e_o_teto_da_subida():
+    """Um post curto e uma discussão longa: os comentários são prosa num
+    contêiner irmão com heading, exatamente como seções do próprio artigo
+    seriam. Deixar a subida passar do título trazia os comentários junto — 665
+    palavras, OK, num post de 180. O título diz onde está o artigo; a subida
+    pelo peso da prosa é para página sem essa palavra."""
+    comentarios = "".join(
+        f'<li><div class="comment-body"><p>{" ".join(["comentario"] * 40)}</p></div></li>'
+        for _ in range(12)
+    )
+    html = (
+        '<html><body><div id="page"><header><nav><a href="/">Inicio</a></nav></header>'
+        '<div id="main"><div class="post"><h1>Titulo do post</h1>'
+        f'<div class="entry"><p>{_palavras(180)}</p></div></div>'
+        '<div id="comments"><h3>12 comentarios</h3>'
+        f'<ol class="commentlist">{comentarios}</ol></div>'
+        "</div><footer><p>Rodape</p></footer></div></body></html>"
+    )
+    d = measure_depth(html)
+    assert "comentario" not in d.text
+    assert d.words == 3 + 180
+    assert d.status is Status.WARNING, d.reason
+
+
+def test_bloco_na_mobilia_com_titulo_ainda_alarga_pelo_titulo():
+    """O único <p> da página está no rodapé e ganha a pontuação; o conteúdo é
+    texto solto num <div>, entre o <h1> e o rodapé. Sem título, um bloco na
+    mobília não cresce. Com título, o título diz onde está o artigo: a região
+    é o que ele divide com o bloco, e o rodapé fica de fora como mobília."""
+    html = (
+        '<html><body><div id="page"><h1>Titulo</h1>'
+        f'<div class="content">{_palavras(200)}</div>'
+        f'<footer><div class="brand"><p>{_ruido(30)}</p></div></footer>'
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 201
+    assert "ruido" not in d.text
+
+
 def test_texto_solto_depois_do_bloco_que_decide_a_faixa_e_ERROR():
     """Texto fora de qualquer elemento, direto no wrapper, depois do bloco. Só
     os elementos eram classificados, então ele entrava na conta sem passar por
