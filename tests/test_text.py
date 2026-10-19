@@ -952,6 +952,12 @@ def test_bloco_dentro_da_mobilia_nao_sobe():
             {"Inicio", "Sobre"},
         ),
         ('<div><p>Leia o<br><a href="/g">guia</a> agora</p></div>', set()),
+        # A frase continua depois de um parêntese ou de um travessão que a abre.
+        ('<div><p><a href="/x">Foo</a> <a href="/y">Bar</a> (e uma biblioteca)</p></div>', set()),
+        (
+            '<div><p><a href="/x">Foo</a> <a href="/y">Bar</a> — e uma biblioteca</p></div>',
+            set(),
+        ),
     ],
     ids=[
         "frase",
@@ -971,6 +977,8 @@ def test_bloco_dentro_da_mobilia_nao_sobe():
         "rotulo-e-ano",
         "menu-com-br",
         "quebra-na-frase",
+        "parentese-depois-da-sequencia",
+        "travessao-depois-da-sequencia",
     ],
 )
 def test_link_em_texto_corrido_nao_e_so_link(html, so_link):
@@ -1013,6 +1021,46 @@ def test_widget_de_categorias_com_contagem_nao_conta_os_links():
     d = measure_depth(html)
     assert "ruido" not in d.text
     assert d.words == 1 + 250 + 1 + 60  # título, post, título do widget, contagens
+
+
+@pytest.mark.parametrize("item", ["li", "p"])
+def test_sem_titulo_o_peso_da_prosa_nao_conta_link_que_sera_cortado(item):
+    """Um widget de categorias, `<li><a>Notícias</a> (15)</li>`, não é só link:
+    o número fica fora. Então pontua — e pesava as palavras do link, que a
+    contagem corta. A subida ganhava 120 palavras que não ia contar e passava
+    por cima de 100 de chrome: 311, ERROR, numa página de 150. Vale igual para
+    o widget escrito em <p>."""
+    itens = "".join(f'<{item}><a href="/c{i}">{_ruido(2)}</a> ({i})</{item}>' for i in range(60))
+    lista = f"<ul>{itens}</ul>" if item == "li" else itens
+    html = (
+        '<html><body><div id="page">'
+        f'<div class="content"><div class="entry"><p>{_palavras(150)}</p></div></div>'
+        f'<div class="widget"><h3>Categorias</h3>{lista}</div>'
+        f'<div class="chrome">{" ".join(["lixo"] * 100)}</div>'
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 150
+    assert "lixo" not in d.text
+
+
+def test_widget_de_paragrafos_com_link_nao_vence_a_pontuacao():
+    """Os mesmos 60 itens "link (N)", escritos em <p>, pesavam na pontuação com
+    as palavras do link: 60 parágrafos de ~15 caracteres somavam mais que um
+    post de 100 palavras, o widget ganhava como o bloco principal e era
+    contado inteiro, links incluídos — 181 palavras. Pesados sem o link que a
+    contagem corta, são 60 contagens, e o post fica com a pontuação."""
+    itens = "".join(f'<p><a href="/c{i}">{_ruido(2)}</a> ({i})</p>' for i in range(60))
+    html = (
+        '<html><body><div id="page">'
+        f'<div class="content"><div class="entry"><p>{_palavras(100)}</p></div></div>'
+        f'<div class="widget"><h3>Categorias</h3>{itens}</div>'
+        f'<div class="chrome">{" ".join(["lixo"] * 100)}</div>'
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 100
+    assert "ruido" not in d.text
 
 
 def test_lista_de_tags_com_rotulo_nao_vira_texto():

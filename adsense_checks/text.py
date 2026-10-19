@@ -232,6 +232,10 @@ _WHITESPACE = re.compile(r"\s+")
 # A word is a run of letters (any alphabet, accents included) or a run of
 # digits. `[^\W\d_]` is the Unicode-aware way to say "letter": a class like
 # [a-zA-Z]+ would cut "coração" into "cora" and "o".
+# What may stand between a run of links and the sentence that goes on after it:
+# spaces, and what opens a phrase. Not a period, comma or colon, which close one.
+_OPENERS = " \t\r\n\"'“‘«([{—–-"
+
 # A letter, in any alphabet. A count, a date or a price beside a link is a label
 # of it, not the sentence around it: see `_worded`.
 _LETTER = re.compile(r"[^\W\d_]")
@@ -296,9 +300,11 @@ class _Parser(HTMLParser):
             self.has_external_script = True
         if tag in VOID_ELEMENTS:
             # Return before touching the stack, so nothing is left open for an
-            # element that has no end tag. The separator is the part that shows
-            # in the output: a <br> or <hr> breaks a word boundary, and the
-            # elements listed as inline — `wbr` alone, today — must not.
+            # element that has no end tag. What shows in the output is a word
+            # boundary: <br> and <hr> leave a childless element (below), the
+            # other block-level voids a separator, and the elements listed as
+            # inline — `wbr` alone, today — nothing, since they must not split
+            # a word.
             if tag in LINE_BREAKS:
                 # Kept as a childless element rather than the separator text it
                 # used to be: `"\n"` from a <br> could not be told from a newline
@@ -649,8 +655,10 @@ def _sentence_goes_on(
     with a word beside it too. The difference is the sentence going on after
     the run — a label introduces a list and ends there, a sentence continues. So
     only the right side counts, past spaces only, and it must start with a
-    letter: "… <a>guias</a>. Mais texto" ends at the period. A run joined by
-    commas, and one ending its sentence, are left as `_worded` judges them.
+    letter: "… <a>guias</a>. Mais texto" ends at the period. Spaces and what
+    opens a phrase — a quote, a bracket, a dash — are looked past first, so
+    "<a>Foo</a> <a>Bar</a> (é uma biblioteca)" goes on. A run joined by commas,
+    and one ending its sentence, are left as `_worded` judges them.
 
     Every link of a run has the same answer, so `runs` keeps it for each one
     the walk passed: asked link by link, a run of 4,000 links joined by spaces
@@ -665,8 +673,9 @@ def _sentence_goes_on(
     while j < len(flow):
         item = flow[j]
         if isinstance(item, str):
-            if item.strip():
-                answer = bool(_LETTER.match(item.lstrip()))
+            rest = item.lstrip(_OPENERS)
+            if rest:
+                answer = bool(_LETTER.match(rest))
                 break
         elif not item.dropped:
             if item.tag not in INLINE_ELEMENTS:
@@ -1087,12 +1096,18 @@ def _main_container(doc: _Parser, url: str = "") -> _MainContent:
     body = _find_body(doc)
     # Computed once: the scoring, the title search and the region all read it.
     page_furniture = _furniture(body)
+    # The links a count would cut, also computed once. A block weighs its words
+    # without them: `<li><a>Notícias</a> (15)</li>` is not link-only, so it
+    # scores, but only "15" of it is ever counted. Weighed with its link, a
+    # category widget carried the prose climb over 100 words of chrome — 311,
+    # ERROR, on a page of 150 — because the climb gained words it would not keep.
+    cut_links = _link_only([doc.root], link_words)
     text_paragraphs: list[tuple[_Node, float]] = []
     link_paragraphs: list[tuple[_Node, float]] = []
     for node in _iter_elements(doc.root):
         if node.tag != "p":
             continue
-        weight = float(len(_normalize(_collect(node))))
+        weight = float(len(_normalize(_collect(node, skip=cut_links))))
         if weight <= 0:
             continue
         inside, outside = link_words[node]
@@ -1135,6 +1150,9 @@ def _main_container(doc: _Parser, url: str = "") -> _MainContent:
     # In document order, so that a tie keeps resolving to the first container.
     in_order = [n for n in _iter_elements(doc.root) if n.tag == "p" or n.tag in TEXT_BLOCKS]
     every_block = frozenset(in_order)
+    # A block's own words: not those of the blocks nested in it, nor those of
+    # the links a count would cut.
+    not_own = every_block | cut_links
     targets: dict[_Node, tuple[_Node | None, _Node | None]] = {}
     text_blocks: list[tuple[_Node, float]] = []
     # Each text block's own words, kept for `_prose_region` instead of collected twice.
@@ -1162,7 +1180,7 @@ def _main_container(doc: _Parser, url: str = "") -> _MainContent:
             continue
         # Each by its own words: a `<li>` holding a nested list is credited for
         # its label, and each nested item for itself.
-        own = _normalize(_collect(node, skip=every_block))
+        own = _normalize(_collect(node, skip=not_own))
         if own:
             targets[node] = section
             text_blocks.append((node, float(len(own))))
@@ -1206,10 +1224,8 @@ def _main_container(doc: _Parser, url: str = "") -> _MainContent:
             prose_words = dict(own_words)
             for n, _ in text_paragraphs:
                 if n not in in_furniture:
-                    prose_words[n] = word_count(_collect(n, skip=every_block))
-            sums = _word_sums(
-                doc.root, prose_words, page_furniture | _link_only([doc.root], link_words)
-            )
+                    prose_words[n] = word_count(_collect(n, skip=not_own))
+            sums = _word_sums(doc.root, prose_words, page_furniture | cut_links)
             region = _prose_region(winner, sums)
             if region is winner:
                 # Nothing above the block is worth more than the block. Its own
