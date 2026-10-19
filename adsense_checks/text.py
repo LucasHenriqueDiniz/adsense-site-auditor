@@ -605,10 +605,11 @@ def _has_heading(node: _Node, skip: frozenset[_Node]) -> bool:
 
 def _beside_the_content(
     region: _Node,
-    title: _Node,
+    title: _Node | None,
     block: _Node,
     furniture: frozenset[_Node],
     link_words: _LinkWords,
+    prose: frozenset[_Node] = frozenset(),
 ) -> tuple[frozenset[_Node], frozenset[_Node], int]:
     """What a widened region holds besides its title, its block and the path
     between them: what to leave out, what nobody can say is content, and how
@@ -642,9 +643,14 @@ def _beside_the_content(
     only elements were sorted. A text chunk cannot be named in the skip set the
     way a subtree can, so its words come back as a number instead.
 
+    A region `_prose_region` widened has no title, so nothing lies between: every
+    branch is before or after the block. There the climb was taken for prose
+    rather than for a title, so a branch that holds prose (`prose`, the elements
+    with prose below them) is vouched for the way a heading vouches for one.
+
     `furniture` is `_furniture(region)`, which the caller already holds.
     """
-    paths = set(_ancestors(title)) | set(_ancestors(block))
+    paths = set(_ancestors(block)) | (set(_ancestors(title)) if title is not None else set())
     # Document order over what the paths hold: the branches, the loose text,
     # and where the title and the block start. Nothing below a branch, the
     # title or the block is numbered, and the relative order is unaffected.
@@ -679,18 +685,103 @@ def _beside_the_content(
             marks[block] = position
             continue
         stack.extend(reversed(item.content))
-    first, last = sorted((marks[title], marks[block]))
+    first, last = sorted((marks[title] if title is not None else marks[block], marks[block]))
 
     left_out = furniture | _link_only([b for _, b in branches if b not in furniture], link_words)
     undecided = frozenset(
         branch
         for at, branch in branches
-        if branch not in left_out and not first < at < last and not _has_heading(branch, left_out)
+        if branch not in left_out
+        and not first < at < last
+        and not _has_heading(branch, left_out)
+        and not (title is None and branch in prose)
     )
     # Joined with a separator so two chunks cannot weld into one word that is
     # on no page; the same reason `_collect` writes one at element boundaries.
     loose_words = word_count(_SEPARATOR.join(text for at, text in loose if not first < at < last))
     return left_out, undecided, loose_words
+
+
+# Per element: (words below it, words of prose, words that weigh nothing).
+_WordSums = dict[_Node, tuple[int, int, int]]
+
+
+def _word_sums(
+    root: _Node, prose_words: dict[_Node, int], left_out: frozenset[_Node], link_words: _LinkWords
+) -> _WordSums:
+    """How the words under each element split into prose, words that weigh
+    nothing, and the rest.
+
+    Weightless: headings, which label a section without being its text; the
+    page furniture; and link-only text. The last two never reach a widened
+    count anyway — `_beside_the_content` leaves them out — so holding them
+    against an element would punish it for words it will not count. Measured on
+    2026-10-18: weighed as the rest, a 130-word related-tools grid kept 29 of
+    the 142 smallwebapps.com tool pages built on 2026-08-30 at their FAQ alone.
+
+    `prose_words` holds each prose block's own words; `left_out` is the page
+    furniture. Totals are summed chunk by chunk, so a word an inline tag splits
+    counts twice; that only nudges a comparison, and no count the report prints
+    is taken from here.
+    """
+    order: list[_Node] = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        order.append(node)
+        stack.extend(c for c in node.content if isinstance(c, _Node) and not c.dropped)
+    sums: _WordSums = {}
+    for node in reversed(order):
+        total = sum(word_count(item) for item in node.content if isinstance(item, str))
+        prose = prose_words.get(node, 0)
+        heading = 0
+        for child in node.content:
+            if isinstance(child, _Node) and child in sums:
+                child_total, child_prose, child_heading = sums[child]
+                total, prose, heading = (
+                    total + child_total,
+                    prose + child_prose,
+                    heading + child_heading,
+                )
+        inside, outside = link_words.get(node, (False, False))
+        if node.tag in HEADING_ELEMENTS or node in left_out or (inside and not outside):
+            heading = total - prose
+        sums[node] = (total, prose, heading)
+    return sums
+
+
+def _prose_region(block: _Node, sums: _WordSums) -> _Node:
+    """The element at or above `block`, below the `<body>`, whose prose most
+    outweighs everything else in it.
+
+    For a page the title cannot widen — no `<h1>`, an `<h1>` inside the block,
+    or one that meets it only at the `<body>`. The paragraph scoring credits two
+    levels up, so on a page of sibling sections it picks one, and nothing above
+    it got a vote: with no title to climb to, the 28 smallwebapps.com tool pages
+    read a median of a third of what a reader counts, even with list items
+    scoring.
+
+    Each element on the way up is weighed as its prose minus the other words it
+    would count — tool chrome, plain `<div>` text, a list with no heading over
+    it. Headings, furniture and link-only text weigh nothing either way (see
+    `_word_sums`). A word counts once on each side, so there is no share of the
+    page and no weight to tune. A sidebar does not get counted because it is
+    near the article: it makes the element holding both worth less than the
+    article alone, unless the prose it sits beside outweighs it. A tie keeps the
+    deeper element.
+    """
+
+    def weight(node: _Node) -> int:
+        total, prose, heading = sums[node]
+        return prose - (total - prose - heading)
+
+    best, best_weight = block, weight(block)
+    for above in _ancestors(block.parent):
+        if above.tag in WHOLE_PAGE_ELEMENTS:
+            break
+        if weight(above) > best_weight:
+            best, best_weight = above, weight(above)
+    return best
 
 
 def _titled_region(title: _Node | None, block: _Node) -> _Node:
@@ -711,8 +802,9 @@ def _titled_region(title: _Node | None, block: _Node) -> _Node:
 
       * no title outside the page furniture (see `_page_title`), no widening;
       * a title and a block that only meet at the `<body>` share the page, not a
-        region, so the block comes back alone. Counting the body would be the
-        menu-and-footer count `measure_depth` refuses everywhere else.
+        region, so the title cannot widen it; `_prose_region` climbs from the
+        block instead. Counting the body would be the menu-and-footer count
+        `measure_depth` refuses everywhere else.
 
     What the region holds besides the title and the block is sorted by
     `_beside_the_content`. What it still gets wrong: sections the block and the
@@ -910,18 +1002,33 @@ def _main_container(doc: _Parser, url: str = "") -> _MainContent:
             return _MainContent(winner, False)
         title = _page_title(body, page_furniture, link_words, url)
         region = _titled_region(title, winner)
+        prose_blocks: frozenset[_Node] = frozenset()
         if region is winner:
-            # The title is inside the block, or there is none to widen to. The
-            # block's own furniture stays in the count, where `measure_depth`'s
-            # control can still see it.
-            return _MainContent(winner, True)
+            # No title to widen to, or none outside the block: weigh the prose
+            # instead (see `_prose_region`).
+            text_paragraph_nodes = {n for n, _ in text_paragraphs}
+            text_block_nodes = {n for n, _ in text_blocks}
+            prose_words = {
+                n: word_count(_collect(n, skip=every_block))
+                for n in in_order
+                if (n in text_paragraph_nodes and n not in in_furniture) or n in text_block_nodes
+            }
+            sums = _word_sums(doc.root, prose_words, page_furniture, link_words)
+            region = _prose_region(winner, sums)
+            if region is winner:
+                # Nothing above the block is worth more than the block. Its own
+                # furniture stays in the count, where `measure_depth`'s control
+                # can still see it.
+                return _MainContent(winner, True)
+            title = None
+            prose_blocks = frozenset(n for n, (_, prose, _) in sums.items() if prose > 0)
         # The region's furniture is the body's, below the region. No `<article>`
         # with words sits above the region, or it would have won above, so
         # nothing between the body and the region claims a piece differently;
         # and the region is never in it, holding a title proved outside all.
         region_furniture = frozenset(f for f in page_furniture if region in _ancestors(f.parent))
         left_out, undecided, loose_words = _beside_the_content(
-            region, title, winner, region_furniture, link_words
+            region, title, winner, region_furniture, link_words, prose_blocks
         )
         return _MainContent(region, True, left_out, undecided, loose_words, region_furniture)
 
@@ -1037,7 +1144,9 @@ def main_content_text(html: str, *, url: str = "") -> str:
          outside the furniture; their credit, and that of a `<p>` inside a
          list, passes through the list to the container around it. The
          winner is widened to the smallest element that also holds the page's
-         `<h1>`, never as far as the `<body>` (see `_titled_region`). What the
+         `<h1>`, never as far as the `<body>` (see `_titled_region`); when no
+         title can widen it, it climbs as far as its prose outweighs the rest
+         it would count (see `_prose_region`). What the
          widening collects beside the title and the block loses its
          nav/header/footer/aside and every subtree that is all link text; the
          block and the title themselves are taken whole. Text the widening

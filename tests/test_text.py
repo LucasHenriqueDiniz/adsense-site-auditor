@@ -359,10 +359,11 @@ def test_titulo_e_bloco_que_so_se_encontram_no_body_nao_contam_o_body():
     página. Contar o body — mesmo sem a mobília — é a contagem que
     `measure_depth` recusa em todo outro caminho, então o bloco volta sozinho.
 
-    O teste fixa essa recusa, não o número que ela dá hoje. Hoje é o bloco
-    sozinho, uma subcontagem registrada em EXAMPLES.md, "Known gaps"; uma
-    correção que recupere as seções irmãs sem contar o body tem de passar
-    aqui. O que a denuncia é o banner de cookies: um <div> de texto puro,
+    O teste fixa essa recusa, não o número que ela dá. Até 2026-10-18 era o
+    bloco sozinho, uma subcontagem; desde 2026-10-19 `_prose_region` sobe do
+    bloco até o `div.lower` e recupera as seções irmãs, sem contar o body —
+    e foi para deixar essa correção passar que o teste não fixa o número. O
+    que denunciaria o body é o banner de cookies: um <div> de texto puro,
     fora de qualquer mobília, que só entra na conta se o body entrar. Sem ele,
     o body menos a mobília soma exatamente o conteúdo, e contar a página
     inteira não deixaria rastro nenhum."""
@@ -722,6 +723,115 @@ def test_collect_nunca_pula_o_proprio_no():
     externo = next(n for n in _iter_elements(doc.root) if n.tag == "li")
     blocos = frozenset(n for n in _iter_elements(doc.root) if n.tag == "li")
     assert _collect(externo, skip=blocos).split() == ["rotulo"]
+
+
+# --------------------------------------------------------------------------
+# Sem título que alargue: a região sobe enquanto a prosa compensa
+# (`_prose_region`). Medido em 2026-10-19 nas 28 páginas de ferramenta do
+# smallwebapps.com, com a busca do <h1> desligada: mediana de 156,5 palavras
+# antes, 729,5 depois, contra 722,5 da contagem de leitor.
+# --------------------------------------------------------------------------
+
+
+def test_sem_titulo_a_regiao_sobe_ate_onde_a_prosa_compensa():
+    """Seções irmãs, sem <h1> nenhum. A pontuação credita dois níveis acima e
+    elege uma seção; a subida pesa prosa contra o resto e chega ao container
+    que guarda todas. O menu e o rodapé ficam fora: a subida nunca passa do
+    <body>, e a mobília não entra na contagem."""
+    html = (
+        f"<html><body><header><nav>{_ruido(20)}</nav></header>"
+        f'<div class="lower">{_secoes()}</div>'
+        f"<footer><p>{_ruido(20)}</p></footer></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == sum(2 + n for n in SECOES_DA_FERRAMENTA)
+    assert "ruido" not in d.text
+    assert d.status is Status.OK, d.reason
+
+
+def test_sem_titulo_texto_que_nao_e_prosa_segura_a_subida():
+    """Um <div> de texto solto ao lado do post pesa contra o container que
+    guarda os dois: mais prosa adiante (`div.mais`) não compensa 400 palavras
+    que não são prosa, e a região fica no post."""
+    html = (
+        '<html><body><div id="page">'
+        f'<div class="content"><div class="entry"><p>{_palavras(120)}</p></div></div>'
+        f'<div class="widgets">{_ruido(400)}</div>'
+        f'<div class="mais"><p>{_palavras(50)}</p></div>'
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 120
+    assert "ruido" not in d.text
+
+
+@pytest.mark.parametrize(
+    "entre",
+    [
+        # Link não é prosa nem resto: sai da conta, então não pesa contra.
+        "".join(f'<a href="/t{i}"><p>{" ".join(["ruido"] * 10)}</p></a>' for i in range(30)),
+        # A mobília também sai da conta, e também não pesa.
+        f"<aside><p>{' '.join(['ruido'] * 300)}</p></aside>",
+    ],
+    ids=["grade-de-links", "aside"],
+)
+def test_sem_titulo_link_e_mobilia_nao_pesam_contra_a_subida(entre):
+    """Na página de ferramenta de 2026-08-30, a grade de relacionados (~130
+    palavras só de link) fica entre o hero e o conteúdo. Pesada como resto,
+    ela segurava 29 das 142 páginas no FAQ."""
+    html = (
+        '<html><body><div class="page-body">'
+        f'<section><h2>Intro</h2><div class="b"><p>{_palavras(150)}</p></div></section>'
+        f'<div class="related">{entre}</div>'
+        f'<section><h2>Mais</h2><div class="b"><p>{_palavras(200)}</p></div></section>'
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 352
+    assert "ruido" not in d.text
+
+
+def test_sem_titulo_o_empate_fica_no_elemento_mais_fundo():
+    """Um banner que é só heading não pesa nada: subir até ele empata, e o
+    empate fica embaixo — a região não cresce para pegar o que não acrescenta
+    prosa."""
+    html = (
+        '<html><body><div id="page">'
+        f'<div class="content"><div class="b"><p>{_palavras(200)}</p></div></div>'
+        '<div class="banner"><h2>Promocao</h2></div>'
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 200
+    assert "Promocao" not in d.text
+
+
+def test_sem_titulo_prosa_sem_heading_nao_vira_duvida():
+    """Sem título não há "entre o título e o bloco"; o que a subida pegou por
+    ter prosa é conteúdo pela mesma razão que a fez subir. Sem essa ressalva,
+    o segundo bloco viraria dúvida e a página, ERROR."""
+    html = (
+        '<html><body><div class="lower">'
+        f'<div class="a"><p>{_palavras(200)}</p></div>'
+        f'<div class="b"><p>{_palavras(150)}</p></div>'
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 350
+    assert d.status is Status.INFO, d.reason
+
+
+def test_sem_titulo_a_subida_para_antes_do_body():
+    """Dois blocos pendurados direto no <body> só se juntam no <body>, que é a
+    página. A subida para antes dele: conta o maior bloco, a mesma recusa que
+    o teto do título já fazia."""
+    html = (
+        "<html><body>"
+        f'<div class="a"><p>{_palavras(200)}</p></div>'
+        f'<div class="b"><p>{_palavras(150)}</p></div>'
+        "</body></html>"
+    )
+    assert measure_depth(html).words == 200
 
 
 def test_texto_solto_depois_do_bloco_que_decide_a_faixa_e_ERROR():
@@ -1555,9 +1665,15 @@ def _com_e_sem_container(tag: str) -> str:
     Se `tag` é container de conteúdo, ela leva o crédito inteiro do parágrafo
     e vence; se não é, o crédito de avô cai no `div#fora`, que já tem ruído
     próprio, e é o `div#fora` que vence — trazendo o ruído junto.
+
+    O ruído é um parágrafo só de link. Já foi um parágrafo de texto, e então
+    `_prose_region` subia do `<{tag}>` para o `div#fora` com razão: dois
+    parágrafos de texto no mesmo container são o mesmo conteúdo para quem lê.
+    Link não é prosa, então o ruído pesa contra a subida em vez de a favor, e o
+    teste continua perguntando só o que pergunta: quem ganha a pontuação.
     """
     return (
-        f'<html><body><div id="fora"><p>{_ruido(20)}</p>'
+        f'<html><body><div id="fora"><p><a href="/r">{_ruido(20)}</a></p>'
         f'<{tag} id="dentro"><p>{_palavras(200)}</p></{tag}></div></body></html>'
     )
 

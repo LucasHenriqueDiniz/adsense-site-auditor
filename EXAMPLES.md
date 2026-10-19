@@ -361,18 +361,26 @@ Behaviour observed in the runs above, recorded here because a reader will hit it
   cases. When the band depends on it the script reports `ERROR` — "main
   content not separated from the page around it" — rather than choosing.
 
-  Four shapes are still wrong. When the `<h1>` and the block meet only at the
-  `<body>`, the block is measured alone — an undercount, kept because counting
-  the body is the menu-and-footer number the script refuses everywhere else.
-  When the `<h1>` sits inside the winning block itself — a hero whose
-  description is the page's densest paragraph — nothing widens. One of the 142
-  tool pages in the 2026-08-30 reconstruction (Part 2) measured 182 where the
-  reference holds 541; since 2026-10-19 list items in a headed section score,
-  a section out-scores that hero, and the page reads 547. The shape remains
-  wherever a hero still out-scores every section. Plain text that is not content but carries a heading, or
-  sits between the `<h1>` and the block, is counted without a doubt raised. And
-  a link list with any word outside its links — "News (15)" — is text, so it
-  stays in.
+  When the title cannot widen — no usable `<h1>`, an `<h1>` inside the winning
+  block, or one that meets it only at the `<body>` — the block climbs instead,
+  as far as the prose it gains outweighs the other words it would count:
+  menus, furniture and headings weigh nothing either way, plain `<div>` text
+  and tool chrome weigh against, and the climb never reaches the `<body>`.
+  Measured on 2026-10-19 with the title search switched off, as on a page with
+  no `<h1>`: the 28 tool pages read a median of 729.5 words (156.5 before) and
+  the 142 of 2026-08-30 a median of 556 (239.5 before), against references of
+  722.5 and 553. One of the 142, compress-pdf-to-1mb, kept its `<h1>` inside a
+  winning hero and read 182 where the reference holds 541; it now reads 547.
+
+  Five shapes are still wrong. Three of the 142 still stop short with no title
+  to climb to: each has 213 to 412 words of tool interface beside its
+  sections, and that outweighs the prose beyond it. Two blocks
+  hanging straight off the `<body>`, with no wrapper of their own, meet only at
+  the page, so the larger is counted alone. A sidebar written in `<p>`s is
+  prose to every rule here. Plain text that is not content but carries a
+  heading, or sits between the `<h1>` and the block, is counted without a
+  doubt raised. And a link list with any word outside its links — "News (15)" —
+  is text, so it stays in.
 
   None of this applies once a page has a `<main>`, which is counted whole,
   link grids included. smallwebapps.com added one to its tool pages on
