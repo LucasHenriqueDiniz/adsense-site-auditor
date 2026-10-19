@@ -350,3 +350,40 @@ def test_linha_de_navegacao_nomeia_os_links_do_diretorio_que_o_teto_recusou(
     assert "unmeasured: 3" in saida
     assert f"refused_directories: {recusados}" in saida
     assert codigo == 1
+
+
+def test_as_duas_contagens_de_palavras_dizem_qual_e_qual(server, monkeypatch, capsys):
+    """Achado 4 da revisão do PR #1: a mesma página, dois números, um rótulo só.
+
+    O ADS-UX-05 conta as palavras visíveis da página inteira; o ADS-CONTENT-03
+    conta as do conteúdo principal, sem menu nem rodapé. Os dois saíam como
+    "words": em 2026-10-19 o About de smallwebapps.com saiu "(686 words)" num
+    relatório e "500 words" no outro, e quem comparasse não tinha como separar
+    um erro de medida de duas medidas diferentes.
+
+    A página tem 4 palavras de menu e 4 de rodapé em volta de um `<main>` com 61
+    (o h1 e a prosa): 69 visíveis, 61 no conteúdo principal.
+    """
+    import analyze_text_depth
+
+    base, routes = server
+    routes["/"] = (200, HTML, _home())
+    routes["/about"] = (
+        200,
+        HTML,
+        "<html><head><title>Sobre</title></head><body>"
+        "<nav>Início Sobre Contato Guias</nav>"
+        f"<main><h1>Sobre</h1><p>{PROSA}</p></main>"
+        "<footer>Todos os direitos reservados</footer>"
+        "</body></html>",
+    )
+
+    monkeypatch.setattr("sys.argv", ["check_completeness.py", base + "/"])
+    check_completeness.main()
+    completude = capsys.readouterr().out
+    monkeypatch.setattr("sys.argv", ["analyze_text_depth.py", base + "/about"])
+    analyze_text_depth.main()
+    profundidade = capsys.readouterr().out
+
+    assert f"{base}/about (69 visible words)" in completude
+    assert "61 main-content words: below the configured threshold" in profundidade

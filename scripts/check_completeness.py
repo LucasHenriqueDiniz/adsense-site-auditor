@@ -116,7 +116,7 @@ def main() -> int:
         if outcome is None:
             lines.append(Line(f"{kind} page", Status.ERROR, [unread], requirement="ADS-UX-05"))
             continue
-        evidence = [f"{outcome.url} ({outcome.words} words)"] if outcome.url else []
+        evidence = [f"{outcome.url} ({outcome.words} visible words)"] if outcome.url else []
         if outcome.reason:
             evidence.append(outcome.reason)
         # None for every MISSING and ERROR outcome: nothing was parsed, so there

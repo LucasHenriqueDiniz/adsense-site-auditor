@@ -139,10 +139,10 @@ Completeness — http://localhost:8765
 [PASS] ADS-COMPLETE-01 home page is finished
          - no unfinished markers found
 [PASS] ADS-UX-05 about page
-         - http://localhost:8765/about/ (75 words)
+         - http://localhost:8765/about/ (75 visible words)
          - contact: profile https://github.com/example/fixture-tools
 [WARN] ADS-UX-05 contact page
-         - http://localhost:8765/contact/ (9 words)
+         - http://localhost:8765/contact/ (9 visible words)
          - unfinished markers: will be added
 [MISS] ADS-AUTHOR-02 contact channel
          - no mailto:, address, form or profile link
@@ -292,9 +292,9 @@ Content depth (min 300 words)
 =============================
 
 [WARN] ADS-CONTENT-03 http://localhost:8765/apps/pdf-rotate/
-         - 21 words: below the configured threshold (300 words)
+         - 21 main-content words: below the configured threshold (300 words)
 [PASS] ADS-CONTENT-03 http://localhost:8765/guides/local-file-tools/
-         - 814 words: at or above the configured bar (>= 450 words)
+         - 814 main-content words: at or above the configured bar (>= 450 words)
 
 2 checks: PASS=1, WARN=1
 Verdict: worst status is WARNING. Not ready.
@@ -304,6 +304,11 @@ Verdict: worst status is WARNING. Not ready.
 this repo chose; AdSense publishes no word count. The one number that does come
 from a requirement is `ADS-COMPLETE-02`'s 1200, and counting the articles that
 clear it is still yours to do — this script measures one page at a time.
+
+"main-content words" is the other half of the wording. The pre-flight gate
+prints a trust page's visible words, menu and footer included; this script
+counts only the main content. On one page the two differ, and each line says
+which one it is.
 
 ## Duplicates
 

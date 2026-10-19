@@ -46,7 +46,7 @@ def main() -> int:
             Line(
                 depth.url,
                 depth.status,
-                [depth.reason] if depth.reason else [f"{depth.words} words in main content"],
+                [depth.reason] if depth.reason else [f"{depth.words} main-content words"],
                 {
                     "words": depth.words,
                     "total_words": depth.total_words,

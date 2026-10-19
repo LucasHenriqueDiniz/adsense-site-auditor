@@ -513,6 +513,11 @@ def test_pagina_curta_demais_e_stub_e_nao_passa(server):
     assert relatorio.pages["about"].status is Status.WARNING
     assert relatorio.pages["about"].words < MIN_TRUST_PAGE_WORDS
     assert "stub" in frases(relatorio)
+    # Palavras VISÍVEIS, o h1 e o "Oi.", e dito assim: o ADS-CONTENT-03 conta
+    # outra coisa com o mesmo nome. Achado 4 da revisão do PR #1.
+    assert relatorio.pages["about"].reason == (
+        f"stub: 2 visible words, below the {MIN_TRUST_PAGE_WORDS} word minimum"
+    )
 
 
 def test_placeholder_em_pagina_curta_nao_e_escondido_pelo_ramo_de_stub(server):

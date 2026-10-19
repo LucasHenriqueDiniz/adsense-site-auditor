@@ -1432,15 +1432,20 @@ def describe_depth(words: int, *, min_words: int = DEFAULT_MIN_WORDS) -> str:
     The old summary hard-coded its labels ("BORDERLINE (300-450)", "OK (>450)")
     while the code classified 450 as OK — a page could land in a band the
     report declared impossible. Both now come from `borderline_ceiling`.
+
+    "main-content words", not "words": ADS-UX-05 prints the VISIBLE words of a
+    trust page, menu and footer included, and on 2026-10-19 smallwebapps.com's
+    About read "686 words" there and "500 words" here, with nothing saying they
+    were two different measures.
     """
     ceiling = borderline_ceiling(min_words)
     if words <= 0:
         return "no main content found (0 words)"
     if words < min_words:
-        return f"{words} words: below the configured threshold ({min_words} words)"
+        return f"{words} main-content words: below the configured threshold ({min_words} words)"
     if words < ceiling:
-        return f"{words} words: borderline ({min_words}-{ceiling - 1} words)"
-    return f"{words} words: at or above the configured bar (>= {ceiling} words)"
+        return f"{words} main-content words: borderline ({min_words}-{ceiling - 1} words)"
+    return f"{words} main-content words: at or above the configured bar (>= {ceiling} words)"
 
 
 @dataclass

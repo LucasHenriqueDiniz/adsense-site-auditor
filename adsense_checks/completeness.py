@@ -2244,7 +2244,7 @@ def _judge_page(
             )
         return outcome(
             Status.WARNING,
-            f"stub: {doc.words} words, below the {MIN_TRUST_PAGE_WORDS} word minimum",
+            f"stub: {doc.words} visible words, below the {MIN_TRUST_PAGE_WORDS} word minimum",
         )
     return outcome(Status.OK, "")
 

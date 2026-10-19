@@ -45,7 +45,7 @@ def test_pagina_ilegivel_e_ERROR_e_nunca_uma_contagem_de_palavras(monkeypatch, c
     saida = capsys.readouterr().out
 
     assert f"[ERR ] ADS-CONTENT-03 {INALCANCAVEL}" in saida
-    assert "words in main content" not in saida
+    assert "main-content words" not in saida
     assert "Verdict: worst status is ERROR" in saida
     assert codigo == 1
 
@@ -61,7 +61,7 @@ def test_pagina_profunda_aprova_e_o_codigo_de_saida_e_zero(server, monkeypatch, 
     saida = capsys.readouterr().out
 
     assert f"[PASS] ADS-CONTENT-03 {base}/guia" in saida
-    assert "600 words: at or above the configured bar (>= 450 words)" in saida
+    assert "600 main-content words: at or above the configured bar (>= 450 words)" in saida
     assert "Verdict: every check observed its condition and passed." in saida
     assert codigo == 0
 
@@ -111,7 +111,7 @@ def test_min_words_da_linha_de_comando_decide_a_faixa(server, monkeypatch, capsy
 
     assert "Content depth (min 1200 words)" in saida
     assert f"[WARN] ADS-CONTENT-03 {base}/guia" in saida
-    assert "400 words: below the configured threshold (1200 words)" in saida
+    assert "400 main-content words: below the configured threshold (1200 words)" in saida
     assert "borderline" not in saida
     assert codigo == 1
 
