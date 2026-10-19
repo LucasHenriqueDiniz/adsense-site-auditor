@@ -141,12 +141,17 @@ BROKEN_NAV_FAIL_THRESHOLD = 3
 # How many DISTINCT DIRECTORIES one run may ask the not-found question in.
 #
 # The answer to that question is a fact about ONE directory's router, so the only
-# rule that is right in both directions is to ask each directory about itself —
-# and `urljoin("/about/", ".")` is `/about/`, not `/`, so a URL with a trailing
-# slash IS its own directory and on the modern web nearly every navigation link
-# is one. Measured on the fixture EXAMPLES.md documents: six navigation links,
-# six distinct directories, and the run grows from 10 requests to 15. On a
-# 25-link menu where every link is its own directory it would be 26.
+# rule that is right in both directions is to ask each directory about itself.
+# Which directory a response is a question about differs by check, see
+# `_router_of`: a navigation link is read by the router that answered for it, so
+# `/apps/pdf-rotate/` and `/apps/pdf-split/` are one directory, `/apps/`, while a
+# trust page is read by its own, because `urljoin("/about/", ".")` is `/about/`
+# and that is where a subsite's error template is recognised. Measured on the
+# fixture EXAMPLES.md documents on 2026-10-19: six navigation links and two
+# trust pages in five directories — `/`, `/about/`, `/contact/`, `/guides/`,
+# `/apps/` — and 14 requests. Read per link, every trailing-slash link was a
+# directory of its own: six, 15 requests, and smallwebapps.com's 21-link menu
+# ran out of the ceiling on a healthy site.
 #
 # So the ceiling is the design decision. Its own constant and NOT shared with
 # `DEFAULT_NAV_LINK_LIMIT`, because the two bound different things: that one
@@ -158,32 +163,36 @@ BROKEN_NAV_FAIL_THRESHOLD = 3
 # double their footprint on someone else's host. `crawl.py` calls an uncapped
 # crawler "a load generator" and this is the same debt one check over.
 #
-# Eight is the smallest value that covers the documented fixture's six with room
-# for the two additions that are common rather than exotic — a `<base href>`
-# install directory, and a footer trust link in a directory of its own. That
-# slack is real only because the CONVENTIONAL trust paths no longer take a slot
-# each: `about/`, `sobre/`, `contact/`, `contato/` and `pages/` carry trailing
-# slashes, so asked per address they claimed six of the eight before a single
-# navigation link was judged, and on a soft-404 host the ceiling then ran out
-# before `/sobre/` — where the error template answered and passed as an About
-# page, taking the headline "neither an About nor a Contact page was found" out
-# of the report with it. They are invented addresses, so EXCLUDING one may use
-# the answer already paid for at the base, which costs one slot between all
-# seventeen. ACCEPTING one may not — see `_resolve_trust_page` — so a guess that
-# turns out to be a real directory with its own soft-404 router does spend a
-# slot on itself. That is the whole added cost, it is bounded at one directory
-# per kind because accepting returns, and it lands only where the evidence
-# decides a verdict.
+# Eight was set as the smallest value covering the documented fixture's six
+# directories, when every trailing-slash link was read as its own, with room for
+# the two additions that are common rather than exotic — a `<base href>` install
+# directory, and a footer trust link in a directory of its own. Read by router
+# the fixture needs five; the value was kept in the change that moved the unit,
+# so that change could not also be a change of budget. That slack is real only
+# because the CONVENTIONAL trust paths no longer take a slot each: `about/`,
+# `sobre/`, `contact/`, `contato/` and `pages/` carry trailing slashes, so asked
+# per address they claimed six of the eight before a single navigation link was
+# judged, and on a soft-404 host the ceiling then ran out before `/sobre/` —
+# where the error template answered and passed as an About page, taking the
+# headline "neither an About nor a Contact page was found" out of the report
+# with it. They are invented addresses, so EXCLUDING one may use the answer
+# already paid for at the base, which costs one slot between all seventeen.
+# ACCEPTING one may not — see `_resolve_trust_page` — so a guess that turns out
+# to be a real directory with its own soft-404 router does spend a slot on
+# itself. That is the whole added cost, it is bounded at one directory per kind
+# because accepting returns, and it lands only where the evidence decides a
+# verdict.
 #
 # The cost it admits to, measured on the wire against a 25-link audit's 43
-# requests to real addresses: 8 invented requests (16%) on an honest host, 16
-# (27%) on one that soft-404s in every directory, because a directory proven to
-# soft-404 is asked the second path too. On the six-link fixture EXAMPLES.md
-# documents: 7 of 16. A host whose `/about/` is its own soft-404 router adds one
-# directory, so two requests, and one more for `/contact/` if it is one too —
-# measured 1 -> 3 and 1 -> 5 invented. A single catch-all adds nothing, because
-# the base's answer recognises what every guessed directory serves. Either way
-# the addresses this tool invents stay a minority of the run.
+# requests to real addresses, one link per router: 8 invented requests (16%) on
+# an honest host, 16 (27%) on one that soft-404s in every directory, because a
+# directory proven to soft-404 is asked the second path too. On the six-link
+# fixture EXAMPLES.md documents: 5 of 14. A host whose `/about/` is its own
+# soft-404 router adds one directory, so two requests, and one more for
+# `/contact/` if it is one too — measured 1 -> 3 and 1 -> 5 invented. A single
+# catch-all adds nothing, because the base's answer recognises what every
+# guessed directory serves. Either way the addresses this tool invents stay a
+# minority of the run.
 #
 # Past the cap nothing is guessed: a link whose directory was refused a probe is
 # reported MISSING — unverified, neither working nor broken — which is a bounded,
@@ -1271,11 +1280,40 @@ def _directory_of(url: str) -> str:
     A trailing slash makes a URL its OWN directory: `urljoin("/about/", ".")` is
     `/about/`, not `/`. That is not a quirk to work around, it is what the
     servers do, and it is why one probe per run could never classify a modern
-    menu — nearly every link in one is a directory of its own.
+    menu — nearly every link in one is a directory of its own. It is also why a
+    navigation link is judged by `_router_of` instead.
     """
     if not url:
         return ""
     return split_url(join_url(url, ".")).path or "/"
+
+
+def _router_of(url: str) -> str:
+    """The directory whose router answered for the PAGE at `url`, as a URL.
+
+    `_directory_of` asks what a URL's own directory serves for a child it does
+    not have, which for `/apps/pdf-rotate/` is a question about the pages BELOW
+    the link. The router that answered for the link is `/apps/`, and what it
+    serves for a slug it does not have is what a 200 from it is worth. Asked the
+    first way, every trailing-slash link was a directory of its own and spent a
+    probe, and a modern menu is nearly all trailing-slash links: on 2026-10-19
+    smallwebapps.com's 21-link menu ran out of `MAX_PROBED_DIRECTORIES` with 11
+    links unmeasured and the navigation line `[MISS]`, on a healthy site.
+
+    A trailing-slash path's router is its parent and any other path's is its
+    own directory; `urljoin` keeps `..` at the root, so the root is its own
+    router. The parent comes from `urljoin` with `..`, for the reason
+    `_directory_of` gives and one more: a path is not a URL, and joining the
+    sliced path `//other-host/` back onto the page sends the probe to
+    `other-host`.
+
+    Only the navigation check reads a page this way. `check_trust_pages` keeps
+    `_directory_of`, which is stricter where a verdict rides on it: a subsite
+    mounted at `/about/` serves its error template with 200 at `/about/` itself,
+    and only `/about/`'s own answer recognises it.
+    """
+    path = split_url(url).path
+    return join_url(url, ".." if path.endswith("/") else ".")
 
 
 @dataclass(frozen=True)
@@ -1375,7 +1413,7 @@ def _invented_base(document_url: str, base_href: str | None) -> _InventedBase:
     )
 
 
-def _probe_covers(probe: _NotFoundProbe, url: str) -> bool:
+def _probe_covers(probe: _NotFoundProbe, url: str, *, by_router: bool = False) -> bool:
     """Whether THIS probe's answer describes the response that came back from `url`.
 
     A probe asked one path in one directory, so what it learned is a fact about
@@ -1407,6 +1445,12 @@ def _probe_covers(probe: _NotFoundProbe, url: str) -> bool:
     — because a link that redirects into another directory was answered by a
     router this probe never asked.
 
+    `by_router` compares the directory whose router answered for the page,
+    `_router_of`, instead of the page's own: that is how the navigation check
+    reads a response, and the trust pages do not. One probe is one fact about
+    one directory either way; the flag only picks which directory a response is
+    a question about.
+
     Two shapes fall on the wrong side of the comparison, both toward MISSING and
     neither toward a pass. A directory whose name is non-ASCII AND comes from the
     markup rather than from the typed URL: `probe.base` keeps the raw `<base
@@ -1423,7 +1467,7 @@ def _probe_covers(probe: _NotFoundProbe, url: str) -> bool:
     # first check in place, so loosening it changed nothing and broke no test.
     if not same_site(url, probe.base):
         return False
-    return _directory_of(url) == probe.directory
+    return _directory_of(_router_of(url) if by_router else url) == probe.directory
 
 
 def _record_refused_base(
@@ -2332,7 +2376,11 @@ class _NotFoundProbes:
     in several directories: the ones it invents in `_invented_base`, the ones a
     relative href resolves into, and wherever an absolute link or a redirect
     says. So this asks each directory about ITSELF and hands out that directory's
-    answer only — never a neighbour's.
+    answer only — never a neighbour's. WHICH directory a response is a question
+    about is the caller's to say, through `by_router`: the navigation check
+    reads a page by the router that answered for it, `_router_of`, and the
+    trust pages by the page's own directory. The answers are shared either way,
+    because each one is a fact about one directory and not about who asked.
 
     On demand rather than up front, for two reasons that are both about cost. A
     directory only needs an answer when a response from it actually needs
@@ -2403,7 +2451,7 @@ class _NotFoundProbes:
         """
         return self.for_url(self.anchor)
 
-    def measured(self, url: str) -> _NotFoundProbe | None:
+    def measured(self, url: str, *, by_router: bool = False) -> _NotFoundProbe | None:
         """The answer that covers `url` IF one was already measured. Never asks.
 
         For the second pass over results, where asking would spend a request to
@@ -2412,24 +2460,25 @@ class _NotFoundProbes:
         push the ceiling over on behalf of the report rather than the check.
         """
         for probe in self._measured:
-            if _probe_covers(probe, url):
+            if _probe_covers(probe, url, by_router=by_router):
                 return probe
         return None
 
-    def for_url(self, url: str) -> _NotFoundProbe | None:
+    def for_url(self, url: str, *, by_router: bool = False) -> _NotFoundProbe | None:
         """The answer that covers `url`, asking its directory if none does yet.
 
         None means this run did not measure there and will not guess: the origin
         differs, or the ceiling was already spent.
         """
-        covering = self.measured(url)
+        covering = self.measured(url, by_router=by_router)
         if covering is not None:
             return covering
         # Only after no measured answer covers it, so the same-origin refusal
         # cannot hide an answer that was already paid for.
         if not same_site(url, self.anchor):
             return None
-        directory = _directory_of(url)
+        asked = _router_of(url) if by_router else url
+        directory = _directory_of(asked)
         if not directory:
             return None
         if len(self._measured) >= self._limit:
@@ -2440,7 +2489,7 @@ class _NotFoundProbes:
         # names the base the operator can check and a document-shaped base is
         # resolved by `_join` exactly as `_directory_of` resolved it. Every other
         # directory is probed through the directory itself.
-        base = self.anchor if directory == _directory_of(self.anchor) else join_url(url, ".")
+        base = self.anchor if directory == _directory_of(self.anchor) else join_url(asked, ".")
         probe = _probe_not_found(base, session=self._session, timeout=self._timeout)
         self._measured.append(probe)
         return probe
@@ -2612,9 +2661,11 @@ def count_broken_nav_links(
 
     A link answering HTTP 200 is only a working page where a missing one would
     have got a 404, and that is a fact about the DIRECTORY the response came
-    from, not about the host. So `_NotFoundProbes` asks each directory the menu
-    actually lands in about itself, and each 200 is judged by the answer for its
-    own directory. Pass `not_found` to share one run's answers and one run's
+    from, not about the host. So `_NotFoundProbes` asks each router the menu
+    actually lands in about itself, and each 200 is judged by the answer of the
+    router that served it — `_router_of`, so `/apps/pdf-rotate/` is judged by
+    `/apps/` and a catalogue of trailing-slash links costs one probe, not one
+    per link. Pass `not_found` to share one run's answers and one run's
     ceiling with the other sub-check; without it the probes are sent here, and
     only when there is a menu to sort.
 
@@ -2660,7 +2711,14 @@ def count_broken_nav_links(
     probe path but soft-404s DEEPER inside itself — `/blog/` honest, `/blog/x/y`
     not — is read as honest for the responses that came from `/blog/` itself.
     The unit is the directory, so a router that disagrees with itself within one
-    is invisible here. The probe paths are fixed and published in
+    is invisible here. Reading a trailing-slash link by its parent widens that by
+    one level, deliberately: a link to `/about/` where a subsite with its own
+    router is mounted, serving its error template with 200 at `/about/` itself,
+    is judged by `/`'s honest answer and counts as working. It costs the broken
+    count one link and never a verdict on a page, because `check_trust_pages`
+    reads `/about/` by its own directory and catches exactly that shape. The
+    alternative cost every healthy catalogue its navigation line. The probe
+    paths are fixed and published in
     `NOT_FOUND_PROBE_PATHS`, so a host could special-case them; nothing here
     defends against a site that lies on purpose.
     """
@@ -2753,7 +2811,7 @@ def count_broken_nav_links(
         # for THIS url, so there is no second check to make here: re-testing the
         # same predicate would be a branch no input can take, and a branch no
         # input can take is a comment that looks like a guard.
-        probe = probes.for_url(landed)
+        probe = probes.for_url(landed, by_router=True)
         if probe is None:
             # Nothing was measured where this came from: the per-run ceiling on
             # probed directories was already spent, or the response came from

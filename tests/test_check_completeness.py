@@ -326,15 +326,17 @@ def test_linha_de_navegacao_nomeia_os_links_do_diretorio_que_o_teto_recusou(
     ONDE, para o operador poder apontar uma segunda corrida ao subdiretório.
     """
     base, routes = server
+    # Uma página DENTRO de cada diretório: `/d0/` com barra final seria
+    # respondido pelo roteador da raiz, e o menu inteiro custaria uma sonda.
     diretorios = [f"/d{i}/" for i in range(MAX_PROBED_DIRECTORIES + 2)]
-    itens = "".join(f"<a href='{d}'>{d}</a>" for d in diretorios)
+    itens = "".join(f"<a href='{d}pagina'>{d}</a>" for d in diretorios)
     routes["/"] = (
         200, HTML,
         "<html><head><title>Casa</title></head>"
         f"<body><h1>Casa</h1><p>{PROSA}</p><nav>{itens}</nav></body></html>",
     )
     for d in diretorios:
-        routes[d] = (200, HTML, _home(corpo=f"Pagina {d}. {PROSA}"))
+        routes[d + "pagina"] = (200, HTML, _home(corpo=f"Pagina {d}. {PROSA}"))
 
     monkeypatch.setattr("sys.argv", ["check_completeness.py", base + "/", "-v"])
     codigo = check_completeness.main()
@@ -343,7 +345,7 @@ def test_linha_de_navegacao_nomeia_os_links_do_diretorio_que_o_teto_recusou(
     # Os três últimos diretórios ficaram fora do teto: 1 âncora + 7 medidos.
     recusados = diretorios[MAX_PROBED_DIRECTORIES - 1:]
     for d in recusados:
-        assert f"{base}{d}" in saida
+        assert f"{base}{d}pagina" in saida
     assert "none broken" not in saida
     assert "unmeasured: 3" in saida
     assert f"refused_directories: {recusados}" in saida

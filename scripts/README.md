@@ -83,18 +83,33 @@ when the probed directory is the root.
 The directory a URL belongs to is what `urljoin(url, ".")` says, so a
 document-shaped address — `/index.php`, from an apex that redirects there —
 belongs to the directory containing it, and a trailing slash makes an address
-its own directory. That second part is what costs: on a modern menu nearly every
-link is a directory of its own.
+its own directory. Which directory a RESPONSE is a question about depends on the
+check:
+
+- **A navigation link** is read by the router that answered for it. A trailing
+  slash moves that one level up: `/apps/pdf-rotate/` and `/apps/pdf-split/` are
+  both `/apps/`'s answer, so a catalogue of trailing-slash links costs one probe
+  and not one per link. Read by its own directory, every such link spent a slot,
+  and on 2026-10-19 smallwebapps.com's 21-link menu ran out of the ceiling with
+  11 links unmeasured and the navigation line `MISS` on a healthy site.
+- **A trust page** is read by its own directory, `/about/` for `/about/`. That is
+  where a subsite mounted at `/about/`, serving its own error template with 200,
+  is recognised; the root's honest 404 says nothing about it.
+
+The price of the first, stated: a menu link to such a subsite counts as
+working. It moves the broken-link count by that link and no verdict on a page,
+because the About check reads the same address the strict way.
 
 | | |
 |---|---|
 | ceiling | **8 distinct directories per run** (`MAX_PROBED_DIRECTORIES`) |
 | worst case on the wire | 8 invented requests, or 16 where every directory soft-404s |
-| measured, documented fixture | 6 directories, 15 requests in total against 10 before |
-| measured, 25-link menu of 25 directories | 8 probes against 43 requests to real addresses |
+| measured, documented fixture | 5 directories, 14 requests in total (6 and 15 with every trailing-slash link read as its own) |
+| measured, 25-link menu of 25 routers | 8 probes against 43 requests to real addresses |
+| measured, 25 trailing-slash links under `/` | 1 probe and every link measured (8 probes and 18 links `MISSING` when each link was read as its own directory) |
 | conventional About/Contact paths | one slot between all seventeen, asked at the base they are invented from |
 | past the ceiling | `MISSING` — unverified for a navigation link, "could not be established" for a trust-page candidate, never `PASS`; the report names the first five directories and counts the rest |
-| coverage it costs | a 25-link menu spread over 25 directories has 18 links reported `MISSING` on a host that answers 404 honestly |
+| coverage it costs | a 25-link menu spread over 25 routers has 18 links reported `MISSING` on a host that answers 404 honestly |
 
 That last row is the price and it is not small: on a site whose menu is spread
 wider than the ceiling, most links come back unverified even though the host is
@@ -114,10 +129,12 @@ published navigation is read — addresses that exist, which a browser fetches
 too — while this bounds requests for addresses nobody routes, which only this
 tool sends and which land in someone's error log. Sharing them would make the
 invented load grow with the size of the menu, so raising `--nav-limit` to see a
-big menu would silently double the footprint on a third party. Eight is the
-smallest value that covers the documented fixture's six with room for the two
-additions that are ordinary rather than exotic: a `<base href>` install
-directory, and a footer trust link in a directory of its own.
+big menu would silently double the footprint on a third party. Eight was set as
+the smallest value covering the documented fixture's six directories, when
+every trailing-slash link was read as its own, with room for the two additions
+that are ordinary rather than exotic: a `<base href>` install directory, and a
+footer trust link in a directory of its own. Read by router the fixture needs
+five, and the value was kept rather than lowered in the same change.
 
 No delay is inserted between probes, and there is no flag for one.
 `check_completeness.py` spaces none of its ~20 requests, so slowing only the

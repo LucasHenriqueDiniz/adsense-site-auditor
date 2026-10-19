@@ -3125,26 +3125,31 @@ def test_base_href_de_outro_site_nao_manda_sonda_nenhuma_para_o_terceiro(
 def test_o_teto_de_diretorios_sondados_e_oito(server):
     """O valor, fixado, e o vizinho de cada lado.
 
-    Oito é o menor valor que cobre os seis diretórios da fixture documentada em
-    EXAMPLES.md com folga para as duas adições comuns — um diretório de
+    Oito foi o menor valor que cobria os seis diretórios da fixture documentada
+    em EXAMPLES.md, quando cada link com barra final era lido como o próprio
+    diretório, com folga para as duas adições comuns — um diretório de
     instalação vindo de `<base href>` e um link de confiança no rodapé com
-    diretório próprio. O teto é constante PRÓPRIA e não `DEFAULT_NAV_LINK_LIMIT`:
-    aquele limita quanto da navegação PUBLICADA pelo site é lida, endereços que
-    existem e que um navegador também pede; este limita pedidos a endereços que
-    NINGUÉM roteia, que só esta ferramenta manda e que caem no log de erro de
-    terceiro. Compartilhá-los faria o rastro inventado crescer com o tamanho do
-    menu, e um operador subindo `--nav-limit` dobraria a pegada em silêncio.
+    diretório próprio. Lida pelo roteador, a fixture pede cinco. O teto é
+    constante PRÓPRIA e não `DEFAULT_NAV_LINK_LIMIT`: aquele limita quanto da
+    navegação PUBLICADA pelo site é lida, endereços que existem e que um
+    navegador também pede; este limita pedidos a endereços que NINGUÉM roteia,
+    que só esta ferramenta manda e que caem no log de erro de terceiro.
+    Compartilhá-los faria o rastro inventado crescer com o tamanho do menu, e um
+    operador subindo `--nav-limit` dobraria a pegada em silêncio.
 
-    O menu tem `MAX_PROBED_DIRECTORIES + 1` diretórios distintos, todos vivos e
-    num host honesto. O sétimo do menu é medido; o oitavo não, e o link de lá sai
-    MISSING em vez de aprovado — recusar-se a chutar é a direção segura, e é um
-    falso MISSING limitado e dito no relatório.
+    O menu tem uma página em cada um de `MAX_PROBED_DIRECTORIES + 1` diretórios
+    distintos, todas vivas e num host honesto. Página DENTRO do diretório, e não
+    o diretório com barra final: o roteador de `/d0/` é a raiz, e nove links
+    assim custariam uma sonda só. O sétimo do menu é medido; o oitavo não, e o
+    link de lá sai MISSING em vez de aprovado — recusar-se a chutar é a direção
+    segura, e é um falso MISSING limitado e dito no relatório.
     """
     base, rotas = server
     diretorios = [f"/d{i}/" for i in range(MAX_PROBED_DIRECTORIES + 1)]
-    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de(*diretorios)))
-    for d in diretorios:
-        rotas[d] = (200, {}, pagina(d))
+    links = [d + "pagina" for d in diretorios]
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de(*links)))
+    for c in links:
+        rotas[c] = (200, {}, pagina(c))
 
     relatorio = count_broken_nav_links(base + "/")
 
@@ -3157,12 +3162,97 @@ def test_o_teto_de_diretorios_sondados_e_oito(server):
     # Os dois últimos diretórios ficaram sem medição, e o relatório os nomeia.
     recusados = diretorios[MAX_PROBED_DIRECTORIES - 1:]
     assert relatorio.refused_directories == recusados
-    assert [link.url for link in relatorio.unmeasured] == [base + d for d in recusados]
+    assert [link.url for link in relatorio.unmeasured] == [
+        base + d + "pagina" for d in recusados
+    ]
     assert relatorio.count == 0
     assert relatorio.status is Status.MISSING
     dito = frases(relatorio)
     assert f"ceiling of {MAX_PROBED_DIRECTORIES} probed directories" in dito
     assert recusados[0] in dito
+
+
+# A forma do menu de smallwebapps.com: um catálogo de apps sob `/apps/` e as
+# páginas institucionais na raiz, todos com barra final.
+APPS = [f"/apps/app-{i}/" for i in range(12)]
+INSTITUCIONAIS = ["/about/", "/contact/", "/privacy/", "/terms/"]
+
+
+def test_um_menu_de_links_com_barra_final_e_medido_pelo_roteador_que_respondeu(server):
+    """Achado 1 da revisão do PR #1: a navegação não passava num menu moderno.
+
+    `urljoin("/apps/app-0/", ".")` é `/apps/app-0/`, então medido pelo diretório
+    PRÓPRIO cada link com barra final pedia uma sonda, o teto acabava no oitavo e
+    o resto saía sem medição. Em 2026-10-19 o menu de smallwebapps.com, num site
+    saudável, deu 11 de 21 links sem medição e a linha de navegação MISS — e um
+    menu de links com barra final é o menu comum, não o exótico.
+
+    Quem respondeu por `/apps/app-0/` foi o roteador de `/apps/`, e é a ele que
+    se pergunta: um 404 em `/apps/<sonda>` prova que um 200 de lá é página.
+    Dezesseis links custam duas sondas, `/` e `/apps/`.
+    """
+    base, rotas = server
+    menu = APPS + INSTITUCIONAIS
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de(*menu)))
+    for c in menu:
+        rotas[c] = (200, {}, pagina(c))
+
+    relatorio = count_broken_nav_links(base + "/")
+
+    assert relatorio.checked == len(menu)
+    assert relatorio.unclassified == []
+    assert relatorio.refused_directories == []
+    assert relatorio.status is Status.OK
+    sondados = [c for c in caminhos_pedidos(rotas) if NOT_FOUND_PROBE_PATHS[0] in c]
+    assert sondados == [f"/{NOT_FOUND_PROBE_PATHS[0]}", f"/apps/{NOT_FOUND_PROBE_PATHS[0]}"]
+
+
+def test_o_roteador_de_um_link_com_barra_final_e_o_diretorio_pai(server):
+    """O predicado, direto, nas duas leituras que o módulo usa.
+
+    A navegação lê `/apps/app-0/` pelo roteador que respondeu, `/apps/`. As
+    páginas de confiança continuam lendo pelo diretório próprio, `/apps/app-0/`,
+    que é o que pega um subsite montado ali — ver
+    `test_um_subsite_com_roteador_proprio_nao_passa_por_pagina_sobre`. Sem barra
+    final as duas leituras coincidem, e a raiz é o próprio roteador.
+    """
+    base, _rotas = server
+    apps = _NotFoundProbe("honest", base=base + "/apps/")
+    raiz = _NotFoundProbe("honest", base=base + "/")
+
+    assert _probe_covers(apps, base + "/apps/app-0/", by_router=True) is True
+    assert _probe_covers(apps, base + "/apps/app-0/") is False
+    assert _probe_covers(apps, base + "/apps/app-0", by_router=True) is True
+    assert _probe_covers(apps, base + "/apps/app-0/x/", by_router=True) is False
+    assert _probe_covers(raiz, base + "/about/", by_router=True) is True
+    assert _probe_covers(raiz, base + "/", by_router=True) is True
+    assert _probe_covers(raiz, base, by_router=True) is True
+
+
+def test_um_caminho_com_barra_dupla_nao_manda_a_sonda_do_roteador_para_outro_host(
+    server, outro_servidor
+):
+    """O pai vem de `urljoin(url, "..")`, não de fatiar o caminho.
+
+    `http://h//outro:porta/sub/x/` é um caminho legítimo em `h`. Fatiado, o
+    roteador dele era o CAMINHO `//outro:porta/sub/`, e juntar esse caminho de
+    volta na URL é uma referência de rede: a sonda saía para o outro host, que o
+    operador não nomeou. Um nível abaixo da raiz do outro host, porque com
+    `//outro:porta/x/` o pai fatiado tem o diretório `/`, que é o da âncora, e a
+    sonda ficava em casa por acaso.
+    """
+    base, rotas = server
+    outro, rotas_do_outro = outro_servidor
+    estranho = "/" + outro.split("://", 1)[1] + "/sub/x/"
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de(base + "/" + estranho)))
+    # No fio a barra dupla chega simples, mas o `final_url` a mantém — e é do
+    # `final_url` que o roteador sai.
+    rotas[estranho] = (200, {}, pagina("x"))
+
+    count_broken_nav_links(base + "/")
+
+    assert rotas_do_outro.received == []
+    assert any(NOT_FOUND_PROBE_PATHS[0] in c for c in caminhos_pedidos(rotas))
 
 
 def test_o_teto_e_um_so_para_as_duas_sub_checagens(server):
@@ -3187,7 +3277,7 @@ def test_o_teto_e_um_so_para_as_duas_sub_checagens(server):
     base, rotas = server
     confianca = "".join(f"<a href='/a{i}/sobre'>Sobre</a>" for i in range(3))
     confianca += "<a href='/c0/contato'>Contato</a>"
-    menu = [f"/d{i}/" for i in range(8)]
+    menu = [f"/d{i}/pagina" for i in range(8)]
     rotas["/"] = (
         200,
         {},
@@ -3208,7 +3298,7 @@ def test_o_teto_e_um_so_para_as_duas_sub_checagens(server):
     # sub-checagem, a navegação começaria com o teto inteiro na mão e a soma
     # passaria de `MAX_PROBED_DIRECTORIES`.
     assert sondados & {f"/a{i}/" for i in range(3)}
-    assert sondados & set(menu)
+    assert sondados & {f"/d{i}/" for i in range(8)}
     # E foi o teto que segurou, não a falta de diretório: a corrida pediu
     # endereços em mais diretórios do que ela mediu.
     visitados = {
@@ -3247,13 +3337,13 @@ def test_o_custo_de_uma_corrida_medido_no_fio_por_forma(server):
             rotas[c] = (200, {}, pagina(c))
 
     def seis_diretorios():
-        links = [f"/s{i}/" for i in range(6)]
+        links = [f"/s{i}/pagina" for i in range(6)]
         rotas["/"] = (200, {}, pagina("Casa", extra=menu_de(*links)))
         for c in links:
             rotas[c] = (200, {}, pagina(c))
 
     def acima_do_teto():
-        links = [f"/s{i}/" for i in range(25)]
+        links = [f"/s{i}/pagina" for i in range(25)]
         rotas["/"] = (200, {}, pagina("Casa", extra=menu_de(*links)))
         for c in links:
             rotas[c] = (200, {}, pagina(c))
@@ -3865,10 +3955,10 @@ def test_a_lista_de_diretorios_recusados_diz_quantos_ela_nao_nomeou(server):
     fazer isso para saber se leu a lista inteira.
     """
     base, rotas = server
-    diretorios = [f"/s{i}/" for i in range(25)]
-    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de(*diretorios)))
-    for d in diretorios:
-        rotas[d] = (200, {}, pagina(d))
+    links = [f"/s{i}/pagina" for i in range(25)]
+    rotas["/"] = (200, {}, pagina("Casa", extra=menu_de(*links)))
+    for c in links:
+        rotas[c] = (200, {}, pagina(c))
 
     relatorio = count_broken_nav_links(base + "/", limit=25)
 
@@ -4067,15 +4157,18 @@ def test_um_diretorio_recusado_pelo_teto_nao_e_coberto_por_nenhuma_medicao(serve
     """
     base, rotas = server
     diretorios = [f"/d/{i}/" for i in range(MAX_PROBED_DIRECTORIES + 1)]
-    rotas["/d/"] = (200, {}, pagina("Casa", extra=menu_de(*diretorios)))
-    for d in diretorios:
-        rotas[d] = (200, {}, pagina(d))
+    links = [d + "pagina" for d in diretorios]
+    rotas["/d/"] = (200, {}, pagina("Casa", extra=menu_de(*links)))
+    for c in links:
+        rotas[c] = (200, {}, pagina(c))
 
     relatorio = count_broken_nav_links(base + "/d/")
 
     recusados = [d for d in diretorios if d in relatorio.refused_directories]
     assert recusados, "o teto tem de morder para este teste dizer algo"
-    assert [link.url for link in relatorio.unmeasured] == [base + d for d in recusados]
+    assert [link.url for link in relatorio.unmeasured] == [
+        base + d + "pagina" for d in recusados
+    ]
     assert relatorio.status is Status.MISSING
 
 
