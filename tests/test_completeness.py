@@ -1339,6 +1339,42 @@ def test_placeholder_acentuado_na_home_sem_charset_no_header_e_achado(server, ca
     assert "sera adicionado" in frases(relatorio)
 
 
+def test_home_cujo_charset_declarado_nao_decodifica_nao_e_aprovada(server):
+    """Só o `measure_fetch` recusava o texto adivinhado. O completeness varria o
+    palpite do requests, "em construção" chegava em mojibake e a home saía
+    PASS na mesma página que o `analyze_text_depth` dava como ERROR."""
+    base, rotas = server
+    rodape = "<a href='/about'>Sobre</a> <a href='/contact'>Contato</a>"
+    rotas["/"] = (
+        200,
+        {"Content-Type": "text/html"},
+        '<html><head><meta charset="iso-2022-jp"></head><body><h1>Casa</h1>'
+        f"<p>Esta seção está em construção.</p><footer>{rodape}</footer></body></html>",
+    )
+    rotas["/about"] = (200, {}, pagina("Sobre"))
+    rotas["/contact"] = (200, {}, contato())
+
+    relatorio = check_completeness(base)
+
+    assert relatorio.status is Status.ERROR
+    assert "iso-2022-jp" in frases(relatorio)
+
+
+def test_pagina_de_confianca_cujo_charset_nao_decodifica_e_ERROR(server):
+    base, rotas = server
+    rotas["/"] = (200, {}, home(rodape="<a href='/contact'>Contato</a>"))
+    rotas["/contact"] = (
+        200,
+        {"Content-Type": "text/html"},
+        '<html><head><meta charset="iso-2022-jp"></head><body><h1>Contato</h1>'
+        f"<p>{PROSA}</p><p>O formulário será adicionado.</p></body></html>",
+    )
+
+    relatorio = check_trust_pages(base)
+
+    assert relatorio.pages["contact"].status is Status.ERROR
+    assert "iso-2022-jp" in relatorio.pages["contact"].reason
+
 def test_o_resumo_herda_o_pior_status_das_partes(server):
     """O veredito é derivado das findings emitidas, não de uma lista de status
     escrita à mão que pode divergir do que os checks produzem.

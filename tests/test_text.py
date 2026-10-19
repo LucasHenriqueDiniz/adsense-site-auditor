@@ -1511,11 +1511,14 @@ def test_charset_declarado_que_nao_decodifica_vira_motivo_registrado(server):
     ninguém observou — então o motivo tem que aparecer.
     """
     base, routes = server
-    # Declara utf-16 mas o corpo é utf-8; utf-16 não decodifica bytes ímpares.
-    html = _pagina(TEXTO_PT, charset="utf-16")
+    # Declara iso-2022-jp, que só tem bytes abaixo de 0x80, sobre um corpo UTF-8
+    # acentuado. (Era utf-16; o HTML5 lê uma meta utf-16 como UTF-8, e agora o
+    # fetch também — ver test_http.)
+    html = _pagina(TEXTO_PT, charset="iso-2022-jp")
     routes["/ruim"] = (200, {"Content-Type": "text/html"}, html)
     medido = measure_url(base + "/ruim")
-    assert medido.reason and "utf-16" in medido.reason.lower()
+    assert medido.status is Status.ERROR
+    assert medido.reason and "iso-2022-jp" in medido.reason.lower()
 
 
 def test_pagina_ascii_sem_charset_nao_e_alterada(server):

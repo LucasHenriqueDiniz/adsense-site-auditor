@@ -610,6 +610,11 @@ def fetch_page_texts(
         if content_type not in HTML_CONTENT_TYPES:
             corpus.unavailable[url] = f"not HTML (Content-Type: {content_type})"
             continue
+        if result.charset_error is not None:
+            # The text is requests' guess at bytes the page's declaration does
+            # not decode; shingles taken from it compare a guess with pages.
+            corpus.unavailable[url] = result.charset_error
+            continue
 
         try:
             text = extract(result.text)

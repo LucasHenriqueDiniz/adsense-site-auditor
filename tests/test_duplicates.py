@@ -560,6 +560,23 @@ def test_fetch_registra_o_motivo_do_403_em_vez_de_devolver_none(server):
     assert resultado.status is Status.ERROR
 
 
+def test_pagina_cujo_charset_declarado_nao_decodifica_fica_fora_da_comparacao(server):
+    """O texto de uma página que declara uma codificação que seus bytes não
+    honram é o palpite do requests. Comparar palpite com páginas era decidir
+    duplicação sobre texto que ninguém observou."""
+    base, rotas = server
+    rotas["/ok"] = (200, {"Content-Type": "text/html"}, PAGINA_QUIZ)
+    rotas["/ruim"] = (
+        200,
+        {"Content-Type": "text/html"},
+        '<html><head><meta charset="iso-2022-jp"></head><body><p>ação</p></body></html>',
+    )
+
+    corpus = fetch_page_texts([base + "/ok", base + "/ruim"], extract=identidade)
+
+    assert list(corpus.texts) == [base + "/ok"]
+    assert "iso-2022-jp" in corpus.unavailable[base + "/ruim"]
+
 def test_conteudo_nao_html_nao_entra_como_pagina_de_comparacao(server):
     """Defeito medium: sem checar Content-Type, um PDF servido com 200 — comum
     em crawls — era alimentado no HTMLParser e virava uma 'página' de comparação

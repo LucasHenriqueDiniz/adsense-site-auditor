@@ -3,7 +3,7 @@
 import math
 import time
 
-from adsense_checks.http import MAX_WAIT_SECONDS, _declared_charset, fetch
+from adsense_checks.http import MAX_WAIT_SECONDS, _declared_charset, _web_encoding, fetch
 from adsense_checks.status import Status
 
 
@@ -490,13 +490,12 @@ def test_charset_declarado_que_nao_decodifica_fica_registrado_no_fetch(server):
     """O texto fica o palpite do requests, e o motivo viaja junto para quem
     for transformar o texto num veredito."""
     base, routes = server
-    html = '<html><head><meta charset="utf-16"></head><body><p>ação</p></body></html>'
-    # Ímpar: UTF-16 lê os bytes de dois em dois e não decodifica um número ímpar.
-    assert len(html.encode()) % 2 == 1
+    # ISO-2022-JP só tem bytes abaixo de 0x80, e o corpo é UTF-8 acentuado.
+    html = '<html><head><meta charset="iso-2022-jp"></head><body><p>ação</p></body></html>'
     routes["/ruim"] = (200, {"Content-Type": "text/html"}, html)
     r = fetch(base + "/ruim")
     assert r.charset_error is not None
-    assert "utf-16" in r.charset_error
+    assert "iso-2022-jp" in r.charset_error
 
 
 def test_o_charset_declarado_e_procurado_so_no_primeiro_kib():
@@ -538,3 +537,130 @@ def test_o_charset_declarado_e_procurado_so_no_primeiro_kib():
               "<p><meta charset='shift_jis'> era o exemplo acima.</p>")
     assert artigo.index("<meta charset=") > 1024
     assert _declared_charset(artigo) == ""
+
+
+# ---------------------------------------------------------------------------
+# A ordem do HTML5: BOM, header, meta, UTF-8. E só rótulos de codificação da web.
+# ---------------------------------------------------------------------------
+
+
+def test_meta_charset_undefined_e_ignorada_e_nao_vira_url_invalida(server):
+    """Template que renderiza variável vazia escreve `<meta charset="undefined">`.
+    O Python tem um codec com esse nome, que levanta UnicodeError puro a cada
+    byte; ele saía de `_decode` e caía na cláusula de URL do `fetch`: a página
+    vinha como "InvalidURL", inalcançável, para o crawl e o completeness."""
+    base, routes = server
+    html = '<html><head><meta charset="undefined"></head><body><p>ação</p></body></html>'
+    routes["/t"] = (200, {"Content-Type": "text/html"}, html)
+    r = fetch(base + "/t")
+    assert r.error is None
+    assert r.charset_error is None
+    assert "ação" in r.text
+
+
+def test_rotulo_desconhecido_na_meta_e_ignorado(server):
+    """Um navegador ignora o rótulo que não conhece e segue para o próximo passo.
+    Aqui ele virava `charset_error`, e a contagem recusava a página."""
+    base, routes = server
+    html = '<html><head><meta charset="x-desconhecido"></head><body><p>ação</p></body></html>'
+    routes["/t"] = (200, {"Content-Type": "text/html"}, html)
+    r = fetch(base + "/t")
+    assert r.charset_error is None
+    assert "ação" in r.text
+
+
+def test_rotulo_desconhecido_no_header_cede_a_vez_para_a_meta(server):
+    """`charset=utf8mb4` é o nome do MySQL, não um rótulo da web. O requests
+    decodificava com UTF-8 e caracteres de substituição; um navegador ignora o
+    rótulo e lê a meta, que aqui diz windows-1252."""
+    base, routes = server
+    corpo = (
+        '<html><head><meta charset="windows-1252"></head><body><p>'
+        "\u201ca\u00e7\u00e3o\u201d</p></body></html>"
+    ).encode("windows-1252")
+    routes["/t"] = (200, {"Content-Type": "text/html; charset=utf8mb4"}, corpo)
+    r = fetch(base + "/t")
+    assert "\u201ca\u00e7\u00e3o\u201d" in r.text
+
+
+def test_bom_ganha_da_meta(server):
+    """Página regravada em UTF-8 com BOM e a meta antiga ainda dizendo
+    windows-1252. Para o navegador é UTF-8; lida pela meta, voltava o mesmo
+    mojibake que esta camada existe para tirar."""
+    base, routes = server
+    corpo = b"\xef\xbb\xbf" + (
+        '<html><head><meta charset="windows-1252"></head><body><p>em construção</p>'
+        "</body></html>"
+    ).encode()
+    routes["/t"] = (200, {"Content-Type": "text/html"}, corpo)
+    r = fetch(base + "/t")
+    assert "em construção" in r.text
+    assert not r.text.startswith(("\ufeff", "ï»¿"))
+
+
+def test_bom_ganha_do_header(server):
+    """No HTML5 o BOM vem antes até do Content-Type."""
+    base, routes = server
+    corpo = b"\xef\xbb\xbf" + "<p>em construção</p>".encode()
+    routes["/t"] = (200, {"Content-Type": "text/html; charset=iso-8859-1"}, corpo)
+    r = fetch(base + "/t")
+    assert "em construção" in r.text
+
+
+@pytest.mark.parametrize("bom, codec", [(b"\xfe\xff", "utf-16-be"), (b"\xff\xfe", "utf-16-le")])
+def test_bom_utf16_decide_a_codificacao(server, bom, codec):
+    base, routes = server
+    routes["/t"] = (200, {"Content-Type": "text/plain"}, bom + "Disallow: /ação/".encode(codec))
+    r = fetch(base + "/t")
+    assert r.text == "Disallow: /ação/"
+
+
+def test_meta_utf16_e_lida_como_utf8(server):
+    """O HTML5 manda ler uma meta UTF-16 como UTF-8: um documento que chegou a
+    ser varrido atrás de `<meta>` é compatível com ASCII, então o rótulo está
+    errado. Aqui o rótulo era seguido, a decodificação falhava e a página saía
+    como ERROR numa ferramenta e como texto adivinhado nas outras."""
+    base, routes = server
+    html = '<html><head><meta charset="utf-16"></head><body><p>ação</p></body></html>'
+    assert len(html.encode()) % 2 == 1
+    routes["/t"] = (200, {"Content-Type": "text/html"}, html)
+    r = fetch(base + "/t")
+    assert r.charset_error is None
+    assert "ação" in r.text
+
+
+# Cada codificação do padrão WHATWG, por um rótulo seu, e o codec com que é lida.
+CODIFICACOES_DA_WEB = {
+    "utf-8": "utf-8", "utf8": "utf-8", "ibm866": "cp866",
+    "iso-8859-1": "cp1252", "latin1": "cp1252", "ascii": "cp1252", "us-ascii": "cp1252",
+    "iso-8859-2": "iso8859-2", "iso-8859-3": "iso8859-3", "iso-8859-4": "iso8859-4",
+    "iso-8859-5": "iso8859-5", "iso-8859-6": "iso8859-6", "iso-8859-7": "iso8859-7",
+    "iso-8859-8": "iso8859-8", "iso-8859-8-i": "iso8859-8", "iso-8859-9": "cp1254",
+    "iso-8859-10": "iso8859-10", "iso-8859-11": "cp874", "tis-620": "cp874",
+    "iso-8859-13": "iso8859-13", "iso-8859-14": "iso8859-14", "iso-8859-15": "iso8859-15",
+    "iso-8859-16": "iso8859-16", "koi8-r": "koi8-r", "koi8-u": "koi8-u",
+    "macintosh": "mac-roman", "x-mac-cyrillic": "mac-cyrillic", "windows-874": "cp874",
+    "windows-1250": "cp1250", "windows-1251": "cp1251", "windows-1252": "cp1252",
+    "windows-1253": "cp1253", "windows-1254": "cp1254", "windows-1255": "cp1255",
+    "windows-1256": "cp1256", "windows-1257": "cp1257", "windows-1258": "cp1258",
+    "gbk": "gbk", "gb2312": "gbk", "gb18030": "gb18030", "big5": "big5hkscs",
+    "big5-hkscs": "big5hkscs", "euc-jp": "euc_jp", "iso-2022-jp": "iso2022_jp",
+    "shift_jis": "cp932", "sjis": "cp932", "windows-31j": "cp932", "euc-kr": "cp949",
+    "windows-949": "cp949",
+    "utf-16": "utf-16-le", "utf-16le": "utf-16-le", "utf-16be": "utf-16-be",
+    " UTF-8 ": "utf-8",
+}
+
+
+def test_cada_codificacao_da_web_e_lida_com_o_codec_do_padrao():
+    for rotulo, codec in CODIFICACOES_DA_WEB.items():
+        assert _web_encoding(rotulo) == codec, rotulo
+
+
+def test_codec_do_python_que_nao_e_codificacao_da_web_nao_e_rotulo():
+    """O Python decodifica muita coisa que nenhuma página pode estar: `undefined`
+    levanta a cada byte, `punycode` e `idna` são de nomes de domínio, `hex` nem
+    é texto. Um rótulo desses é ignorado, como o navegador ignora."""
+    for rotulo in ("undefined", "punycode", "idna", "unicode_escape", "raw_unicode_escape",
+                   "utf-7", "utf-32", "hex", "rot13", "x-user-defined", "x-desconhecido", ""):
+        assert _web_encoding(rotulo) == "", rotulo

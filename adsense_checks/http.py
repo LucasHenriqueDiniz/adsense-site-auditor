@@ -28,6 +28,7 @@ mojibake and stopped matching anything.
 
 from __future__ import annotations
 
+import codecs
 import re
 from dataclasses import dataclass, field
 from urllib.parse import SplitResult, urldefrag, urljoin, urlsplit
@@ -249,6 +250,108 @@ _META_CHARSET = re.compile(
 # that happens to contain the string is not declaring an encoding.
 _HTML_MEDIA_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 
+# The byte-order marks the WHATWG Encoding Standard recognises. A BOM decides
+# the encoding before the header or the document is asked: a page re-saved as
+# UTF-8 with a BOM while still declaring windows-1252 is UTF-8 to a browser.
+_BOMS = (
+    (b"\xef\xbb\xbf", "utf-8"),
+    (b"\xfe\xff", "utf-16-be"),
+    (b"\xff\xfe", "utf-16-le"),
+)
+
+# Encoding names of the WHATWG standard that Python has no alias for.
+_LABEL_ALIASES = {
+    "iso-8859-8-i": "iso-8859-8",
+    "x-mac-cyrillic": "mac-cyrillic",
+    "windows-874": "cp874",
+    "windows-31j": "cp932",
+    "windows-949": "cp949",
+}
+
+# The encodings a web page can be in, keyed by Python's canonical name for a
+# label, with the codec each is read as. The keys are the WHATWG Encoding
+# Standard's encodings; anything else Python can decode is not a web encoding
+# and a label naming it is ignored, as a browser ignores it. `undefined` is the
+# reason this is an allowlist: a template rendering an unset variable writes
+# `<meta charset="undefined">`, Python has a codec by that name that raises a
+# bare UnicodeError on every byte, and it walked out of `_decode` into the
+# URL-error clause of `fetch` — the page reported unreachable.
+#
+# The values carry the standard's own remapping: `iso-8859-1`, `latin1` and
+# `ascii` are read as windows-1252, `iso-8859-9` as windows-1254, `tis-620` and
+# `iso-8859-11` as windows-874, `gb2312` as GBK, `big5` as Big5-HKSCS,
+# `shift_jis` as windows-31J and `euc-kr` as windows-949. Two encodings of the
+# standard are left out: x-user-defined, which Python has no codec for, and
+# `replacement`, which decodes nothing.
+_WEB_ENCODINGS = {
+    codecs.lookup(label).name: codec
+    for label, codec in (
+        ("utf-8", "utf-8"),
+        ("ibm866", "cp866"),
+        ("iso-8859-1", "cp1252"),
+        ("ascii", "cp1252"),
+        ("iso-8859-2", "iso8859-2"),
+        ("iso-8859-3", "iso8859-3"),
+        ("iso-8859-4", "iso8859-4"),
+        ("iso-8859-5", "iso8859-5"),
+        ("iso-8859-6", "iso8859-6"),
+        ("iso-8859-7", "iso8859-7"),
+        ("iso-8859-8", "iso8859-8"),
+        ("iso-8859-9", "cp1254"),
+        ("iso-8859-10", "iso8859-10"),
+        ("iso-8859-11", "cp874"),
+        ("tis-620", "cp874"),
+        ("iso-8859-13", "iso8859-13"),
+        ("iso-8859-14", "iso8859-14"),
+        ("iso-8859-15", "iso8859-15"),
+        ("iso-8859-16", "iso8859-16"),
+        ("koi8-r", "koi8-r"),
+        ("koi8-u", "koi8-u"),
+        ("macintosh", "mac-roman"),
+        ("mac-cyrillic", "mac-cyrillic"),
+        ("cp874", "cp874"),
+        ("windows-1250", "cp1250"),
+        ("windows-1251", "cp1251"),
+        ("windows-1252", "cp1252"),
+        ("windows-1253", "cp1253"),
+        ("windows-1254", "cp1254"),
+        ("windows-1255", "cp1255"),
+        ("windows-1256", "cp1256"),
+        ("windows-1257", "cp1257"),
+        ("windows-1258", "cp1258"),
+        ("gbk", "gbk"),
+        ("gb2312", "gbk"),
+        ("gb18030", "gb18030"),
+        ("big5", "big5hkscs"),
+        ("big5-hkscs", "big5hkscs"),
+        ("euc-jp", "euc_jp"),
+        ("iso-2022-jp", "iso2022_jp"),
+        ("shift_jis", "cp932"),
+        ("cp932", "cp932"),
+        ("euc-kr", "cp949"),
+        ("cp949", "cp949"),
+        ("utf-16", "utf-16-le"),
+        ("utf-16le", "utf-16-le"),
+        ("utf-16be", "utf-16-be"),
+    )
+}
+
+
+def _web_encoding(label: str) -> str:
+    """The codec a web page labelled `label` is read with, or "" for none.
+
+    "" for an empty label, one Python does not know, and one Python knows that
+    is not an encoding a page can be in.
+    """
+    label = label.strip().lower()
+    if not label:
+        return ""
+    try:
+        name = codecs.lookup(_LABEL_ALIASES.get(label, label)).name
+    except LookupError:
+        return ""
+    return _WEB_ENCODINGS.get(name, "")
+
 
 def _header_charset(content_type: str) -> str:
     """The charset parameter of a Content-Type, lowercased. Empty when absent."""
@@ -291,34 +394,46 @@ def _decode(resp: requests.Response) -> tuple[str, str | None]:
         and `Disallow: /promoção/` normalized to a path no URL has, so the
         AdSense crawler was allowed into a directory the site had closed to it.
 
-    So the bytes are decoded here, once, for every caller. A charset in the
-    header is believed. Without one, an HTML document's own `<meta>` declaration
-    is honoured, and failing that the body is read as UTF-8 if it decodes
-    strictly as UTF-8 — a multi-byte sequence that decodes strictly is UTF-8 in
-    every document not built to fool this check. What remains is a genuine
-    legacy page declaring nothing, and requests' own reading of it stands:
-    ISO-8859-1 for text, where its letters are letters.
+    So the bytes are decoded here, once, for every caller, in the order of the
+    HTML5 encoding sniffing algorithm:
 
-    A document that declares an encoding its bytes do not honour keeps
-    requests' reading, and says so in the second value. Any text taken from it
-    is a guess, and the caller decides whether a guess can carry a verdict.
+      1. a byte-order mark, which beats everything after it;
+      2. the header's charset, when it names an encoding a page can be in;
+      3. for an HTML document, its own `<meta>` declaration in the first 1024
+         bytes, with a UTF-16 label read as UTF-8, as HTML5 says to;
+      4. UTF-8, when the body decodes strictly as UTF-8 — a multi-byte sequence
+         that decodes strictly is UTF-8 in every document not built to fool
+         this check;
+      5. otherwise requests' own reading stands: a genuine legacy page
+         declaring nothing, ISO-8859-1 for text, where its letters are letters.
+
+    A label that names no web encoding is skipped, as a browser skips it (see
+    `_WEB_ENCODINGS`). A `<meta>` naming one that the bytes do not honour keeps
+    requests' reading and says so in the second value: any text taken from it is
+    a guess, and a caller that turns text into a verdict refuses it. The BOM and
+    the header are decoded with replacement characters, as a browser does, so
+    neither can fail.
     """
-    content_type = resp.headers.get("content-type", "")
-    if _header_charset(content_type):
-        # The server said what it sent, and requests decoded with it.
-        return resp.text, None
     raw = resp.content
-    media_type = content_type.split(";")[0].strip().lower()
-    declared = (
-        _declared_charset(raw[:_DECLARATION_WINDOW].decode("iso-8859-1"))
-        if media_type in _HTML_MEDIA_TYPES
-        else ""
-    )
-    if declared:
-        try:
-            return raw.decode(declared), None
-        except (LookupError, UnicodeDecodeError):
-            return resp.text, f"declared charset {declared!r} does not decode the body"
+    for bom, codec in _BOMS:
+        if raw.startswith(bom):
+            return raw[len(bom) :].decode(codec, "replace"), None
+    content_type = resp.headers.get("content-type", "")
+    header = _web_encoding(_header_charset(content_type))
+    if header:
+        return raw.decode(header, "replace"), None
+    if content_type.split(";")[0].strip().lower() in _HTML_MEDIA_TYPES:
+        label = _declared_charset(raw[:_DECLARATION_WINDOW].decode("iso-8859-1"))
+        declared = _web_encoding(label)
+        if declared in ("utf-16-le", "utf-16-be"):
+            # A page that reached a `<meta>` prescan is ASCII-compatible, so
+            # a UTF-16 label in it is a mistake, and HTML5 reads it as UTF-8.
+            declared = "utf-8"
+        if declared:
+            try:
+                return raw.decode(declared), None
+            except UnicodeDecodeError:
+                return resp.text, f"declared charset {label!r} does not decode the body"
     try:
         return raw.decode("utf-8"), None
     except UnicodeDecodeError:
