@@ -514,7 +514,13 @@ def _link_only(roots: list[_Node], words: _LinkWords | None = None) -> frozenset
         node, at = pending.pop()
         inside, outside = words[node]
         if inside and not outside:
-            if not _in_running_text(node, words, at):
+            # A heading wrapped in a link to its own anchor — `<h2><a
+            # href="#parte">` in many blog and docs themes — is still the
+            # heading of its section. Cut as navigation, its section lost the
+            # heading that vouched for it, became doubt, and a 357-word page
+            # read ERROR. A heading inside a link-only card still goes with
+            # the card: there the card is the subtree found, not the heading.
+            if node.tag not in HEADING_ELEMENTS and not _in_running_text(node, words, at):
                 found.add(node)
             continue
         for i, child in enumerate(node.content):
@@ -552,13 +558,21 @@ def _in_running_text(node: _Node, words: _LinkWords, at: tuple[_Node, int] | Non
         block = item.parent
         at = (block, next(i for i, c in enumerate(block.content) if c is item))
     block, index = at
-    return _worded(block.content, index, -1, words) or _worded(block.content, index, 1, words)
+    flow = block.content
+    return (
+        _worded(flow, index, -1, words)
+        or _worded(flow, index, 1, words)
+        or _sentence_goes_on(flow, index, words)
+    )
 
 
 def _worded(flow: list[str | _Node], index: int, step: int, words: _LinkWords) -> bool:
     """Whether the nearest thing to `flow[index]`, going `step`, carries a word.
 
-    Spaces and punctuation are looked past; a block or a link stops the look.
+    Spaces and punctuation are looked past, written as text or wrapped in an
+    inline element of their own (`<span>:</span>`): the two spellings of one
+    sentence judged differently, and the second cut its link. A block or a link
+    stops the look.
     """
     j = index + step
     while 0 <= j < len(flow):
@@ -569,8 +583,43 @@ def _worded(flow: list[str | _Node], index: int, step: int, words: _LinkWords) -
         elif not item.dropped:
             if item.tag not in INLINE_ELEMENTS:
                 return False
-            return item in words and words[item][1]
+            inside, outside = words.get(item, (False, False))
+            if outside:
+                return True
+            if inside:
+                return False
         j += step
+    return False
+
+
+def _sentence_goes_on(flow: list[str | _Node], index: int, words: _LinkWords) -> bool:
+    """Whether `flow[index]` opens a run of links, joined by spaces alone, that
+    the sentence goes on right after: "<a>Foo</a> <a>Bar</a> é uma biblioteca".
+
+    `_worded` stops at a link, so the first of two links opening a sentence had
+    only a link beside it and was cut. Looking along the run on either side
+    would undo what `_worded` stops: "Tags: <a>pdf</a> <a>guias</a>" is a run
+    with a word beside it too. The difference is the sentence going on after
+    the run — a label introduces a list and ends there, a sentence continues. So
+    only the right side counts, past spaces only, and it must start with a word:
+    "… <a>guias</a>. Mais texto" ends at the period. A run joined by commas,
+    and one ending its sentence, are left as `_worded` judges them.
+    """
+    j = index + 1
+    while j < len(flow):
+        item = flow[j]
+        if isinstance(item, str):
+            if item.strip():
+                return bool(_WORD.match(item.lstrip()))
+        elif not item.dropped:
+            if item.tag not in INLINE_ELEMENTS:
+                return False
+            inside, outside = words.get(item, (False, False))
+            if outside:
+                return True
+            if not inside:
+                return False
+        j += 1
     return False
 
 
@@ -609,7 +658,8 @@ def _page_title(
             continue
         if any(above in furniture for above in _ancestors(node)):
             continue
-        if node in _link_only([node], link_words) and _is_logo(node, url):
+        inside, outside = link_words[node]
+        if inside and not outside and _is_logo(node, url):
             continue
         return node
     return None
@@ -1229,7 +1279,8 @@ def main_content_text(html: str, *, url: str = "") -> str:
          title can widen it, it climbs as far as its prose outweighs the rest
          it would count (see `_prose_region`). What the
          widening collects beside the title and the block loses its
-         nav/header/footer/aside and every subtree that is all link text; the
+         nav/header/footer/aside and every subtree that is all link text, but
+         for a link with a word right beside it (see `_in_running_text`); the
          block and the title themselves are taken whole. Text the widening
          cannot place — no heading, before the title or after the block — is
          returned like the rest: only `measure_depth` says it is in doubt

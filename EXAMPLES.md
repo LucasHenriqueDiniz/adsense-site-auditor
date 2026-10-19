@@ -377,15 +377,19 @@ Behaviour observed in the runs above, recorded here because a reader will hit it
   722.5 and 553. One of the 142, compress-pdf-to-1mb, kept its `<h1>` inside a
   winning hero and read 182 where the reference holds 541; it now reads 547.
 
-  Five shapes are still wrong. Three of the 142 still stop short with no title
+  Six shapes are still wrong. Three of the 142 still stop short with no title
   to climb to: each has 213 to 412 words of tool interface beside its
-  sections, and that outweighs the prose beyond it. Two blocks
-  hanging straight off the `<body>`, with no wrapper of their own, meet only at
-  the page, so the larger is counted alone. A sidebar written in `<p>`s is
-  prose to every rule here. Plain text that is not content but carries a
-  heading, or sits between the `<h1>` and the block, is counted without a
-  doubt raised. And a link list with any word outside its links — "News (15)" —
-  is text, so it stays in.
+  sections, and that outweighs the prose beyond it. Two blocks hanging straight
+  off the `<body>`, with no wrapper of their own, meet only at the page, so the
+  larger is counted alone. A sidebar written in `<p>`s is prose to every rule
+  here. Plain text that is not content but carries a heading, or sits between
+  the `<h1>` and the block, is counted without a doubt raised. A link list with
+  any word outside its links — "News (15)" — is text, so it stays in. And a run
+  of links inside a sentence counts whole only when it is joined by spaces and
+  the sentence goes on right after it, which is what tells it from a labelled
+  list: "<a>Foo</a>, <a>Bar</a> e <a>Baz</a>" keeps Bar and Baz but cuts Foo,
+  and a run that ends its sentence keeps only the links with words beside
+  them.
 
   None of this applies once a page has a `<main>`, which is counted whole,
   link grids included. smallwebapps.com added one to its tool pages on

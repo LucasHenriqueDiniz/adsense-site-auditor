@@ -907,8 +907,36 @@ def test_bloco_dentro_da_mobilia_nao_sobe():
             '<a href="/t3">guias</a></div>',
             {"ferramentas", "guias"},
         ),
+        # Pontuação num <span> próprio é pontuação, como escrita direto no texto.
+        ('<div><p><a href="/x">Foo</a><span>:</span> uma biblioteca</p></div>', set()),
+        # Dois links abrindo a frase: a frase continua depois deles.
+        ('<div><p><a href="/x">Foo</a> <a href="/y">Bar</a> e uma biblioteca</p></div>', set()),
+        # Separados só por espaço, mas sem frase depois: é a lista do rótulo.
+        (
+            '<div>Tags: <a href="/t1">pdf</a> <a href="/t2">ferramentas</a> '
+            '<a href="/t3">guias</a></div>',
+            {"ferramentas", "guias"},
+        ),
+        # O ponto encerra a lista; o que vem depois não a transforma em frase.
+        # O último link encosta na frase seguinte e fica; o do meio sai.
+        (
+            '<div>Tags: <a href="/t1">pdf</a> <a href="/t2">ferramentas</a> '
+            '<a href="/t3">guias</a>. Mais texto aqui</div>',
+            {"ferramentas"},
+        ),
     ],
-    ids=["frase", "inicio-da-frase", "irmao-inline", "linha-propria", "bloco-de-link", "rotulo"],
+    ids=[
+        "frase",
+        "inicio-da-frase",
+        "irmao-inline",
+        "linha-propria",
+        "bloco-de-link",
+        "rotulo",
+        "pontuacao-em-span",
+        "dois-links-abrem-a-frase",
+        "rotulo-com-espacos",
+        "rotulo-e-ponto",
+    ],
 )
 def test_link_em_texto_corrido_nao_e_so_link(html, so_link):
     from adsense_checks.text import _collect, _iter_elements, _link_only, _normalize, _parse
@@ -916,6 +944,23 @@ def test_link_em_texto_corrido_nao_e_so_link(html, so_link):
     doc = _parse(html)
     div = next(n for n in _iter_elements(doc.root) if n.tag == "div")
     assert {_normalize(_collect(n)) for n in _link_only([div])} == so_link
+
+
+def test_heading_que_e_ancora_de_si_mesmo_continua_heading():
+    """`<h2><a href="#parte">Parte dois</a></h2>`, o heading que linka a própria
+    âncora, é comum em temas de blog e de documentação. Lido como navegação, ele
+    saía da conta e a seção ficava sem heading: virava dúvida, e a página dava
+    353 palavras, ERROR, onde a mesma com <h2> sem link dá 357, INFO."""
+    html = (
+        '<html><body><div class="post"><h1>Titulo</h1>'
+        f'<section><h2>Parte um</h2><div class="b"><p>{_palavras(200)}</p></div></section>'
+        f'<section><h2><a href="#dois">Parte dois</a></h2><p>{_palavras(90)}</p></section>'
+        f'<section><h2><a href="#tres">Parte tres</a></h2><p>{_palavras(60)}</p></section>'
+        "</div></body></html>"
+    )
+    d = measure_depth(html)
+    assert d.words == 1 + 2 + 200 + 2 + 90 + 2 + 60
+    assert d.status is Status.INFO, d.reason
 
 
 def test_lista_de_tags_com_rotulo_nao_vira_texto():
