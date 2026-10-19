@@ -387,26 +387,27 @@ class _PendingAnchor:
     region: Region
 
 
-# The words a class, id or role uses to name a page's furniture. They name it at
-# the start or the end of a word — `navbar`, `topnav`, `megamenu`, `menuitem`,
-# `pagefooter` — and never in the middle: "nav" is inside `unavailable`, and as
-# a substring it filed a shop's unavailable-product notice, links included,
-# under the navigation, measured on 2026-10-19. The same missing word boundary
-# `_compile` and `_account_patterns` were written to remove.
+# The words a class, id or role uses to name a page's furniture, matched
+# anywhere in it: sites write them alone (`nav`, `menu-principal`), glued to
+# others (`navbar`, `topnavbar`, `mainnavigation`, `megamenuwrapper`,
+# `mobilenavtoggle`) and in camelCase, and a rule that wanted them at the start
+# or end of a word lost every compound with the name in the middle — six of the
+# shapes above, measured on 2026-10-19.
 _NAV_WORDS = ("nav", "menu")
 _FOOTER_WORDS = ("footer", "rodape")
 
+# The one word measured to carry "nav" by accident. `unavailable` is
+# `un` + `avail`, and as a plain substring it filed a shop's
+# unavailable-product notice, links to removed pages included, under the
+# navigation. Taken out before matching. What still matches by accident is
+# rarer and stated: `knave`, `navio`, `canavial`.
+_NOT_A_REGION = "avail"
 
-def _ident_words(value: str) -> list[str]:
-    """The words of a class, id or role value: split at anything that is not a
-    letter or digit and at a camelCase boundary, folded."""
-    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", value)
-    return [word for word in re.split(r"[^a-z0-9]+", fold(spaced)) if word]
 
-
-def _names_region(words: list[str], names: tuple[str, ...]) -> bool:
-    """Whether one of `words` starts or ends with one of `names`."""
-    return any(word.startswith(names) or word.endswith(names) for word in words)
+def _names_region(ident: str, names: tuple[str, ...]) -> bool:
+    """Whether a class, id or role value carries one of `names`."""
+    text = fold(ident).replace(_NOT_A_REGION, " ")
+    return any(name in text for name in names)
 
 
 class _DocumentParser(HTMLParser):
@@ -436,10 +437,9 @@ class _DocumentParser(HTMLParser):
         if tag in ("nav", "header"):
             return "nav"
         ident = f"{attrs.get('class', '')} {attrs.get('id', '')} {attrs.get('role', '')}"
-        words = _ident_words(ident)
-        if _names_region(words, _FOOTER_WORDS):
+        if _names_region(ident, _FOOTER_WORDS):
             return "footer"
-        if _names_region(words, _NAV_WORDS):
+        if _names_region(ident, _NAV_WORDS):
             return "nav"
         return self._region()
 

@@ -4783,20 +4783,26 @@ def test_regiao_pela_classe_casa_palavra_e_nao_pedaco_de_palavra():
     """"nav" está dentro de `unavailable`. Casado como substring, o aviso de
     produto indisponível de uma loja virava menu, e os links dele — páginas
     removidas, que respondem 404 — contavam para o limite de site abandonado.
-    Medido em 2026-10-19. O nome vale no começo ou no fim de uma palavra da
-    classe, do id ou do role, não no meio."""
+    Medido em 2026-10-19. A primeira correção exigiu o nome no começo ou no fim
+    de uma palavra e perdeu os compostos com o nome no meio, que os temas usam;
+    a regra agora é substring, tirando o `avail` que produzia o acidente."""
     def regiao(atributos: str) -> str:
         html = f'<body><div {atributos}><a href="/x">x</a></div></body>'
         return parse_document(html).links[0].region
 
-    for atributos in ('class="unavailable-notice"', 'class="is-unavailable"', 'id="canavial"',
-                      'class="cardapio-semanal"', 'class="manavai"'):
+    for atributos in ('class="unavailable-notice"', 'class="is-unavailable"',
+                      'id="product-unavailable"', 'class="availability"',
+                      'class="cardapio-semanal"'):
         assert regiao(atributos) == "body", atributos
     for atributos in ('class="main-nav"', 'class="navbar"', 'class="topnav"', 'class="mainNav"',
                       'class="site-navigation"', 'role="navigation"', 'class="megamenu"',
                       'class="menuitem"', 'id="menuTopo"', 'class="menu-principal"',
-                      # camelCase com o nome no meio: só a quebra o põe no começo.
-                      'class="siteNavigationBar"'):
+                      'class="siteNavigationBar"',
+                      # Compostos com o nome no meio, que a regra de começo ou fim
+                      # de palavra perdia: medido em 2026-10-19.
+                      'class="topnavbar"', 'class="mainnavigation"', 'class="subnavigation"',
+                      'class="megamenuwrapper"', 'class="headermenubar"',
+                      'class="mobilenavtoggle"'):
         assert regiao(atributos) == "nav", atributos
     for atributos in ('class="pagefooter"', 'class="site-footer"', 'id="footerWidgets"',
                       'class="rodape"', 'class="rodapé-site"', 'id="pageFooterArea"'):
