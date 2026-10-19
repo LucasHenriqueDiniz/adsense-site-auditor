@@ -8,6 +8,7 @@ que cada teste monta.
 
 from __future__ import annotations
 
+import inspect
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -145,3 +146,27 @@ def sessoes(monkeypatch):
 
     monkeypatch.setattr(requests, "Session", _Contada)
     return contagem
+
+
+def _cookie_da_requisicao():
+    """O cabeçalho Cookie da requisição HTTP em curso.
+
+    O cabeçalho é o único lugar onde 'esta requisição carrega um cookie'
+    aparece de verdade. Ramificar por contador de chamadas provaria apenas que
+    saiu um segundo GET — que é justamente o que os testes de cookie NÃO podem
+    se contentar em provar. A fixture `server` entrega ao route só o método
+    HTTP, então o handler que o chamou é procurado nos quadros acima.
+    """
+    frame = inspect.currentframe()
+    while frame is not None:
+        handler = frame.f_locals.get("self")
+        if isinstance(handler, BaseHTTPRequestHandler):
+            return handler.headers.get("Cookie", "")
+        frame = frame.f_back
+    raise AssertionError("handler HTTP não encontrado na pilha de chamadas")
+
+
+@pytest.fixture
+def cookie_da_requisicao():
+    """A função que lê o Cookie da requisição em curso, para uma rota usar."""
+    return _cookie_da_requisicao

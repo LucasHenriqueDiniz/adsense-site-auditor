@@ -31,10 +31,15 @@ from __future__ import annotations
 import codecs
 import http.cookiejar
 import re
+import time
 from dataclasses import dataclass, field
+from datetime import timedelta
 from urllib.parse import SplitResult, urldefrag, urljoin, urlsplit
 
 import requests
+from requests.cookies import extract_cookies_to_jar
+from requests.models import DEFAULT_REDIRECT_LIMIT
+from requests.utils import requote_uri
 from urllib3.util import Timeout as Urllib3Timeout
 
 from adsense_checks.status import Status
@@ -79,10 +84,17 @@ def cookieless_session() -> requests.Session:
 
     One session per run saves a handshake per request, but a session is also a
     cookie jar: a cookie the home page set went out on robots.txt, on every
-    sitemap and on every sampled URL. A crawler arrives without one. Measured on
-    2026-10-19: a site whose sitemap URLs answer 403 to a visitor without the
-    home page's consent cookie read `0 of 2 sampled URL(s) answered 200` with a
-    session per request, and `2 of 2`, PASS, once the session was shared.
+    sitemap, on every sampled URL, and on every trust page and menu link of
+    check_completeness. A crawler arrives without one. Measured on 2026-10-19:
+    sitemap URLs answering 403 without the home page's consent cookie read
+    `2 of 2 sampled URL(s) answered 200`, PASS, on a shared session, and
+    consent-gated About and Contact pages read OK.
+
+    `fetch` stores a response's cookies in the session's own jar, hop by hop,
+    so the policy here also stops a cookie set by one redirect hop from
+    reaching the next. The crawler is the one caller that keeps them, on
+    purpose: it browses as a visitor with a session, and ADS-CRAWL-04 and -05
+    compare that with fresh, cookie-less requests.
     """
     session = requests.Session()
     session.cookies.set_policy(http.cookiejar.DefaultCookiePolicy(allowed_domains=[]))
@@ -452,33 +464,65 @@ def _read_body(resp: requests.Response, max_bytes: int) -> tuple[bytes, bool]:
     return body[:max_bytes], size > max_bytes
 
 
-def _drop_redirect_body(
-    resp: requests.Response, *args: object, **kwargs: object
+def _send_one(
+    sess: requests.Session, method: str, url: str, *, timeout: object, user_agent: str
 ) -> requests.Response:
-    """Close a redirect without reading its body. A `response` hook of `fetch`.
+    """One request, through the session's connection pool and its cookie jar.
 
-    With `allow_redirects=True`, requests reads the whole body of every 3xx
-    before following it — `Session.resolve_redirects` touches `resp.content` to
-    release the connection — so the ceiling `_read_body` puts on the final
-    response never reached a hop. Measured on 2026-10-19: a 301 carrying 200 MB
-    before a small page peaked at 609 MB. Nothing here reads a redirect's body,
-    so the hook marks it read and empty and closes the connection, and the bytes
-    stay on the server.
-
-    `_content` and `_content_consumed` are requests' own attributes: setting
-    them is how `resp.content` is made to return without touching the socket.
-    The test that pins this measures the memory, so a requests release that
-    reads the body some other way fails it rather than going unnoticed.
+    `Session.request` cannot be told to leave a response alone. Even with
+    `allow_redirects=False`, `Session.send` runs its redirect resolver to build
+    `response.next`, and the resolver reads the whole body of a 3xx first: a
+    301 carrying 40 MiB still peaked at 80 MiB. So the prepared request goes
+    straight to the session's adapter, with the session's headers, cookies,
+    proxies and TLS settings, and the response's cookies go into the session's
+    jar, where the jar's policy decides whether they stay (see
+    `cookieless_session`).
     """
-    if resp.is_redirect:
-        # Close first. `Response.close` closes the socket only while the body is
-        # unread, and otherwise hands the connection back to the pool — with the
-        # rest of the 3xx body still arriving on it, for the next hop to read as
-        # its response.
-        resp.close()
-        resp._content = b""
-        resp._content_consumed = True
+    request = requests.Request(method, url, headers={"User-Agent": user_agent})
+    prepared = sess.prepare_request(request)
+    settings = sess.merge_environment_settings(prepared.url, {}, True, None, None)
+    started = time.perf_counter()
+    resp = sess.get_adapter(prepared.url).send(prepared, timeout=timeout, **settings)
+    resp.elapsed = timedelta(seconds=time.perf_counter() - started)
+    extract_cookies_to_jar(sess.cookies, prepared, resp.raw)
     return resp
+
+
+def _send_following_redirects(
+    sess: requests.Session, method: str, url: str, *, timeout: object, user_agent: str
+) -> tuple[requests.Response, list[requests.Response]]:
+    """The final response for `url`, following redirects one hop at a time, and
+    the redirect responses on the way.
+
+    requests' own `allow_redirects=True` did two things this audit cannot have.
+    It read the whole body of every 3xx before following it, so the ceiling
+    `_read_body` puts on a body never reached a hop: a 301 carrying 200 MB
+    before a small page peaked at 486 MB, measured on 2026-10-19. And it kept
+    the cookies a hop set and sent them on the next one: a consent wall built
+    as a 302 with `Set-Cookie` let this fetch through where a crawler keeping
+    no cookies is turned away.
+
+    Each hop here is its own request (see `_send_one`), streamed and closed
+    unread, so no hop's body is read, and a hop's cookie reaches the next hop
+    only through the session's jar, which `cookieless_session` keeps empty. The
+    next URL
+    is the `Location` resolved against the hop's own URL, as requests resolves
+    it, and a chain longer than requests' own limit ends in `TooManyRedirects`,
+    as it did.
+    """
+    history: list[requests.Response] = []
+    while True:
+        resp = _send_one(sess, method, url, timeout=timeout, user_agent=user_agent)
+        if not resp.is_redirect:
+            return resp, history
+        resp.close()
+        history.append(resp)
+        if len(history) > DEFAULT_REDIRECT_LIMIT:
+            raise requests.TooManyRedirects(
+                f"Exceeded {DEFAULT_REDIRECT_LIMIT} redirects.", response=resp
+            )
+        location = sess.get_redirect_target(resp) or ""
+        url = urljoin(resp.url, requote_uri(location))
 
 
 def _decode(raw: bytes, content_type: str) -> tuple[str, str | None]:
@@ -604,7 +648,7 @@ def fetch(
         result.error = f"InvalidURL: {url!r} has no host this client can parse"
         return result
     _reject_invalid_timeout(timeout)
-    sess = session or requests.Session()
+    sess = session or cookieless_session()
     # HTTP methods are case-sensitive on the wire but the caller's spelling is not
     # a verdict: `method="head"` used to miss the fallback below and return the
     # server's 405 as the answer.
@@ -612,15 +656,10 @@ def fetch(
     result = Fetch(url=url)
     try:
         # Streamed, so the body is read by `_read_body` and only up to the
-        # ceiling a Google crawler reads.
-        resp = sess.request(
-            method,
-            url,
-            timeout=timeout,
-            allow_redirects=True,
-            headers={"User-Agent": user_agent},
-            stream=True,
-            hooks={"response": _drop_redirect_body},
+        # ceiling a Google crawler reads, and redirects are followed here, hop
+        # by hop, so no hop's body is read and no hop's cookie travels.
+        resp, history = _send_following_redirects(
+            sess, method, url, timeout=timeout, user_agent=user_agent
         )
         # Which method actually produced `resp`. Tracking it is the point: the
         # body guard below used to test the method REQUESTED, so the GET issued
@@ -630,26 +669,20 @@ def fetch(
         # The refused HEAD cost real time; dropping it understated the chain.
         refused_head = None
         if method == "HEAD" and resp.status_code >= 400:
-            refused_head = resp.elapsed
+            refused_head = sum((r.elapsed for r in (*history, resp)), timedelta())
             resp.close()
-            resp = sess.request(
-                "GET",
-                url,
-                timeout=timeout,
-                allow_redirects=True,
-                headers={"User-Agent": user_agent},
-                stream=True,
-                hooks={"response": _drop_redirect_body},
+            resp, history = _send_following_redirects(
+                sess, "GET", url, timeout=timeout, user_agent=user_agent
             )
             answered_with = "GET"
         result.final_url = resp.url
         result.status_code = resp.status_code
         result.headers = {k.lower(): v for k, v in resp.headers.items()}
-        result.redirect_chain = [(r.status_code, r.url) for r in resp.history]
+        result.redirect_chain = [(r.status_code, r.url) for r in history]
         # Every hop, guarded the same way. Guarding the history and not the final
         # response left an AttributeError path that is not a RequestException, so
         # it would escape `fetch` and break the "never raises" contract above.
-        timings = [r.elapsed for r in (*resp.history, resp)] + [refused_head]
+        timings = [r.elapsed for r in (*history, resp)] + [refused_head]
         result.elapsed_ms = sum(t.total_seconds() for t in timings if t is not None) * 1000
         # A real HEAD response has no body; guard so callers never see a stale
         # one. A GET that replaced a refused HEAD does have one, and keeping it

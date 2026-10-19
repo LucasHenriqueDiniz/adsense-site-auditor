@@ -79,6 +79,7 @@ from adsense_checks.crawl import (
 from adsense_checks.http import (
     DEFAULT_TIMEOUT,
     Fetch,
+    cookieless_session,
     decoding_loss,
     defrag_url,
     fetch,
@@ -1593,7 +1594,7 @@ def check_trust_pages(
     look at it.
     """
     base = as_base(base_url)
-    sess = session or requests.Session()
+    sess = session or cookieless_session()
     report = TrustPagesReport(base_url=base)
 
     home = home_page if home_page is not None else fetch(base, session=sess, timeout=timeout)
@@ -2664,7 +2665,7 @@ def count_broken_nav_links(
     defends against a site that lies on purpose.
     """
     base = as_base(base_url)
-    sess = session or requests.Session()
+    sess = session or cookieless_session()
     report = NavLinkReport(base_url=base)
 
     home = home_page if home_page is not None else fetch(base, session=sess, timeout=timeout)
@@ -2970,7 +2971,7 @@ def check_completeness(
     printed under a list of problems used to mean.
     """
     base = as_base(base_url)
-    sess = session or requests.Session()
+    sess = session or cookieless_session()
     report = CompletenessReport(base_url=base)
 
     home = fetch(base, session=sess, timeout=timeout)

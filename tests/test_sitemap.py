@@ -16,6 +16,7 @@ protocolo.
 import time
 
 import pytest
+import requests
 
 # parse_robots é reexportado por sitemap de propósito: o módulo já resolveu onde
 # o parser de robots mora, e o teste não deve duplicar essa decisão.
@@ -1086,17 +1087,23 @@ def test_o_limite_do_sitemap_e_o_do_protocolo():
     assert MAX_SITEMAP_BYTES == 52_428_800
 
 
-class _SemRede:
-    """Sessão que nunca vai à rede e anota o que pediram a ela."""
+class _SemRede(requests.Session):
+    """Sessão que nunca vai à rede e anota o que pediram a ela: o adapter dela
+    registra cada URL e recusa a conexão."""
 
     def __init__(self):
+        super().__init__()
         self.pedidas: list[str] = []
 
-    def request(self, method, url, **kwargs):
-        import requests
+    def get_adapter(self, url):
+        sessao = self
 
-        self.pedidas.append(url)
-        raise requests.ConnectionError("sem rede neste teste")
+        class _Recusa:
+            def send(self, request, **kwargs):
+                sessao.pedidas.append(request.url)
+                raise requests.ConnectionError("sem rede neste teste")
+
+        return _Recusa()
 
 
 def test_sitemap_declarado_em_endereco_interno_nao_e_buscado():

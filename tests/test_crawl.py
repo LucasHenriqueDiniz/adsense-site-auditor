@@ -6,9 +6,7 @@ o host, um documento grande demais para o corte de 5KB), e um mock reproduziria
 a suposição errada em vez do protocolo.
 """
 
-import inspect
 import time
-from http.server import BaseHTTPRequestHandler
 
 from adsense_checks import crawl as crawl_mod
 from adsense_checks.crawl import (
@@ -48,24 +46,6 @@ def rota_contada(contador, resposta):
         return resposta
 
     return rota
-
-
-def cookie_da_requisicao():
-    """O cabeçalho Cookie da requisição HTTP em curso.
-
-    O cabeçalho é o único lugar onde 'esta requisição carrega a sessão do crawl'
-    aparece de verdade. Ramificar por contador de chamadas provaria apenas que
-    saiu um segundo GET — que é justamente o que os testes de ADS-CRAWL-04/05 NÃO
-    podem se contentar em provar. A fixture `server` entrega ao route só o método
-    HTTP, então o handler que o chamou é procurado nos quadros acima.
-    """
-    frame = inspect.currentframe()
-    while frame is not None:
-        handler = frame.f_locals.get("self")
-        if isinstance(handler, BaseHTTPRequestHandler):
-            return handler.headers.get("Cookie", "")
-        frame = frame.f_back
-    raise AssertionError("handler HTTP não encontrado na pilha de chamadas")
 
 
 def varrer(base, **kwargs):
@@ -747,7 +727,7 @@ def test_cadeia_longa_de_redirect_e_sinalizada(server):
     assert check.status is Status.WARNING
 
 
-def test_redirect_que_depende_de_estado_de_sessao_e_detectado(server):
+def test_redirect_que_depende_de_estado_de_sessao_e_detectado(server, cookie_da_requisicao):
     """ADS-CRAWL-04 pede repetir SEM os cookies do crawl.
 
     A rota ramifica pelo cabeçalho Cookie, não por contador de chamadas: a home
@@ -988,7 +968,7 @@ def test_canonical_estavel_aprova_ADS_CRAWL_05(server):
     assert check.details["verified_two_sessions"] is True
 
 
-def test_canonical_que_muda_entre_sessoes_reprova(server):
+def test_canonical_que_muda_entre_sessoes_reprova(server, cookie_da_requisicao):
     """Duas visitas independentes devem receber a mesma URL canônica.
 
     O servidor carimba no canonical a sessão do visitante: quem chega com o

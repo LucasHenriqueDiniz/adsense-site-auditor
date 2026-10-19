@@ -747,6 +747,10 @@ def crawl(
     left to propagate, because the original's blanket `except Exception` turned a
     site that was entirely offline into a successful run with one "page".
     """
+    # A session that keeps cookies, unlike every other caller of `fetch`: the
+    # crawl browses as one visitor would, and `check_redirect_chain` and
+    # `check_session_urls` then repeat its requests without them. That
+    # comparison is how ADS-CRAWL-04 and -05 find what only works with a session.
     sess = session or requests.Session()
     result = CrawlResult(
         start_url=start_url, max_depth=max_depth, max_pages=max_pages, user_agent=user_agent

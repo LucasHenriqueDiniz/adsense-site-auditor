@@ -811,3 +811,38 @@ def test_corpo_de_redirect_nao_e_lido(server):
     assert r.final_url.endswith("/novo")
     assert r.redirect_chain and r.redirect_chain[0][0] == 301
     assert pico < 4 * 1024 * 1024, f"pico de {pico / 1024 / 1024:.1f} MiB"
+
+
+def test_cookie_de_um_salto_nao_vai_para_o_proximo(server, cookie_da_requisicao):
+    """Um muro de consentimento feito de redirect: o 302 grava o cookie e a
+    página só responde a quem chega com ele. O requests, seguindo o redirect,
+    guardava o cookie num pote próprio da requisição, fora do alcance da
+    política da sessão, e mandava no salto seguinte: o fetch passava, onde um
+    crawler sem cookie leva 403."""
+    base, routes = server
+    routes["/porta"] = (302, {"Location": "/dentro", "Set-Cookie": "consent=1; Path=/"}, "")
+
+    def dentro(metodo):
+        if "consent=1" in cookie_da_requisicao():
+            return (200, {"Content-Type": "text/html"}, "<html>dentro</html>")
+        return (403, {"Content-Type": "text/html"}, "<html>sem consentimento</html>")
+
+    routes["/dentro"] = dentro
+
+    r = fetch(base + "/porta")
+
+    assert r.redirect_chain and r.redirect_chain[0][0] == 302
+    assert r.status_code == 403
+
+
+def test_redirect_em_loop_termina_no_limite_do_requests(server):
+    """Os redirects agora são seguidos aqui, salto a salto. O limite continua o
+    do requests: 30 saltos, e o 31º vira TooManyRedirects."""
+    from requests.models import DEFAULT_REDIRECT_LIMIT
+
+    base, routes = server
+    routes["/volta"] = (302, {"Location": "/volta"}, "")
+    r = fetch(base + "/volta")
+    assert r.error is not None and r.error.startswith("TooManyRedirects")
+    saltos = [c for _m, c, _h in routes.received if c == "/volta"]
+    assert len(saltos) == DEFAULT_REDIRECT_LIMIT + 1

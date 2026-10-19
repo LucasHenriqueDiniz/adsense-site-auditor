@@ -4835,3 +4835,69 @@ def test_toda_tag_de_regiao_pode_definir_a_regiao_de_um_link():
     for tag in ("span", "p", "article", "table", "form", "dl", "figure"):
         html = f'<body><{tag} class="rodape"><a href="/x">x</a></{tag}></body>'
         assert regiao(html) == "body", tag
+
+
+def test_paginas_de_confianca_nao_recebem_o_cookie_da_home(server, cookie_da_requisicao):
+    """A sessão sem cookie cobria só as três CLIs; o check_completeness usava
+    uma sessão comum, e o cookie que a home grava ia para cada candidato a
+    página Sobre e Contato. Um site que barra com 403 quem chega sem o cookie
+    de consentimento saía about=OK e contact=OK."""
+    base, rotas = server
+    rodape = "<a href='/about'>Sobre</a> <a href='/contact'>Contato</a>"
+    rotas["/"] = (200, {"Content-Type": "text/html", "Set-Cookie": "consent=1; Path=/"},
+                  home(rodape=rodape))
+
+    def com_consentimento(pagina_html):
+        def rota(metodo):
+            if "consent=1" in cookie_da_requisicao():
+                return (200, {"Content-Type": "text/html"}, pagina_html)
+            return (403, {"Content-Type": "text/html"}, "<html>sem consentimento</html>")
+        return rota
+
+    rotas["/about"] = com_consentimento(pagina("Sobre"))
+    rotas["/contact"] = com_consentimento(contato())
+
+    relatorio = check_completeness(base)
+
+    assert relatorio.trust.pages["about"].status is not Status.OK
+    assert relatorio.trust.pages["contact"].status is not Status.OK
+
+
+def test_check_trust_pages_sozinho_tambem_nao_leva_cookie(server, cookie_da_requisicao):
+    """`check_trust_pages` chamado sem sessão monta a própria, e ela também não
+    guarda cookie."""
+    base, rotas = server
+    rotas["/"] = (200, {"Content-Type": "text/html", "Set-Cookie": "consent=1; Path=/"},
+                  home(rodape="<a href='/about'>Sobre</a>"))
+
+    def sobre(metodo):
+        if "consent=1" in cookie_da_requisicao():
+            return (200, {"Content-Type": "text/html"}, pagina("Sobre"))
+        return (403, {"Content-Type": "text/html"}, "<html>sem consentimento</html>")
+
+    rotas["/about"] = sobre
+
+    relatorio = check_trust_pages(base)
+
+    assert relatorio.pages["about"].status is not Status.OK
+
+
+def test_menu_seguido_sem_o_cookie_da_home(server, cookie_da_requisicao):
+    """`count_broken_nav_links` chamado sem sessão: um menu que só funciona com
+    o cookie da home é um menu quebrado para quem chega sem ele."""
+    base, rotas = server
+    menu = "".join(f"<a href='/p{i}'>p{i}</a>" for i in range(BROKEN_NAV_FAIL_THRESHOLD))
+    rotas["/"] = (200, {"Content-Type": "text/html", "Set-Cookie": "consent=1; Path=/"},
+                  f"<html><body><nav>{menu}</nav></body></html>")
+
+    def pagina_do_menu(metodo):
+        if "consent=1" in cookie_da_requisicao():
+            return (200, {"Content-Type": "text/html"}, pagina("Item"))
+        return (403, {"Content-Type": "text/html"}, "<html>sem consentimento</html>")
+
+    for i in range(BROKEN_NAV_FAIL_THRESHOLD):
+        rotas[f"/p{i}"] = pagina_do_menu
+
+    relatorio = count_broken_nav_links(base)
+
+    assert relatorio.count == BROKEN_NAV_FAIL_THRESHOLD
