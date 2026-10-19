@@ -156,3 +156,16 @@ def test_uma_sessao_para_todas_as_paginas(server, monkeypatch, capsys, sessoes):
 
     assert len(routes.received) == 3
     assert sessoes == {"abertas": 1, "fechadas": 1}
+
+
+def test_a_sessao_compartilhada_nao_carrega_cookie_entre_paginas(server, monkeypatch, capsys):
+    base, routes = server
+    cabecalho = {"Content-Type": "text/html; charset=utf-8"}
+    routes["/a"] = (200, {**cabecalho, "Set-Cookie": "consent=1; Path=/"}, pagina(320))
+    routes["/b"] = (200, cabecalho, pagina(320))
+
+    monkeypatch.setattr("sys.argv", ["analyze_text_depth.py", f"{base}/a", f"{base}/b"])
+    analyze_text_depth.main()
+
+    assert [c for _m, c, _h in routes.received] == ["/a", "/b"]
+    assert "Cookie" not in routes.received[1][2]

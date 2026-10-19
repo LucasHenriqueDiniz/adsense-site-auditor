@@ -230,3 +230,15 @@ def test_uma_sessao_para_todas_as_paginas(server, monkeypatch, capsys, sessoes):
 
     assert len(routes.received) == 3
     assert sessoes == {"abertas": 1, "fechadas": 1}
+
+
+def test_a_sessao_compartilhada_nao_carrega_cookie_entre_paginas(server, monkeypatch, capsys):
+    base, routes = server
+    routes["/a"] = (200, {**HTML, "Set-Cookie": "consent=1; Path=/"}, pagina(AFIACAO))
+    routes["/b"] = (200, HTML, pagina(SECAGEM))
+
+    monkeypatch.setattr("sys.argv", ["check_duplicates.py", f"{base}/a", f"{base}/b"])
+    check_duplicates.main()
+
+    assert [c for _m, c, _h in routes.received] == ["/a", "/b"]
+    assert "Cookie" not in routes.received[1][2]

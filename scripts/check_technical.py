@@ -28,6 +28,7 @@ from adsense_checks.http import (  # noqa: E402
     DEFAULT_TIMEOUT,
     MAX_WAIT_SECONDS,
     Fetch,
+    cookieless_session,
     fetch,
     join_url,
     split_url,
@@ -208,7 +209,7 @@ def main() -> int:
     # built its own and never closed it: a new TCP and TLS handshake to the same
     # host for the home page, robots.txt, every sitemap candidate, every child
     # and every sampled URL, up to some 37 of them.
-    with requests.Session() as session:
+    with cookieless_session() as session:
         return _report(args, session)
 
 

@@ -436,3 +436,26 @@ def test_o_sitemap_achado_e_nomeado_mesmo_com_a_amostra(server, monkeypatch, cap
 
     assert f"urlset at {base}/sitemap.xml, found via conventional path: 2 URL(s)" in saida
     assert "2 of 2 sampled URL(s) answered 200" in saida
+
+
+def test_a_sessao_compartilhada_nao_carrega_cookie_da_home(server, monkeypatch, capsys):
+    """Uma sessão por execução também era um pote de cookies: o cookie que a
+    home define ia no robots.txt, no sitemap e na amostra. Um site que barra
+    com 403 quem chega sem o cookie de consentimento — como chega um crawler —
+    saía `2 of 2 sampled URL(s) answered 200`, PASS."""
+    base, rotas = server
+    rotas["/"] = (200, {"Content-Type": "text/html", "Set-Cookie": "consent=1; Path=/"},
+                  "<html><body><p>oi</p></body></html>")
+    rotas["/robots.txt"] = (200, {"Content-Type": "text/plain"}, "User-agent: *\nAllow: /\n")
+    rotas["/sitemap.xml"] = (200, {"Content-Type": "application/xml"}, _sitemap(base))
+    for caminho in ("/a", "/b"):
+        rotas[caminho] = (403, {"Content-Type": "text/html"}, "<html>sem consentimento</html>")
+
+    monkeypatch.setattr("sys.argv", ["check_technical.py", base + "/"])
+    check_technical.main()
+    saida = capsys.readouterr().out
+
+    depois_da_home = rotas.received[1:]
+    assert depois_da_home
+    assert all("Cookie" not in headers for _m, _c, headers in depois_da_home)
+    assert "0 of 2 sampled URL(s) answered 200" in saida

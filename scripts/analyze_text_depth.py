@@ -5,10 +5,9 @@ import argparse
 import sys
 from pathlib import Path
 
-import requests
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from adsense_checks.http import cookieless_session  # noqa: E402
 from adsense_checks.report import Line, exit_code, render  # noqa: E402
 from adsense_checks.text import DEFAULT_MIN_WORDS, measure_url  # noqa: E402
 
@@ -39,7 +38,7 @@ def main() -> int:
 
     # One session for every page, closed at the end, instead of one per page
     # that nothing closed.
-    with requests.Session() as session:
+    with cookieless_session() as session:
         depths = [measure_url(url, min_words=args.min_words, session=session) for url in args.urls]
     lines = []
     for depth in depths:

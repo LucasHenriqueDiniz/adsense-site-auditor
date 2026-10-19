@@ -29,6 +29,7 @@ mojibake and stopped matching anything.
 from __future__ import annotations
 
 import codecs
+import http.cookiejar
 import re
 from dataclasses import dataclass, field
 from urllib.parse import SplitResult, urldefrag, urljoin, urlsplit
@@ -66,6 +67,21 @@ _UNPARSEABLE = SplitResult("", "", "", "", "")
 # home page linked an extensionless 300 MB download read all of it and peaked at
 # 1,382 MB of memory, measured the same day. 15 MB is taken as 15 MiB.
 MAX_BODY_BYTES = 15 * 1024 * 1024
+
+
+def cookieless_session() -> requests.Session:
+    """A session that reuses connections and keeps no cookies.
+
+    One session per run saves a handshake per request, but a session is also a
+    cookie jar: a cookie the home page set went out on robots.txt, on every
+    sitemap and on every sampled URL. A crawler arrives without one. Measured on
+    2026-10-19: a site whose sitemap URLs answer 403 to a visitor without the
+    home page's consent cookie read `0 of 2 sampled URL(s) answered 200` with a
+    session per request, and `2 of 2`, PASS, once the session was shared.
+    """
+    session = requests.Session()
+    session.cookies.set_policy(http.cookiejar.DefaultCookiePolicy(allowed_domains=[]))
+    return session
 
 
 def split_url(url: str) -> SplitResult:

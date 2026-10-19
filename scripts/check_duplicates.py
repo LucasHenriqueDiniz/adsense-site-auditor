@@ -5,11 +5,10 @@ import argparse
 import sys
 from pathlib import Path
 
-import requests
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from adsense_checks.duplicates import check_urls  # noqa: E402
+from adsense_checks.http import cookieless_session  # noqa: E402
 from adsense_checks.report import Line, exit_code, render  # noqa: E402
 from adsense_checks.status import Status  # noqa: E402
 
@@ -45,7 +44,7 @@ def main() -> int:
 
     # One session for every page, closed at the end, instead of one per page
     # that nothing closed.
-    with requests.Session() as session:
+    with cookieless_session() as session:
         result = check_urls(args.urls, threshold=args.threshold, session=session)
     findings = list(result.reasons)
     for group in result.groups:
