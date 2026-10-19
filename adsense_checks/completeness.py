@@ -387,6 +387,28 @@ class _PendingAnchor:
     region: Region
 
 
+# The words a class, id or role uses to name a page's furniture. They name it at
+# the start or the end of a word — `navbar`, `topnav`, `megamenu`, `menuitem`,
+# `pagefooter` — and never in the middle: "nav" is inside `unavailable`, and as
+# a substring it filed a shop's unavailable-product notice, links included,
+# under the navigation, measured on 2026-10-19. The same missing word boundary
+# `_compile` and `_account_patterns` were written to remove.
+_NAV_WORDS = ("nav", "menu")
+_FOOTER_WORDS = ("footer", "rodape")
+
+
+def _ident_words(value: str) -> list[str]:
+    """The words of a class, id or role value: split at anything that is not a
+    letter or digit and at a camelCase boundary, folded."""
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", value)
+    return [word for word in re.split(r"[^a-z0-9]+", fold(spaced)) if word]
+
+
+def _names_region(words: list[str], names: tuple[str, ...]) -> bool:
+    """Whether one of `words` starts or ends with one of `names`."""
+    return any(word.startswith(names) or word.endswith(names) for word in words)
+
+
 class _DocumentParser(HTMLParser):
     """Collects text blocks, links and forms in one pass over the markup."""
 
@@ -413,10 +435,11 @@ class _DocumentParser(HTMLParser):
             return "footer"
         if tag in ("nav", "header"):
             return "nav"
-        ident = fold(f"{attrs.get('class', '')} {attrs.get('id', '')} {attrs.get('role', '')}")
-        if "footer" in ident or "rodape" in ident:
+        ident = f"{attrs.get('class', '')} {attrs.get('id', '')} {attrs.get('role', '')}"
+        words = _ident_words(ident)
+        if _names_region(words, _FOOTER_WORDS):
             return "footer"
-        if "nav" in ident or "menu" in ident:
+        if _names_region(words, _NAV_WORDS):
             return "nav"
         return self._region()
 
