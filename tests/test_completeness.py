@@ -247,6 +247,67 @@ def test_mailto_e_perfil_social_sao_reconhecidos_pelo_href():
 # ---------------------------------------------------------------------------
 
 
+def test_botao_de_compartilhar_nao_e_canal_de_contato():
+    """Os botões de compartilhar que um tema imprime em toda página apontam para
+    hosts sociais, e qualquer link para host social contava como perfil. Uma
+    página de contato sem endereço e sem formulário saía `[PASS] ADS-AUTHOR-02`.
+    Um link de compartilhar nomeia a página compartilhada, não uma conta.
+
+    Um endpoint por membro de `_SHARE_PATH_SEGMENTS`, e o host sem caminho, que
+    é um link para a rede e não para ninguém."""
+    compartilhar = (
+        "https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Fsite.com%2F",
+        "https://www.facebook.com/sharer.php?u=x",
+        "https://www.facebook.com/share.php?u=x",
+        "https://www.facebook.com/dialog/share?href=x",
+        "https://twitter.com/intent/tweet?url=x",
+        "https://twitter.com/share?url=x",
+        "https://www.linkedin.com/sharing/share-offsite/?url=x",
+        "https://www.linkedin.com/shareArticle?url=x",
+        "https://www.linkedin.com/cws/share?url=x",
+        "https://wa.me/?text=x",
+        "https://twitter.com/",
+    )
+    for href in compartilhar:
+        assert not find_contact_channels(f'<a href="{href}">x</a>').any_found, href
+
+
+def test_perfil_de_verdade_continua_sendo_canal():
+    """O outro lado da regra: uma conta continua contando, inclusive o wa.me com
+    número, que abre uma conversa, e o perfil de Mastodon com `@`."""
+    for href in (
+        "https://www.facebook.com/minhapagina",
+        "https://wa.me/5511999999999",
+        "https://x.com/meublog",
+        "https://mastodon.social/@eu",
+        "https://t.me/meucanal",
+    ):
+        assert find_contact_channels(f'<a href="{href}">x</a>').socials == [href], href
+
+
+def test_endereco_de_exemplo_e_nome_de_imagem_nao_sao_caixa_postal():
+    """`_EMAIL_RE` aceita qualquer x@y.zz. Dois casos comuns não são caixa
+    postal de ninguém: o domínio que as RFCs 2606 e 6761 reservam para exemplo,
+    e o arquivo de imagem retina, cuja extensão nenhum TLD delegado usa."""
+    exemplos = (
+        "nome@example.com", "nome@example.net", "nome@example.org", "nome@sub.example.com",
+        "nome@site.example", "nome@site.test", "nome@site.invalid", "nome@maquina.localhost",
+    )
+    imagens = tuple(
+        f"logo@2x.{ext}"
+        for ext in ("png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "ico", "tif",
+                    "tiff", "heic")
+    )
+    for texto in exemplos + imagens:
+        canais = find_contact_channels(f"<p>Use algo como {texto} aqui.</p>")
+        assert not canais.any_found, texto
+    assert find_contact_channels("<a href='mailto:nome@example.com'>x</a>").mailto == []
+
+    # E o que é caixa postal continua: `.zip` e `.mov` são TLDs delegados.
+    for endereco in ("contato@meusite.com.br", "vendas@loja.zip", "eu@estudio.mov"):
+        assert find_contact_channels(f"<p>Escreva para {endereco}.</p>").emails == [endereco]
+
+
 def test_about_e_contact_inacessiveis_nunca_viram_aprovacao(server):
     """BLOCKER reproduzido: o ramo else gravava details='ERROR (503)' e não
     acrescentava issue nenhuma, então erro de rede/500/403 deixava o status em OK

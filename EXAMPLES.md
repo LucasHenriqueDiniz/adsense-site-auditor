@@ -140,7 +140,7 @@ Completeness — http://localhost:8765
          - no unfinished markers found
 [PASS] ADS-UX-05 about page
          - http://localhost:8765/about/ (75 words)
-         - contact: mailto:dana@example.invalid, email dana@example.invalid, profile https://github.com/example/fixture-tools
+         - contact: profile https://github.com/example/fixture-tools
 [WARN] ADS-UX-05 contact page
          - http://localhost:8765/contact/ (9 words)
          - unfinished markers: will be added
@@ -164,9 +164,10 @@ Exit status 1. Four things in that report are worth naming:
   aligned, working menus and is marked `judgement` — stamping it here would
   print a machine verdict on a requirement nobody looked at.
 - **`ADS-AUTHOR-02` has its own line**, separate from the trust pages, and it is
-  `MISS` here even though the About page lists a mailto: and a GitHub profile.
-  The check reads the Contact page, and this Contact page is a stub. See "known
-  gaps" below.
+  `MISS` here even though the About page links a GitHub profile. Its address,
+  under `.invalid`, is one RFC 6761 reserves for examples, so it is not counted
+  as anyone's mailbox. The check reads the Contact page, and this Contact page
+  is a stub. See "known gaps" below.
 - **`recorded findings` is a sixth line, not a sixth check.** Every message
   raised by a sub-report is collected there so the tally stays honest: six lines,
   six counted checks. Any finding at all produces this line, so a report with
@@ -329,7 +330,7 @@ measures one half of it.
 Behaviour observed in the runs above, recorded here because a reader will hit it:
 
 - `ADS-AUTHOR-02` reads only the Contact page. The About page in the fixture
-  carries a mailto: and a GitHub profile, and the line still reports `MISS`. The
+  links a GitHub profile, and the line still reports `MISS`. The
   requirement text says "About page, Contact page, or footer", so the check is
   narrower than the requirement it stamps.
 - `analyze_text_depth.py` reports `ERROR` — "main content not isolated" — for a

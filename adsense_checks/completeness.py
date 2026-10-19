@@ -725,6 +725,53 @@ _SOCIAL_HOSTS = (
 _SOCIAL_HOST_LABELS = frozenset({"mastodon"})
 
 
+# The first path segment of the share and compose endpoints on the hosts above:
+# Facebook's /sharer/sharer.php, /sharer.php, /share.php and /dialog/share,
+# X's and Bluesky's and Threads' /intent/..., LinkedIn's /sharing/share-offsite,
+# /shareArticle and /cws/share, Telegram's and Mastodon's /share. A link there
+# names the page being shared, not an account, and the share buttons a theme
+# prints on every page carried a contact page with no address and no form to
+# ADS-AUTHOR-02 PASS, measured on 2026-10-19.
+_SHARE_PATH_SEGMENTS = frozenset(
+    {"sharer", "sharer.php", "share", "share.php", "dialog", "intent", "sharing",
+     "sharearticle", "cws"}
+)
+
+
+def _names_an_account(path: str) -> bool:
+    """Whether a social-host path points at an account rather than a share box.
+
+    A bare host is not an account either: `https://twitter.com/` is a link to
+    the network, and `wa.me/?text=...` is WhatsApp's share link, where
+    `wa.me/5511999999999` opens a chat with a number.
+    """
+    first = path.strip("/").split("/", 1)[0].lower()
+    return bool(first) and first not in _SHARE_PATH_SEGMENTS
+
+
+# RFC 2606 and RFC 6761 reserve these for documentation and testing, so an
+# address under them is an example written in prose, never a mailbox.
+_RESERVED_DOMAINS = ("example.com", "example.net", "example.org")
+_RESERVED_TLDS = frozenset({"example", "test", "invalid", "localhost"})
+
+# Image file extensions, none of which is a delegated TLD (IANA's list, version
+# 2026101900, checked on 2026-10-19). `logo@2x.png` names a retina asset and
+# `_EMAIL_RE` read it as an address. `.zip` and `.mov` ARE delegated, so they
+# are not here.
+_IMAGE_SUFFIXES = frozenset(
+    {"png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "ico", "tif", "tiff", "heic"}
+)
+
+
+def _is_mailbox(address: str) -> bool:
+    """Whether an address `_EMAIL_RE` matched can be someone's mailbox."""
+    domain = address.rpartition("@")[2].lower().rstrip(".")
+    last = domain.rsplit(".", 1)[-1]
+    if last in _RESERVED_TLDS or last in _IMAGE_SUFFIXES:
+        return False
+    return not any(domain == d or domain.endswith("." + d) for d in _RESERVED_DOMAINS)
+
+
 def _is_social_host(host: str) -> bool:
     """Whether `host` is a known profile host, matched on label boundaries.
 
@@ -804,13 +851,14 @@ def channels_in(doc: Document) -> ContactChannels:
         lowered = fold(href)
         if lowered.startswith("mailto:"):
             address = href[len("mailto:") :].split("?")[0].strip()
-            if _EMAIL_RE.fullmatch(address):
+            if _EMAIL_RE.fullmatch(address) and _is_mailbox(address):
                 mailto.append(address)
             continue
-        if _is_social_host(fold(split_url(href).netloc)):
+        parsed = split_url(href)
+        if _is_social_host(fold(parsed.netloc)) and _names_an_account(parsed.path):
             socials.append(href)
     text = doc.text
-    emails = [m.group() for m in _EMAIL_RE.finditer(text)]
+    emails = [m.group() for m in _EMAIL_RE.finditer(text) if _is_mailbox(m.group())]
     obfuscated = [m.group() for m in _OBFUSCATED_RE.finditer(text)]
     forms = [f for f in doc.forms if f.is_contact_shaped]
     return ContactChannels(
