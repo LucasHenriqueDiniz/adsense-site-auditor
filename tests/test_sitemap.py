@@ -1188,3 +1188,42 @@ def test_nome_e_classificado_pelo_endereco_que_resolve(monkeypatch, resolve_para
 
     monkeypatch.setattr(socket, "getaddrinfo", resolver)
     assert private_address("https://sitemaps.exemplo.com.br/s.xml") is interno
+
+
+def test_sitemap_grande_demais_no_caminho_convencional_e_achado_e_nao_ilegivel(server, monkeypatch):
+    """Pelo caminho convencional, o sitemap grande demais passava pelo tratamento
+    de candidato que falhou: "was not readable", e depois "no sitemap found".
+    O arquivo está lá; o que o operador tem de fazer é dividi-lo."""
+    import adsense_checks.sitemap as sitemap
+
+    monkeypatch.setattr(sitemap, "MAX_SITEMAP_BYTES", 4096)
+    base, rotas = server
+    rotas["/sitemap.xml"] = (200, XML, urlset(*[f"{base}/p{i}" for i in range(500)]))
+
+    r = check_sitemap(base)
+
+    assert r.status is Status.FAIL
+    assert r.sitemap_url == f"{base}/sitemap.xml"
+    assert r.discovered_via == "conventional path"
+    assert any("has to be split" in nota for nota in r.reasons), r.reasons
+    assert not any("no sitemap found" in nota or "not readable" in nota for nota in r.reasons)
+
+
+def test_sitemap_utilizavel_depois_do_grande_demais_ainda_e_lido(server, monkeypatch):
+    """Um /sitemap.xml grande demais não esconde o /sitemap_index.xml válido
+    que vem depois: é esse que um crawler lê. O grande demais continua FAIL."""
+    import adsense_checks.sitemap as sitemap
+
+    monkeypatch.setattr(sitemap, "MAX_SITEMAP_BYTES", 4096)
+    base, rotas = server
+    rotas["/sitemap.xml"] = (200, XML, urlset(*[f"{base}/p{i}" for i in range(500)]))
+    rotas["/sitemap_index.xml"] = (200, XML, sitemapindex(f"{base}/posts.xml"))
+    rotas["/posts.xml"] = (200, XML, urlset(f"{base}/a", f"{base}/b"))
+
+    r = check_sitemap(base)
+
+    assert r.kind == "sitemapindex"
+    assert r.sitemap_url == f"{base}/sitemap_index.xml"
+    assert r.url_count == 2
+    assert r.status is Status.FAIL
+    assert any("has to be split" in nota for nota in r.reasons)

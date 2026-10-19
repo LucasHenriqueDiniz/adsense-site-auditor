@@ -95,6 +95,9 @@ class SitemapDoc:
     children: list[str] = field(default_factory=list)
     status: Status = Status.OK
     reason: str = ""
+    # The document went past `MAX_SITEMAP_BYTES` and was not parsed. It exists,
+    # and it is the site's sitemap; it is just one no crawler reads.
+    oversized: bool = False
 
     @property
     def is_sitemap(self) -> bool:
@@ -408,6 +411,7 @@ def _fetch_doc(
             url=got.final_url or url,
             status=Status.FAIL,
             reason=f"larger than the {MAX_SITEMAP_BYTES:,} bytes the sitemap protocol allows",
+            oversized=True,
         )
         return doc, got
 
@@ -523,6 +527,21 @@ def check_sitemap(
         doc, got = _fetch_doc(candidate, session, timeout)
         if _requested(got):
             result.documents_fetched += 1
+        if doc.oversized:
+            # Found, and too large to be read. Folded with the failed candidates
+            # it was "not readable" at a conventional path, and the run then
+            # said "no sitemap found" about a file that is there: the operator
+            # went looking for a missing sitemap instead of splitting this one.
+            # The search goes on, because a usable sitemap at the next candidate
+            # is still the one a crawler reads; this one stays a FAIL either way.
+            result.sitemap_url = candidate
+            result.discovered_via = "robots.txt" if candidate in declared else "conventional path"
+            result.status = escalate(result.status, doc.status)
+            result.note(
+                f"sitemap {candidate} is {doc.reason}; a crawler following the protocol"
+                " does not read it, so it has to be split"
+            )
+            continue
         if not doc.is_sitemap:
             # Keep going: a 404 at /sitemap.xml says nothing about /sitemap_index.xml.
             # Going on is not the same as forgetting, which is what _fold does.
@@ -554,7 +573,7 @@ def check_sitemap(
         _report_out_of_scope(result)
         break
 
-    if not result.found:
+    if not result.found and result.sitemap_url is None:
         # Nothing was parseable. Escalate over what the candidates actually said
         # so a 500 or a malformed body is not summarised as a plain absence.
         for _url, status, _reason in result.attempts:
